@@ -1,17 +1,28 @@
 """
 Bordo API 라우팅.
 
-1차 범위는 **홈 화면 + 플로우 화면**입니다. 채팅·태스크·캘린더·MCP·동기화는
-2차로 미뤄져 있어 아직 라우팅에 없습니다.
+담당이 갈려 있어 구역을 주석으로 나눠 뒀습니다. 남의 구역에 경로를 끼워 넣으면
+머지에서 부딪힙니다 — 자기 구역 끝에 붙이십시오.
+
+* **D(API 서버)** — 채팅 · 현재 상태 · 태스크 · 캘린더 · 문서
+* **A(Discord)** — `/internal/v1/...`
+* **B(AI · 실시간)** — Agent Run 스트림, `/ws/projects/{id}`
+
+MCP(`/mcp`)와 동기화는 2차라 아직 없습니다.
 """
 from django.contrib import admin
 from django.urls import path
 
 from apps.accounts import views as accounts
 from apps.agent import views as agent
+from apps.calendars import views as calendars
+from apps.chat import views as chat
+from apps.documents import views as documents
 from apps.home import views as home
 from apps.meetings import views as meetings
 from apps.orgs import views as orgs
+from apps.states import views as states
+from apps.tasks import views as tasks
 
 API = "api/v1"
 
@@ -81,4 +92,65 @@ urlpatterns = [
          agent.conversation_messages),
     path(f"{API}/me/pending-questions", agent.my_pending_questions),
     path(f"{API}/pending-questions/<uuid:question_id>/answer", agent.answer_question),
+
+    # ── 04. 문서
+    path(f"{API}/projects/<uuid:project_id>/documents", documents.documents),
+    path(f"{API}/documents/<uuid:document_id>", documents.document_detail),
+    path(f"{API}/documents/<uuid:document_id>/versions", documents.versions),
+    path(f"{API}/documents/<uuid:document_id>/versions/<int:version>",
+         documents.version_detail),
+    path(f"{API}/documents/<uuid:document_id>/restore", documents.restore),
+    path(f"{API}/documents/<uuid:document_id>/restore-deleted",
+         documents.restore_deleted),
+
+    # ── 05. 현재 상태 (work · plan · thought)
+    path(f"{API}/projects/<uuid:project_id>/work-items", states.work_items),
+    path(f"{API}/work-items/<uuid:work_item_id>", states.work_item_detail),
+    path(f"{API}/projects/<uuid:project_id>/plans", states.plans),
+    path(f"{API}/plans/<uuid:plan_id>", states.plan_detail),
+    path(f"{API}/projects/<uuid:project_id>/thoughts", states.thoughts),
+    path(f"{API}/thoughts/<uuid:thought_id>", states.thought_detail),
+    path(f"{API}/projects/<uuid:project_id>/activity", states.activity),
+
+    # ── 07. 태스크 — status 는 PATCH 가 아니라 전용 엔드포인트로만 움직입니다
+    path(f"{API}/projects/<uuid:project_id>/tasks", tasks.tasks),
+    path(f"{API}/tasks/<uuid:task_id>", tasks.task_detail),
+    path(f"{API}/tasks/<uuid:task_id>/approve", tasks.approve),
+    path(f"{API}/tasks/<uuid:task_id>/reject", tasks.reject),
+    path(f"{API}/tasks/<uuid:task_id>/start", tasks.start),
+    path(f"{API}/tasks/<uuid:task_id>/block", tasks.block),
+    path(f"{API}/tasks/<uuid:task_id>/complete", tasks.complete),
+    path(f"{API}/tasks/<uuid:task_id>/assign", tasks.assign),
+    path(f"{API}/me/tasks", tasks.my_tasks),
+
+    # ── 08. 캘린더
+    path(f"{API}/projects/<uuid:project_id>/calendar/events", calendars.events),
+    path(f"{API}/calendar/events/<uuid:event_id>", calendars.event_detail),
+    path(f"{API}/calendar/events/<uuid:event_id>/confirm", calendars.confirm),
+    path(f"{API}/calendar/events/<uuid:event_id>/cancel", calendars.cancel),
+    path(f"{API}/calendar/events/<uuid:event_id>/notify-discord",
+         calendars.notify_discord),
+    path(f"{API}/outbox-events/<uuid:outbox_id>", calendars.outbox_detail),
+    path(f"{API}/outbox-events/<uuid:outbox_id>/retry", calendars.outbox_retry),
+
+    # ── 16. 채팅
+    path(f"{API}/chat/sidebar", chat.sidebar),
+    path(f"{API}/chat/important", chat.important),
+    path(f"{API}/chat/candidates", chat.candidates),
+    path(f"{API}/chat/rooms", chat.rooms),
+    path(f"{API}/chat/rooms/<uuid:room_id>", chat.room_detail),
+    path(f"{API}/chat/rooms/<uuid:room_id>/members", chat.room_members),
+    path(f"{API}/chat/rooms/<uuid:room_id>/members/<uuid:user_id>",
+         chat.room_member_detail),
+    path(f"{API}/chat/rooms/<uuid:room_id>/messages", chat.messages),
+    path(f"{API}/chat/rooms/<uuid:room_id>/attachments", chat.attachments),
+    path(f"{API}/chat/rooms/<uuid:room_id>/read", chat.read),
+    path(f"{API}/chat/rooms/<uuid:room_id>/active-dates", chat.active_dates),
+    path(f"{API}/chat/rooms/<uuid:room_id>/daily-summary", chat.daily_summary),
+    path(f"{API}/chat/rooms/<uuid:room_id>/search", chat.search),
+    path(f"{API}/chat/messages/<uuid:message_id>", chat.message_detail),
+    path(f"{API}/chat/messages/<uuid:message_id>/important", chat.message_important),
+    path(f"{API}/chat/messages/<uuid:message_id>/important/confirm",
+         chat.message_important_confirm),
+    path(f"{API}/chat/attachments/<uuid:attachment_id>", chat.attachment_detail),
 ]
