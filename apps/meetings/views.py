@@ -1,0 +1,351 @@
+"""
+회의 · 플로우 화면.
+
+이 화면이 서비스의 차별점이라 조회 경로를 특히 얕게 잡았습니다.
+플로우 그래프는 `flow_edge` 한 테이블만 읽으면 그려집니다 — 노드 이름과
+방향 표기가 행 안에 들어 있어 사용자 테이블을 조인하지 않습니다.
+"""
+from datetime import timedelta
+
+from django.db import transaction
+from django.utils import timezone
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+
+from apps.agent.models import PendingQuestion
+from apps.common.permissions import meeting_access, project_membership
+from apps.common.views import listing
+from config.errors import BordoError
+
+from .models import (Agenda, AiBriefing, Attendance, FlowCategory, FlowContentType,
+                     FlowEdge, FlowFilterPreset, Meeting, MeetingDocumentRef,
+                     MeetingParticipant, MeetingStatus, MeetingSummary, Surface,
+                     Utterance)
+from .serializers import (AgendaSerializer, AiBriefingSerializer, DocumentRefSerializer,
+                          FlowEdgeSerializer, FlowFilterPresetSerializer,
+                          MeetingSerializer, MeetingSummarySerializer, UtteranceSerializer)
+
+WORK_TYPES = {FlowContentType.DOCUMENT, FlowContentType.PLAN}
+MEETING_TYPES = {FlowContentType.OPINION, FlowContentType.REQUEST, FlowContentType.REVISION}
+
+
+# ─────────────────────────────────────────── 회의
+@api_view(["GET", "POST"])
+def meetings(request, project_id):
+    project, _ = project_membership(request.user, project_id)
+    if request.method == "GET":
+        rows = (Meeting.objects.filter(project=project)
+                .prefetch_related("participants")[:50])
+        return Response(listing(MeetingSerializer(rows, many=True).data))
+
+    title = (request.data.get("title") or "").strip()
+    scheduled_at = request.data.get("scheduled_at")
+    if not title or not scheduled_at:
+        raise BordoError("VALIDATION_ERROR", "title 과 scheduled_at 은 필수입니다.")
+    with transaction.atomic():
+        meeting = Meeting.objects.create(
+            project=project, project_name=project.name, title=title,
+            scheduled_at=scheduled_at,
+            duration_min=int(request.data.get("duration_min", 60)),
+            discord_channel_id=request.data.get("discord_channel_id", "") or "",
+            created_by=request.user,
+        )
+        from apps.orgs.models import ProjectMember
+        members = (ProjectMember.objects.filter(project=project)
+                   .select_related("user"))
+        MeetingParticipant.objects.bulk_create([
+            MeetingParticipant(meeting=meeting, user=m.user, user_name=m.user.name)
+            for m in members])
+        MeetingSummary.objects.create(meeting=meeting)
+    meeting.refresh_from_db()
+    return Response(MeetingSerializer(meeting).data, status=201)
+
+
+@api_view(["GET", "PATCH", "DELETE"])
+def meeting_detail(request, meeting_id):
+    meeting = meeting_access(request.user, meeting_id)
+
+    if request.method == "GET":
+        return Response(MeetingSerializer(meeting).data)
+
+    if request.method == "PATCH":
+        if meeting.is_locked:
+            raise BordoError("MEETING_LOCKED",
+                             details={"status": meeting.status})
+        want = request.headers.get("If-Match")
+        if want and int(want.strip('"')) != meeting.version:
+            raise BordoError("REFERENCED_BY_OTHERS", "그사이 다른 사람이 수정했습니다.",
+                             details={"current_version": meeting.version}, status=409)
+        for f in ("title", "scheduled_at", "duration_min", "discord_channel_id"):
+            if f in request.data:
+                setattr(meeting, f, request.data[f])
+        meeting.version += 1
+        meeting.save()
+        return Response(MeetingSerializer(meeting).data)
+
+    if meeting.status == MeetingStatus.ACTIVE:
+        raise BordoError("MEETING_NOT_ACTIVE",
+                         "진행 중인 회의는 삭제할 수 없습니다. 먼저 종료하십시오.", status=409)
+    deleted_at = meeting.soft_delete()
+    return Response({"id": str(meeting.id), "deleted_at": deleted_at,
+                     "restorable_until": timezone.now() + timedelta(days=30)})
+
+
+@api_view(["POST"])
+def delegate(request, meeting_id):
+    """
+    대리 참석 활성화 / 해제.
+
+    토글이라 PATCH 로 두는 편이 맞지만, 활성화 시점에 대리인 설정 스냅샷을 남기고
+    참석 상태를 함께 바꾸는 부수효과가 있어 POST 로 둡니다.
+    """
+    meeting = meeting_access(request.user, meeting_id)
+    p = MeetingParticipant.objects.filter(meeting=meeting, user=request.user).first()
+    if not p:
+        raise BordoError("STATE_NOT_FOUND", "이 회의의 참석자가 아닙니다.")
+    enabled = bool(request.data.get("enabled", True))
+    p.delegated = enabled
+    p.delegate_prompt = request.data.get("prompt", "") or ""
+    p.attendance = Attendance.DELEGATED if enabled else Attendance.PENDING
+    p.save(update_fields=["delegated", "delegate_prompt", "attendance", "updated_at"])
+    return Response({"meeting_id": str(meeting.id), "user_id": str(request.user.id),
+                     "delegated": p.delegated, "attendance": p.attendance,
+                     "prompt": p.delegate_prompt})
+
+
+# ─────────────────────────────────────────── 플로우
+def _resolve_category(raw):
+    cat = (raw or FlowCategory.MEETING).upper()
+    if cat not in FlowCategory.values:
+        raise BordoError("VALIDATION_ERROR", "category 는 WORK 또는 MEETING 입니다.")
+    return cat
+
+
+def _filtered_edges(meeting, params):
+    """
+    필터는 전부 DB 에서 겁니다.
+
+    플로우가 이 서비스의 차별점인데 필터를 파이썬에서 돌리면 회의가 길어질수록
+    화면이 느려집니다.
+    """
+    cat = _resolve_category(params.get("category"))
+    qs = FlowEdge.objects.filter(meeting=meeting, category=cat)
+
+    types = params.get("content_types")
+    if types:
+        wanted = [t.strip().upper() for t in types.split(",") if t.strip()]
+        allowed = WORK_TYPES if cat == FlowCategory.WORK else MEETING_TYPES
+        bad = [t for t in wanted if t not in {a.value for a in allowed}]
+        if bad:
+            raise BordoError("VALIDATION_ERROR",
+                             f"{cat} 모드에서 쓸 수 없는 content_type 입니다.",
+                             details={"invalid": bad,
+                                      "allowed": [a.value for a in allowed]})
+        qs = qs.filter(content_type__in=wanted)
+
+    surfaces = params.get("surfaces")
+    if surfaces:
+        qs = qs.filter(surface__in=[s.strip().upper() for s in surfaces.split(",")])
+
+    since = params.get("since_minutes")
+    if since:
+        qs = qs.filter(occurred_at__gte=timezone.now() - timedelta(minutes=int(since)))
+
+    people = params.get("participant_ids")
+    if people:
+        wanted = {p.strip() for p in people.split(",") if p.strip()}
+        # participant_ids 가 JSON 배열이라 DB 마다 연산자가 달라, 여기서만 파이썬으로 거릅니다.
+        qs = [e for e in qs if wanted & set(e.participant_ids or [])]
+    return cat, qs
+
+
+@api_view(["GET"])
+def flow(request, meeting_id):
+    meeting = meeting_access(request.user, meeting_id)
+    cat, edges = _filtered_edges(meeting, request.query_params)
+    edges = list(edges)
+
+    nodes, seen = [], set()
+    for e in edges:
+        for n in [e.from_node] + list(e.to_nodes or []):
+            if n and n.get("id") not in seen:
+                seen.add(n.get("id"))
+                nodes.append(n)
+
+    participants = list(meeting.participants.select_related("user"))
+    return Response({
+        "meeting_id": str(meeting.id),
+        "meeting_label": f"{meeting.scheduled_at:%-m/%-d} {meeting.title}",
+        "category": cat,
+        "nodes": nodes,
+        "edges": FlowEdgeSerializer(edges, many=True).data,
+        "filter_options": {
+            # 실제로 존재하는 값만 내려줍니다. 전체 목록을 주면 체크해도 안 걸리는
+            # 항목이 생겨 사용자가 헷갈립니다.
+            "participants": [{"id": str(p.user_id), "label": p.user_name, "kind": "USER"}
+                             for p in participants],
+            "content_types": sorted({e.content_type for e in edges}),
+            "surfaces": sorted({e.surface for e in edges}),
+        },
+    })
+
+
+@api_view(["GET"])
+def indexes(request, meeting_id):
+    """좌측 인덱스. 작업 모드는 문서, 회의 모드는 안건."""
+    meeting = meeting_access(request.user, meeting_id)
+    cat = _resolve_category(request.query_params.get("category"))
+    edges = FlowEdge.objects.filter(meeting=meeting, category=cat)
+
+    if cat == FlowCategory.MEETING:
+        edge_map = {}
+        for e in edges:
+            if e.agenda_id:
+                edge_map.setdefault(e.agenda_id, []).append(e.id)
+        rows = Agenda.objects.filter(meeting=meeting)
+        return Response(listing([{
+            "id": str(a.id), "label": a.title, "kind": "AGENDA",
+            "related_edge_ids": [str(i) for i in edge_map.get(a.id, [])],
+        } for a in rows]))
+
+    edge_map = {}
+    for e in edges:
+        if e.document_id:
+            edge_map.setdefault(e.document_id, []).append(e.id)
+    docs = MeetingDocumentRef.objects.filter(id__in=list(edge_map.keys()))
+    return Response(listing([{
+        "id": str(d.id), "label": d.title, "kind": "DOCUMENT",
+        "related_edge_ids": [str(i) for i in edge_map.get(d.id, [])],
+    } for d in docs]))
+
+
+@api_view(["GET"])
+def summary_table(request, meeting_id):
+    meeting = meeting_access(request.user, meeting_id)
+    summary, _ = MeetingSummary.objects.get_or_create(meeting=meeting)
+    return Response(MeetingSummarySerializer(summary).data)
+
+
+@api_view(["GET"])
+def context(request, meeting_id):
+    meeting = meeting_access(request.user, meeting_id)
+    rows = Utterance.objects.filter(meeting=meeting)
+    return Response(listing(UtteranceSerializer(rows, many=True).data))
+
+
+@api_view(["GET"])
+def agendas(request, meeting_id):
+    meeting = meeting_access(request.user, meeting_id)
+    edge_map = {}
+    for e in FlowEdge.objects.filter(meeting=meeting).exclude(agenda_id=None):
+        edge_map.setdefault(e.agenda_id, []).append(e.id)
+    rows = Agenda.objects.filter(meeting=meeting)
+    return Response(listing(
+        AgendaSerializer(rows, many=True, context={"edge_map": edge_map}).data))
+
+
+@api_view(["GET", "PATCH", "DELETE"])
+def agenda_detail(request, meeting_id, agenda_id):
+    meeting = meeting_access(request.user, meeting_id)
+    agenda = Agenda.objects.filter(meeting=meeting, pk=agenda_id).first()
+    if not agenda:
+        raise BordoError("STATE_NOT_FOUND", "안건을 찾을 수 없습니다.")
+    edge_ids = list(FlowEdge.objects.filter(agenda=agenda).values_list("id", flat=True))
+
+    if request.method == "GET":
+        return Response(AgendaSerializer(
+            agenda, context={"edge_map": {agenda.id: edge_ids}}).data)
+
+    if request.method == "PATCH":
+        for f in ("title", "sort_order", "category", "status", "content"):
+            if f in request.data:
+                setattr(agenda, f, request.data[f])
+        agenda.save()
+        return Response(AgendaSerializer(
+            agenda, context={"edge_map": {agenda.id: edge_ids}}).data)
+
+    if meeting.is_locked:
+        raise BordoError("MEETING_LOCKED", "시작된 회의의 안건은 지울 수 없습니다.")
+    if edge_ids:
+        raise BordoError("REFERENCED_BY_OTHERS",
+                         "이 안건으로 오간 논의가 있어 지울 수 없습니다.",
+                         details={"edge_ids": [str(i) for i in edge_ids]})
+    agenda.delete()
+    return Response(status=204)
+
+
+@api_view(["GET"])
+def flow_edge_detail(request, edge_id):
+    """화살표를 클릭했을 때 우측에 뜨는 내용."""
+    edge = (FlowEdge.objects.filter(pk=edge_id)
+            .select_related("meeting", "agenda", "document").first())
+    if not edge:
+        raise BordoError("STATE_NOT_FOUND", "화살표를 찾을 수 없습니다.")
+    meeting_access(request.user, edge.meeting_id)
+
+    body = {"edge": FlowEdgeSerializer(edge).data,
+            "delivery_context": [], "document": None, "agenda": None}
+    if edge.document:
+        body["document"] = DocumentRefSerializer(edge.document).data
+        body["delivery_context"] = edge.document.delivery_context
+    if edge.agenda:
+        body["agenda"] = AgendaSerializer(
+            edge.agenda, context={"edge_map": {edge.agenda_id: [edge.id]}}).data
+    return Response(body)
+
+
+# ─────────────────────────────────────────── AI 브리핑
+@api_view(["GET"])
+def ai_briefing(request, meeting_id):
+    meeting = meeting_access(request.user, meeting_id)
+    briefing = AiBriefing.objects.filter(meeting=meeting, user=request.user).first()
+    if not briefing:
+        raise BordoError("STATE_NOT_FOUND", "아직 브리핑이 준비되지 않았습니다.")
+    questions = PendingQuestion.objects.filter(meeting=meeting, target_user=request.user,
+                                               answered_at__isnull=True)
+    needs = [{"question_id": str(q.id), "asker_name": q.asker_name, "title": q.title,
+              "body": q.body, "asked_at": q.created_at,
+              "chat_room_id": str(q.chat_room_id) if q.chat_room_id else None}
+             for q in questions]
+    if briefing.read_at is None:
+        briefing.read_at = timezone.now()
+        briefing.save(update_fields=["read_at"])
+    return Response(AiBriefingSerializer(
+        briefing, context={"needs_answer": needs}).data)
+
+
+@api_view(["GET"])
+def meeting_pending_questions(request, meeting_id):
+    meeting = meeting_access(request.user, meeting_id)
+    rows = PendingQuestion.objects.filter(meeting=meeting, target_user=request.user,
+                                          answered_at__isnull=True)
+    return Response(listing([{
+        "question_id": str(q.id), "asker_name": q.asker_name, "title": q.title,
+        "body": q.body, "asked_at": q.created_at,
+        "chat_room_id": str(q.chat_room_id) if q.chat_room_id else None} for q in rows]))
+
+
+# ─────────────────────────────────────────── 필터 프리셋
+@api_view(["GET", "POST"])
+def flow_filters(request):
+    if request.method == "GET":
+        rows = FlowFilterPreset.objects.filter(user=request.user)
+        return Response(listing(FlowFilterPresetSerializer(rows, many=True).data))
+    s = FlowFilterPresetSerializer(data=request.data)
+    s.is_valid(raise_exception=True)
+    s.save(user=request.user)
+    return Response(s.data, status=201)
+
+
+@api_view(["PATCH", "DELETE"])
+def flow_filter_detail(request, preset_id):
+    preset = FlowFilterPreset.objects.filter(pk=preset_id, user=request.user).first()
+    if not preset:
+        raise BordoError("STATE_NOT_FOUND", "프리셋을 찾을 수 없습니다.")
+    if request.method == "DELETE":
+        preset.delete()
+        return Response(status=204)
+    s = FlowFilterPresetSerializer(preset, data=request.data, partial=True)
+    s.is_valid(raise_exception=True)
+    s.save()
+    return Response(s.data)
