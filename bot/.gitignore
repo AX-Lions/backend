@@ -1,0 +1,18 @@
+# Environment variables
+.env
+
+# Logs
+*.log
+
+# Excluded main file
+main3.py
+CLAUDE.md
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Local Claude Code settings
+.claude/settings.local.json
