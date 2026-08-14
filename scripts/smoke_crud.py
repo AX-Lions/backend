@@ -10,12 +10,13 @@ D 담당(채팅 · 현재 상태 · 태스크 · 캘린더 · 문서) 스모크 
     python scripts/smoke_crud.py
 """
 import json
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 
-BASE = "http://127.0.0.1:8000/api/v1"
+BASE = os.environ.get("BORDO_SMOKE_BASE", "http://127.0.0.1:8000") + "/api/v1"
 TOKEN = None
 FAIL = []
 COUNT = 0

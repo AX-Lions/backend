@@ -12,7 +12,24 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-insecure-key-change-me")
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
-ALLOWED_HOSTS = ["*"]
+
+
+def _csv(name: str) -> list[str]:
+    return [v.strip() for v in os.environ.get(name, "").split(",") if v.strip()]
+
+
+# 개발에서는 그대로 열어 두고, 배포에서는 DJANGO_ALLOWED_HOSTS 로 좁힙니다.
+# 도메인이 붙은 뒤에도 "*" 로 두면 Host 헤더를 위조한 요청이 그대로 들어옵니다.
+# 배포에서 비어 있으면 Django 가 모든 요청을 400 으로 막습니다 — 조용히 열려 있는
+# 것보다 눈에 띄게 막히는 편이 낫습니다.
+ALLOWED_HOSTS = _csv("DJANGO_ALLOWED_HOSTS") or (["*"] if DEBUG else [])
+
+# Cloudflare Tunnel 뒤에 있으면 Django 는 요청을 http 로 봅니다. 이 값이 없으면
+# 리다이렉트가 http 로 나가고 admin 로그인이 순환합니다.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+# admin·세션 폼은 Origin 을 대조합니다. 터널 도메인을 넣지 않으면 로그인이 403 입니다.
+CSRF_TRUSTED_ORIGINS = _csv("DJANGO_CSRF_TRUSTED_ORIGINS")
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -100,6 +117,9 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+# collectstatic 이 모아 둘 위치. 없으면 배포에서 collectstatic 이 ImproperlyConfigured 로
+# 죽고, 넘어가더라도 admin 이 CSS 없이 뜹니다. 개발에서는 쓰이지 않습니다.
+STATIC_ROOT = Path(os.environ.get("DJANGO_STATIC_ROOT") or BASE_DIR / "staticfiles")
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # ─────────────────────────────────────────── DRF
@@ -122,7 +142,11 @@ SIMPLE_JWT = {
     "USER_ID_CLAIM": "user_id",
 }
 
-CORS_ALLOW_ALL_ORIGINS = True
+# 프론트가 별도 저장소·별도 오리진이라 CORS 가 필요합니다.
+# 개발에서는 열어 두고, 배포에서는 DJANGO_CORS_ALLOWED_ORIGINS 로 프론트 주소만 허용합니다.
+# 목록을 넣으면 ALLOW_ALL 은 자동으로 꺼집니다.
+CORS_ALLOWED_ORIGINS = _csv("DJANGO_CORS_ALLOWED_ORIGINS")
+CORS_ALLOW_ALL_ORIGINS = not CORS_ALLOWED_ORIGINS
 CORS_ALLOW_HEADERS = list(__import__("corsheaders.defaults", fromlist=["default_headers"]).default_headers) + [
     "idempotency-key", "x-service-token",
 ]

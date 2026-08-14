@@ -1,6 +1,7 @@
 import json, urllib.request, urllib.error
 
-BASE = "http://127.0.0.1:8000/api/v1"
+import os
+BASE = os.environ.get("BORDO_SMOKE_BASE", "http://127.0.0.1:8000") + "/api/v1"
 TOKEN = None
 FAIL = []
 

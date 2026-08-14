@@ -33,7 +33,7 @@ services:
       - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
 
     volumes:
-      # SD카드가 아니라 전용 볼륨을 가리킵니다. 서버에서는 /srv/bordo/data 입니다.
+      # SD카드가 아니라 전용 볼륨을 가리킵니다. 서버에서는 /home/zanviq/bordo/data 입니다.
       - ${BORDO_DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
 
     healthcheck:
