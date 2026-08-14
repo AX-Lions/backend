@@ -3,8 +3,8 @@ djangorestframework>=3.15
 djangorestframework-simplejwt>=5.3
 django-cors-headers>=4.4
 
-# PostgreSQL 로 갈 때 (운영 권장)
-# psycopg[binary]>=3.2
+# PostgreSQL — 운영 전제. DATABASE_URL 이 있으면 이 드라이버를 씁니다.
+psycopg[binary]>=3.2
 
 # 2차 범위 — 회의 요약·Outbox 재시도·Discord 봇 워커
 # celery>=5.4
