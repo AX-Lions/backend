@@ -27,11 +27,24 @@ class FlowCategory(models.TextChoices):
 
 
 class FlowContentType(models.TextChoices):
+    """
+    화면 좌측 `필터링 > 내용` 체크박스와 1:1 입니다.
+
+    회의 모드가 6종인 이유 — 와이어프레임 필터에 칸이 6개이고 화살표 뱃지에
+    `일정` 이 실제로 붙어 있습니다. 3종으로 두면 회의에서 오간 일정 조정과
+    결론이 플로우에 표현될 자리가 없습니다.
+
+    `REVISION`(수정사항) → `CHANGE`(변동사항) 로 바꾼 건 화면 라벨을 따른 것입니다.
+    중앙 요약표 헤더도 `변동 사항` 입니다.
+    """
     DOCUMENT = "DOCUMENT", "문서"
     PLAN = "PLAN", "계획"
     OPINION = "OPINION", "의견"
     REQUEST = "REQUEST", "요청사항"
-    REVISION = "REVISION", "수정사항"
+    CHANGE = "CHANGE", "변동사항"
+    SCHEDULE = "SCHEDULE", "일정"
+    CONCLUSION = "CONCLUSION", "결론"
+    ETC = "ETC", "기타"
 
 
 class Surface(models.TextChoices):

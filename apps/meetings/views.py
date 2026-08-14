@@ -26,7 +26,13 @@ from .serializers import (AgendaSerializer, AiBriefingSerializer, DocumentRefSer
                           MeetingSerializer, MeetingSummarySerializer, UtteranceSerializer)
 
 WORK_TYPES = {FlowContentType.DOCUMENT, FlowContentType.PLAN}
-MEETING_TYPES = {FlowContentType.OPINION, FlowContentType.REQUEST, FlowContentType.REVISION}
+MEETING_TYPES = {FlowContentType.OPINION, FlowContentType.REQUEST,
+                 FlowContentType.CHANGE, FlowContentType.SCHEDULE,
+                 FlowContentType.CONCLUSION, FlowContentType.ETC}
+#: 화면 필터에 그리는 순서. 와이어프레임 `필터링 > 내용` 의 위에서 아래 순입니다.
+MEETING_TYPE_ORDER = [FlowContentType.OPINION, FlowContentType.REQUEST,
+                      FlowContentType.CHANGE, FlowContentType.SCHEDULE,
+                      FlowContentType.CONCLUSION, FlowContentType.ETC]
 
 
 # ─────────────────────────────────────────── 회의
@@ -159,6 +165,71 @@ def _filtered_edges(meeting, params):
     return cat, qs
 
 
+def _arrows(edges):
+    """
+    낱개 전달을 화면의 화살표로 묶습니다.
+
+    와이어프레임의 화살표는 사람 쌍마다 **하나**이고 그 위에 `의견 3`
+    `요청사항 5` 처럼 종류별 개수 뱃지가 붙습니다. 낱개를 그대로 그리면
+    두 사람 사이에 선이 열 개 겹쳐 그림이 뭉갭니다.
+
+    묶는 걸 서버가 하는 이유 — 필터가 걸린 상태에서 클라이언트가 세면
+    화면마다 숫자가 갈립니다. 집계 기준은 한 곳에만 있어야 합니다.
+    """
+    buckets = {}
+    for e in edges:
+        frm = (e.from_node or {}).get("id")
+        tos = tuple(n.get("id") for n in (e.to_nodes or []))
+        key = (frm, tos)
+        b = buckets.setdefault(key, {
+            "id": f"{frm}->{'|'.join(t for t in tos if t)}",
+            "from_node_id": frm,
+            "to_node_ids": list(tos),
+            "direction_label": e.direction_label,
+            "counts": {},
+            "total_count": 0,
+            "avatars": [],
+            "extra_participant_count": e.extra_participant_count,
+            "latest_occurred_at": e.occurred_at,
+            "opacity": e.opacity,
+            "surfaces": set(),
+        })
+        slot = b["counts"].setdefault(e.content_type,
+                                     {"content_type": e.content_type,
+                                      "label": FlowContentType(e.content_type).label,
+                                      "count": 0, "edge_ids": []})
+        slot["count"] += 1
+        slot["edge_ids"].append(str(e.id))
+        b["total_count"] += 1
+        b["surfaces"].add(e.surface)
+        if e.occurred_at and e.occurred_at > b["latest_occurred_at"]:
+            b["latest_occurred_at"] = e.occurred_at
+            b["opacity"] = e.opacity            # 진하기는 가장 최근 것을 따릅니다
+        for n in (e.to_nodes or []):
+            url = n.get("avatar_url")
+            if url and url not in b["avatars"]:
+                b["avatars"].append(url)
+
+    order = {t: i for i, t in enumerate(MEETING_TYPE_ORDER)}
+    out = []
+    for b in buckets.values():
+        counts = sorted(b["counts"].values(),
+                        key=lambda c: order.get(c["content_type"], 99))
+        out.append({
+            "id": b["id"], "from_node_id": b["from_node_id"],
+            "to_node_ids": b["to_node_ids"],
+            "direction_label": b["direction_label"],
+            "counts": counts, "total_count": b["total_count"],
+            "participant_avatar_urls": b["avatars"][:4],
+            "extra_participant_count": b["extra_participant_count"],
+            "latest_occurred_at": b["latest_occurred_at"],
+            "opacity": b["opacity"],
+            "surfaces": sorted(b["surfaces"]),
+        })
+    out.sort(key=lambda a: a["latest_occurred_at"])
+    return out
+
+
 @api_view(["GET"])
 def flow(request, meeting_id):
     meeting = meeting_access(request.user, meeting_id)
@@ -173,18 +244,20 @@ def flow(request, meeting_id):
                 nodes.append(n)
 
     participants = list(meeting.participants.select_related("user"))
+    present = {e.content_type for e in edges}
     return Response({
         "meeting_id": str(meeting.id),
         "meeting_label": f"{meeting.scheduled_at:%-m/%-d} {meeting.title}",
         "category": cat,
         "nodes": nodes,
-        "edges": FlowEdgeSerializer(edges, many=True).data,
+        "arrows": _arrows(edges),
         "filter_options": {
             # 실제로 존재하는 값만 내려줍니다. 전체 목록을 주면 체크해도 안 걸리는
             # 항목이 생겨 사용자가 헷갈립니다.
             "participants": [{"id": str(p.user_id), "label": p.user_name, "kind": "USER"}
                              for p in participants],
-            "content_types": sorted({e.content_type for e in edges}),
+            "content_types": [t for t in MEETING_TYPE_ORDER if t in present]
+                             or sorted(present),
             "surfaces": sorted({e.surface for e in edges}),
         },
     })

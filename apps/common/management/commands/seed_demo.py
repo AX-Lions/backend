@@ -149,7 +149,7 @@ class Command(BaseCommand):
         for i, (title, content, direction) in enumerate([
             ("회의 일정 조율", "시간대가 다른 팀원을 고려해 슬롯을 다시 잡는다.", "최비성 → 임수연, 서재민"),
             ("디자인 시안 마감", "8월 18일까지 확정하기로 합의.", "임수연 → 최비성"),
-            ("개발 일정 연장", "대리인이 유수인 대신 일정 연장 요청을 전달.", "유수인의 AI 대리인 → 최비성, 서재민"),
+            ("개발 일정 연장", "대리인이 유수인 대신 일정 연장 요청을 전달.", "유수인의 Bordo → 최비성, 서재민"),
         ]):
             agendas.append(Agenda.objects.create(
                 meeting=meeting, title=title, sort_order=i + 1, content=content,
@@ -173,20 +173,51 @@ class Command(BaseCommand):
             return {"id": f"{u.id}:agent" if agent else str(u.id),
                     "kind": "AGENT" if agent else "USER",
                     "user_id": str(u.id),
-                    "name": f"{u.name}의 AI 대리인" if agent else u.name,
+                    "name": f"{u.name}의 Bordo" if agent else u.name,
                     "avatar_url": u.avatar_url or None}
 
+        # 같은 사람 쌍에 여러 건을 넣습니다 — 화면의 화살표는 쌍마다 하나이고
+        # 그 위에 `의견 3` `요청사항 5` 처럼 종류별 개수가 붙기 때문입니다.
+        # 한 건씩만 두면 집계가 전부 1 로 나와 뱃지가 제대로인지 알 수 없습니다.
+        MT = FlowCategory.MEETING
         edges = [
-            (FlowCategory.MEETING, FlowContentType.OPINION, "의견",
+            (MT, FlowContentType.OPINION, "의견",
              node(users["최비성"]), [node(users["임수연"])], agendas[0], None,
              Surface.DISCORD, 48),
-            (FlowCategory.MEETING, FlowContentType.REQUEST, "요청 사항",
+            (MT, FlowContentType.OPINION, "의견",
+             node(users["최비성"]), [node(users["임수연"])], agendas[0], None,
+             Surface.DISCORD, 45),
+            (MT, FlowContentType.OPINION, "의견",
+             node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
+             Surface.SERVICE, 44),
+            (MT, FlowContentType.REQUEST, "요청사항",
+             node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
+             Surface.DISCORD, 41),
+            (MT, FlowContentType.REQUEST, "요청사항",
+             node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
+             Surface.DISCORD, 39),
+            (MT, FlowContentType.CHANGE, "변동사항",
+             node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
+             Surface.SERVICE, 33),
+
+            (MT, FlowContentType.REQUEST, "요청사항",
+             node(users["임수연"]), [node(owner, agent=True)], agendas[2], None,
+             Surface.DISCORD, 28),
+            (MT, FlowContentType.CHANGE, "변동사항",
+             node(users["임수연"]), [node(owner, agent=True)], agendas[2], None,
+             Surface.DISCORD, 26),
+            (MT, FlowContentType.SCHEDULE, "일정",
+             node(users["임수연"]), [node(owner, agent=True)], agendas[2], None,
+             Surface.SERVICE, 24),
+
+            (MT, FlowContentType.CONCLUSION, "결론",
              node(owner, agent=True),
              [node(users["최비성"]), node(users["서재민"])], agendas[2], None,
-             Surface.DISCORD, 26),
-            (FlowCategory.MEETING, FlowContentType.REVISION, "수정 사항",
-             node(users["임수연"]), [node(users["최비성"])], agendas[1], None,
-             Surface.SERVICE, 12),
+             Surface.DISCORD, 18),
+            (MT, FlowContentType.ETC, "기타",
+             node(owner, agent=True), [node(users["서재민"])], None, None,
+             Surface.SERVICE, 14),
+
             (FlowCategory.WORK, FlowContentType.DOCUMENT, "문서",
              node(users["최비성"]), [node(users["임수연"])], None, doc,
              Surface.SERVICE, 40),

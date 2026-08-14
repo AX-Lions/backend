@@ -1,0 +1,900 @@
+"""
+채팅 화면 전체.
+
+사이드바는 한 번에 내려줍니다. 트리를 그리면서 팀·프로젝트·방마다 미읽음을
+따로 부르면 첫 진입에서만 왕복이 수십 번 생기고, 클라이언트가 합계를 직접
+더하면 서버와 숫자가 어긋납니다.
+"""
+from datetime import datetime, time, timedelta
+
+from django.conf import settings as dj_settings
+from django.db import IntegrityError, transaction
+from django.db.models import Count, Q
+from django.utils import timezone
+from rest_framework.decorators import api_view, parser_classes
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.response import Response
+
+from apps.common.events import publish
+from apps.common.pagination import cursor_page
+from apps.common.permissions import project_membership, team_membership
+from apps.common.views import listing
+from apps.orgs.models import Project, ProjectMember, Team, TeamMember, TeamRole
+from config.errors import BordoError
+
+from .models import (GROUP_TYPES, HIDE_ON_LEAVE, UNRENAMABLE, ChatAttachment,
+                     ChatMessage, ChatRoom, DailyChatSummary, MessageImportance,
+                     RoomMember, RoomType)
+from .serializers import (AttachmentSerializer, DailySummarySerializer,
+                          MessageSerializer, RoomSummarySerializer)
+from .services import (direct_key, ensure_ai_room, ensure_project_room,
+                       ensure_team_room, peer_agent_key, sync_all_group_rooms, touch)
+
+ADMINS = (TeamRole.OWNER, TeamRole.ADMIN)
+ATTACHMENT_TTL_HOURS = 24
+
+
+# ─────────────────────────────────────────── 접근 · 조립 헬퍼
+def room_access(user, room_id, *, allow_left=False):
+    """참여자가 아니면 `404` 입니다 — 방의 존재 자체를 숨깁니다."""
+    room = (ChatRoom.objects.filter(pk=room_id)
+            .select_related("team", "project").first())
+    if not room:
+        raise BordoError("CHAT_ROOM_NOT_FOUND", details={"room_id": str(room_id)})
+    member = RoomMember.objects.filter(room=room, user=user).first()
+    if not member or (member.left_at and not allow_left):
+        raise BordoError("CHAT_ROOM_NOT_FOUND", details={"room_id": str(room_id)})
+    return room, member
+
+
+def visible_messages(room, member):
+    """
+    이 사람에게 보이는 메시지.
+
+    나중에 초대된 사람은 입장 이후 것만 봅니다 — 기존 1:1·단체 대화가
+    제3자에게 소급해서 열리면 안 됩니다.
+    """
+    qs = ChatMessage.objects.filter(room=room)
+    if member.visible_from:
+        qs = qs.filter(sent_at__gte=member.visible_from)
+    return qs
+
+
+def unread_count(room, member):
+    qs = visible_messages(room, member).exclude(sender_id=member.user_id)
+    if member.last_read_at:
+        qs = qs.filter(sent_at__gt=member.last_read_at)
+    return qs.count()
+
+
+def message_context(user, messages):
+    """`is_mine` · 내 확인 여부 · 읽음 수를 한 번에 모읍니다."""
+    ids = [m.id for m in messages]
+    confirmed = dict(MessageImportance.objects
+                     .filter(user=user, message_id__in=ids)
+                     .values_list("message_id", "confirmed_at"))
+    sender_ids = {m.sender_id for m in messages if m.sender_id}
+    from apps.accounts.models import User
+    avatars = dict(User.all_objects.filter(id__in=sender_ids)
+                   .values_list("id", "avatar_url"))
+    return {"me_id": user.id, "confirmed_map": confirmed, "avatars": avatars,
+            "read_map": _read_counts(messages)}
+
+
+def _read_counts(messages):
+    """
+    각 메시지를 몇 명이 읽었는지.
+
+    읽음 워터마크(`last_read_at`)만 있으므로 방별로 워터마크를 모아 세어야 합니다.
+    메시지마다 세면 목록 50건에 쿼리 50번입니다.
+    """
+    if not messages:
+        return {}
+    room_ids = {m.room_id for m in messages}
+    marks = {}
+    for room_id, read_at in (RoomMember.objects
+                             .filter(room_id__in=room_ids, left_at__isnull=True)
+                             .exclude(last_read_at=None)
+                             .values_list("room_id", "last_read_at")):
+        marks.setdefault(room_id, []).append(read_at)
+    out = {}
+    for m in messages:
+        stamps = marks.get(m.room_id, [])
+        # 보낸 사람 본인의 워터마크는 항상 자기 메시지 이후라 1을 빼줍니다.
+        out[m.id] = max(0, sum(1 for s in stamps if s >= m.sent_at) - 1)
+    return out
+
+
+def room_context(user, rooms):
+    """사이드바·목록용 집계를 한 번에."""
+    ids = [r.id for r in rooms]
+    memberships = {m.room_id: m for m in
+                   RoomMember.objects.filter(user=user, room_id__in=ids)}
+
+    unread_map, important_map = {}, {}
+    for r in rooms:
+        m = memberships.get(r.id)
+        if not m:
+            continue
+        unread_map[r.id] = unread_count(r, m)
+        important_map[r.id] = _has_unconfirmed_important(r, m, user)
+
+    last_map = {}
+    for r in rooms:
+        m = memberships.get(r.id)
+        last = (visible_messages(r, m) if m else ChatMessage.objects.filter(room=r)) \
+            .order_by("-sent_at").first()
+        last_map[r.id] = None if not last else {
+            "sender_name": last.sender_name,
+            "preview": ("삭제된 메시지입니다" if last.deleted_at
+                        else (last.body[:80] or "(첨부)")),
+            "sent_at": last.sent_at,
+        }
+
+    avatar_map = {}
+    rows = (RoomMember.objects.filter(room_id__in=ids, left_at__isnull=True)
+            .select_related("user").order_by("created_at"))
+    for row in rows:
+        avatar_map.setdefault(row.room_id, [])
+        if row.user.avatar_url and len(avatar_map[row.room_id]) < 4:
+            avatar_map[row.room_id].append(row.user.avatar_url)
+
+    return {"unread_map": unread_map, "important_map": important_map,
+            "last_map": last_map, "avatar_map": avatar_map}
+
+
+def _has_unconfirmed_important(room, member, user):
+    """
+    `!` 뱃지 판정.
+
+    **내가 확인하지 않은** 중요 메시지가 있는지 봅니다. 남이 확인한 건
+    내 뱃지를 끄지 못합니다.
+    """
+    confirmed = MessageImportance.objects.filter(user=user, message__room=room)
+    return (visible_messages(room, member)
+            .filter(is_important=True, deleted_at__isnull=True)
+            .exclude(id__in=confirmed.values("message_id"))
+            .exists())
+
+
+# ─────────────────────────────────────────── 사이드바 · 중요 · 후보
+@api_view(["GET"])
+def sidebar(request):
+    """
+    좌측 전체.
+
+    팀 노드의 `unread_count` 는 하위 프로젝트·방을 **다 더한 값**입니다.
+    접힌 상태에서도 뱃지를 그려야 하는데, 클라이언트가 트리를 순회해 더하면
+    숨겨진 방을 빠뜨려 숫자가 어긋납니다.
+    """
+    user = request.user
+    sync_all_group_rooms(user)
+
+    rooms = list(ChatRoom.objects
+                 .filter(memberships__user=user, memberships__left_at__isnull=True,
+                         memberships__hidden_at__isnull=True)
+                 .distinct().order_by("-last_message_at", "-created_at"))
+    ctx = room_context(user, rooms)
+
+    ai_room = next((r for r in rooms if r.type == RoomType.AI), None)
+    my_agent_room = (RoomSummarySerializer(ai_room, context=ctx).data
+                     if ai_room else None)
+
+    # `중요 채팅` 은 **미확인** 중요 메시지가 남은 방만.
+    important_rooms = [RoomSummarySerializer(r, context=ctx).data
+                       for r in rooms if ctx["important_map"].get(r.id)]
+
+    # 팀 → 프로젝트 → 방 트리
+    team_ids = list(TeamMember.objects.filter(user=user).values_list("team_id", flat=True))
+    teams = {t.id: t for t in Team.objects.filter(id__in=team_ids)}
+    projects = list(Project.objects.filter(team_id__in=team_ids)
+                    .filter(Q(members__user=user) |
+                            Q(team__members__user=user,
+                              team__members__team_role__in=ADMINS))
+                    .distinct())
+
+    by_team_room = {r.team_id: r for r in rooms if r.type == RoomType.TEAM}
+    by_project_room = {r.project_id: r for r in rooms if r.type == RoomType.PROJECT}
+    other_by_project = {}
+    for r in rooms:
+        if r.type in (RoomType.DIRECT, RoomType.PEER_AGENT) and r.project_id:
+            other_by_project.setdefault(r.project_id, []).append(r)
+
+    tree, total = [], 0
+    for team_id, team in teams.items():
+        team_room = by_team_room.get(team_id)
+        team_unread = ctx["unread_map"].get(team_room.id, 0) if team_room else 0
+        team_important = bool(ctx["important_map"].get(team_room.id)) if team_room else False
+
+        project_nodes = []
+        for p in [p for p in projects if p.team_id == team_id]:
+            proom = by_project_room.get(p.id)
+            sub = ([proom] if proom else []) + other_by_project.get(p.id, [])
+            p_unread = sum(ctx["unread_map"].get(r.id, 0) for r in sub)
+            p_important = any(ctx["important_map"].get(r.id) for r in sub)
+            project_nodes.append({
+                "project_id": str(p.id), "project_name": p.name,
+                "group_chat_room_id": str(proom.id) if proom else None,
+                "unread_count": p_unread, "has_important": p_important,
+                "rooms": RoomSummarySerializer(sub, many=True, context=ctx).data,
+            })
+            team_unread += p_unread
+            team_important = team_important or p_important
+
+        tree.append({
+            "team_id": str(team_id), "team_name": team.name,
+            "group_chat_room_id": str(team_room.id) if team_room else None,
+            "unread_count": team_unread, "has_important": team_important,
+            "projects": project_nodes,
+        })
+        total += team_unread
+
+    # 어느 팀에도 안 매달린 방(개인 채팅·AI)까지 합계에 넣습니다.
+    hung = {r.id for r in rooms if r.type in (RoomType.TEAM, RoomType.PROJECT)}
+    hung |= {r.id for rs in other_by_project.values() for r in rs}
+    loose = [r for r in rooms if r.id not in hung]
+    total += sum(ctx["unread_map"].get(r.id, 0) for r in loose)
+
+    return Response({
+        "my_agent_room": my_agent_room,
+        "important_rooms": important_rooms,
+        "teams": tree,
+        "direct_rooms": RoomSummarySerializer(
+            [r for r in loose if r.type != RoomType.AI], many=True, context=ctx).data,
+        "total_unread": total,
+    })
+
+
+@api_view(["GET"])
+def important(request):
+    """
+    상단 `중요 채팅` 섹션.
+
+    **내가 확인한 메시지는 빠집니다.** 확인은 사용자별이므로 같은 메시지가
+    한 사람에게는 남고 다른 사람에게는 사라지는 게 정상입니다.
+    """
+    user = request.user
+    memberships = {m.room_id: m for m in
+                   RoomMember.objects.filter(user=user, left_at__isnull=True)}
+    confirmed = set(MessageImportance.objects.filter(user=user)
+                    .values_list("message_id", flat=True))
+
+    rows = (ChatMessage.objects
+            .filter(room_id__in=list(memberships), is_important=True,
+                    deleted_at__isnull=True)
+            .exclude(id__in=confirmed)
+            .select_related("room")
+            .order_by("-sent_at")[:100])
+    rows = [m for m in rows
+            if not memberships[m.room_id].visible_from
+            or m.sent_at >= memberships[m.room_id].visible_from]
+
+    rooms = list({m.room.id: m.room for m in rows}.values())
+    rctx = room_context(user, rooms)
+    mctx = message_context(user, rows)
+    return Response(listing([{
+        "message": MessageSerializer(m, context=mctx).data,
+        "room": RoomSummarySerializer(m.room, context=rctx).data,
+    } for m in rows]))
+
+
+@api_view(["GET"])
+def candidates(request):
+    """`새 채팅 생성 → 대화상대 선택` 모달. 팀별로 묶어서 내려줍니다."""
+    query = (request.query_params.get("query") or "").strip()
+    want_type = (request.query_params.get("type") or "").upper()
+
+    team_ids = list(TeamMember.objects.filter(user=request.user)
+                    .values_list("team_id", flat=True))
+    teams = {t.id: t for t in Team.objects.filter(id__in=team_ids)}
+    rows = (TeamMember.objects.filter(team_id__in=team_ids)
+            .exclude(user=request.user).select_related("user"))
+    if query:
+        rows = rows.filter(user__name__icontains=query)
+
+    grouped = {}
+    for r in rows:
+        entry = {"user_id": str(r.user_id), "name": r.user.name,
+                 "avatar_url": r.user.avatar_url or None,
+                 "has_agent": hasattr(r.user, "agent_settings")}
+        # `동료의 AI 대리인` 방은 대리인이 있는 사람에게만 걸 수 있습니다.
+        if want_type == RoomType.PEER_AGENT and not entry["has_agent"]:
+            continue
+        grouped.setdefault(r.team_id, []).append(entry)
+
+    return Response({"teams": [
+        {"team_id": str(tid), "team_name": teams[tid].name,
+         "members": sorted(members, key=lambda m: m["name"])}
+        for tid, members in grouped.items() if tid in teams]})
+
+
+# ─────────────────────────────────────────── 방
+@api_view(["GET", "POST"])
+def rooms(request):
+    if request.method == "GET":
+        rows = list(ChatRoom.objects
+                    .filter(memberships__user=request.user,
+                            memberships__left_at__isnull=True,
+                            memberships__hidden_at__isnull=True)
+                    .distinct().order_by("-last_message_at", "-created_at"))
+        ctx = room_context(request.user, rows)
+        return Response(listing(RoomSummarySerializer(rows, many=True, context=ctx).data))
+
+    rtype = (request.data.get("type") or "").upper()
+    if rtype not in RoomType.values:
+        raise BordoError("VALIDATION_ERROR",
+                         "type 은 AI · DIRECT · TEAM · PROJECT · PEER_AGENT 중 하나입니다.",
+                         details={"allowed": list(RoomType.values)})
+
+    member_ids = request.data.get("member_ids") or []
+    team_id = request.data.get("team_id")
+    project_id = request.data.get("project_id")
+
+    if rtype == RoomType.AI:
+        return Response(_room_body(request.user, ensure_ai_room(request.user)), status=200)
+
+    if rtype == RoomType.TEAM:
+        if not team_id:
+            raise BordoError("VALIDATION_ERROR", "TEAM 방에는 team_id 가 필요합니다.")
+        m = team_membership(request.user, team_id)
+        return Response(_room_body(request.user, ensure_team_room(m.team)), status=200)
+
+    if rtype == RoomType.PROJECT:
+        if not project_id:
+            raise BordoError("VALIDATION_ERROR", "PROJECT 방에는 project_id 가 필요합니다.")
+        project, _ = project_membership(request.user, project_id)
+        return Response(_room_body(request.user, ensure_project_room(project)), status=200)
+
+    # ── DIRECT · PEER_AGENT — 상대 1명 필요
+    if len(member_ids) != 1:
+        raise BordoError("VALIDATION_ERROR",
+                         f"{rtype} 방에는 상대 한 명만 지정합니다.",
+                         details={"member_ids": member_ids})
+    other_id = member_ids[0]
+    if str(other_id) == str(request.user.id):
+        raise BordoError("VALIDATION_ERROR", "자기 자신과는 방을 만들 수 없습니다.")
+
+    shared = TeamMember.objects.filter(
+        user_id=other_id,
+        team_id__in=TeamMember.objects.filter(user=request.user).values("team_id"))
+    if not shared.exists():
+        raise BordoError("TEAM_ACCESS_DENIED", "같은 팀에 속한 사람에게만 걸 수 있습니다.")
+
+    from apps.accounts.models import User
+    other = User.objects.filter(pk=other_id).first()
+    if not other:
+        raise BordoError("STATE_NOT_FOUND", "상대를 찾을 수 없습니다.")
+
+    if rtype == RoomType.PEER_AGENT and not hasattr(other, "agent_settings"):
+        raise BordoError("STATE_NOT_FOUND", "상대에게 AI 대리인이 없습니다.")
+
+    key = (direct_key(request.user.id, other_id) if rtype == RoomType.DIRECT
+           else peer_agent_key(request.user.id, other_id))
+    existing = ChatRoom.objects.filter(type=rtype, dedupe_key=key).first()
+    if existing:
+        # 예전에 숨겼던 방이면 다시 띄웁니다. 새로 만들면 기록이 갈라집니다.
+        RoomMember.objects.filter(room=existing, user=request.user).update(
+            hidden_at=None, left_at=None)
+        return Response(_room_body(request.user, existing), status=200)
+
+    title = other.display_name if rtype == RoomType.DIRECT else f"{other.display_name}의 AI 대리인"
+    try:
+        with transaction.atomic():
+            room = ChatRoom.objects.create(
+                type=rtype, dedupe_key=key, title=title,
+                team_id=team_id or None, project_id=project_id or None,
+                agent_owner=other if rtype == RoomType.PEER_AGENT else None,
+                created_by=request.user)
+            if team_id:
+                room.team_name = Team.objects.get(pk=team_id).name
+            if project_id:
+                p = Project.objects.get(pk=project_id)
+                room.project_name, room.team_name = p.name, p.team_name
+            room.save(update_fields=["team_name", "project_name"])
+            people = [request.user.id] if rtype == RoomType.PEER_AGENT \
+                else [request.user.id, other.id]
+            RoomMember.objects.bulk_create(
+                [RoomMember(room=room, user_id=u) for u in people],
+                ignore_conflicts=True)
+    except IntegrityError:
+        room = ChatRoom.objects.get(type=rtype, dedupe_key=key)
+        return Response(_room_body(request.user, room), status=200)
+    return Response(_room_body(request.user, room), status=201)
+
+
+def _room_body(user, room):
+    ctx = room_context(user, [room])
+    return RoomSummarySerializer(room, context=ctx).data
+
+
+@api_view(["GET", "PATCH", "DELETE"])
+def room_detail(request, room_id):
+    room, member = room_access(request.user, room_id)
+
+    if request.method == "GET":
+        return Response(_room_body(request.user, room))
+
+    if request.method == "PATCH":
+        if room.type in UNRENAMABLE:
+            raise BordoError("CHAT_ROOM_TYPE_NOT_ALLOWED",
+                             "상대 이름으로 표시되는 방은 이름을 바꿀 수 없습니다.",
+                             details={"type": room.type})
+        title = (request.data.get("title") or "").strip()
+        if not title:
+            raise BordoError("VALIDATION_ERROR", "title 은 비울 수 없습니다.")
+        room.title = title
+        room.save(update_fields=["title", "updated_at"])
+        publish(room.project_id, "chat.room.updated",
+                {"room_id": str(room.id), "title": room.title})
+        return Response(_room_body(request.user, room))
+
+    # ── DELETE — 종류마다 뜻이 다릅니다
+    if room.type == RoomType.AI:
+        raise BordoError("CHAT_ROOM_TYPE_NOT_ALLOWED",
+                         "나의 AI 대리인 방은 나갈 수 없습니다.")
+    now = timezone.now()
+    if room.type in HIDE_ON_LEAVE:
+        # 내 목록에서만 숨깁니다. 상대에게는 그대로 보입니다.
+        member.hidden_at = now
+        member.save(update_fields=["hidden_at", "updated_at"])
+        return Response({"room_id": str(room.id), "action": "HIDDEN", "at": now})
+
+    member.left_at = now
+    member.save(update_fields=["left_at", "updated_at"])
+    publish(room.project_id, "chat.room.left",
+            {"room_id": str(room.id), "user_id": str(request.user.id)})
+    return Response({"room_id": str(room.id), "action": "LEFT", "at": now})
+
+
+@api_view(["POST"])
+def room_members(request, room_id):
+    """대화상대 추가. 단체방만 됩니다."""
+    room, _ = room_access(request.user, room_id)
+    if room.type not in GROUP_TYPES:
+        raise BordoError("CHAT_ROOM_TYPE_NOT_ALLOWED",
+                         "1:1 방에 사람을 더하면 기존 대화가 제3자에게 열립니다. "
+                         "새 단체방을 만드십시오.",
+                         details={"type": room.type})
+    user_ids = request.data.get("user_ids") or []
+    if not user_ids:
+        raise BordoError("VALIDATION_ERROR", "user_ids 는 비울 수 없습니다.")
+
+    scope_team_id = room.team_id or (room.project.team_id if room.project_id else None)
+    allowed = set(map(str, TeamMember.objects.filter(team_id=scope_team_id,
+                                                     user_id__in=user_ids)
+                      .values_list("user_id", flat=True)))
+    outsiders = [str(u) for u in user_ids if str(u) not in allowed]
+    if outsiders:
+        raise BordoError("TEAM_ACCESS_DENIED",
+                         "팀 밖 사람은 넣을 수 없습니다. 팀에 먼저 초대하십시오.",
+                         details={"not_in_team": outsiders}, status=409)
+
+    now = timezone.now()
+    added = []
+    for uid in allowed:
+        rm, created = RoomMember.objects.get_or_create(
+            room=room, user_id=uid, defaults={"visible_from": now})
+        if not created and rm.left_at:
+            rm.left_at, rm.visible_from = None, now
+            rm.save(update_fields=["left_at", "visible_from", "updated_at"])
+            created = True
+        if created:
+            added.append(str(uid))
+    publish(room.project_id, "chat.room.members_added",
+            {"room_id": str(room.id), "user_ids": added})
+    return Response({"room_id": str(room.id), "added_user_ids": added})
+
+
+@api_view(["DELETE"])
+def room_member_detail(request, room_id, user_id):
+    room, member = room_access(request.user, room_id)
+    if room.type not in GROUP_TYPES:
+        raise BordoError("CHAT_ROOM_TYPE_NOT_ALLOWED", "단체방에서만 내보낼 수 있습니다.")
+
+    scope_team_id = room.team_id or (room.project.team_id if room.project_id else None)
+    me = team_membership(request.user, scope_team_id)
+    if me.team_role not in ADMINS and room.created_by_id != request.user.id:
+        raise BordoError("TEAM_ACCESS_DENIED", "개설자 또는 OWNER · ADMIN 만 내보낼 수 있습니다.")
+
+    target = RoomMember.objects.filter(room=room, user_id=user_id,
+                                       left_at__isnull=True).first()
+    if not target:
+        raise BordoError("STATE_NOT_FOUND", "이 방의 참여자가 아닙니다.")
+    target.left_at = timezone.now()
+    target.save(update_fields=["left_at", "updated_at"])
+    publish(room.project_id, "chat.room.member_removed",
+            {"room_id": str(room.id), "user_id": str(user_id)})
+    return Response(status=204)
+
+
+# ─────────────────────────────────────────── 메시지
+@api_view(["GET", "POST"])
+def messages(request, room_id):
+    room, member = room_access(request.user, room_id)
+
+    if request.method == "GET":
+        return Response(_message_page(request, room, member))
+
+    body = (request.data.get("body") or "").strip()
+    attachment_ids = request.data.get("attachment_ids") or []
+    if not body and not attachment_ids:
+        raise BordoError("VALIDATION_ERROR",
+                         "본문과 첨부가 모두 비어 있습니다.")
+
+    client_id = (request.data.get("client_message_id") or "").strip()
+    if client_id:
+        dup = ChatMessage.objects.filter(room=room, client_message_id=client_id).first()
+        if dup:
+            # 같은 메시지를 두 번 보낸 것. 처음 결과를 그대로 돌려줍니다.
+            return Response(MessageSerializer(
+                dup, context=message_context(request.user, [dup])).data, status=200)
+
+    question = _resolve_pending_question(request, room)
+
+    with transaction.atomic():
+        msg = ChatMessage.objects.create(
+            room=room, sender=request.user, sender_name=request.user.display_name,
+            body=body, client_message_id=client_id,
+            is_important=bool(request.data.get("is_important", False)),
+            pending_question=question)
+
+        if attachment_ids:
+            _attach(room, request.user, attachment_ids, msg)
+
+        if question is not None:
+            # 답변 대기 질문을 여기서 닫습니다. 채팅으로 답했는데 질문이 OPEN 으로
+            # 남으면 브리핑 카드가 안 사라집니다.
+            question.answer_body = body
+            question.answered_at = timezone.now()
+            question.save(update_fields=["answer_body", "answered_at", "updated_at"])
+
+        touch(room, msg.sent_at)
+        member.last_read_at = msg.sent_at
+        member.save(update_fields=["last_read_at", "updated_at"])
+
+    publish(room.project_id, "chat.message.created",
+            {"room_id": str(room.id), "message_id": str(msg.id),
+             "sender_id": str(request.user.id)})
+    if question is not None:
+        publish(room.project_id, "agent.question.answered",
+                {"question_id": str(question.id), "message_id": str(msg.id)},
+                user_id=question.asker_id)
+
+    msg = ChatMessage.objects.prefetch_related("attachments").get(pk=msg.pk)
+    return Response(MessageSerializer(
+        msg, context=message_context(request.user, [msg])).data, status=201)
+
+
+def _resolve_pending_question(request, room):
+    """
+    `답변 필요` 카드에서 넘어온 답인지 확인합니다.
+
+    브리핑이 준 `chat_room_id` 로 채팅에 오면, 사용자 눈에는 그냥 답장인데
+    서버에서는 질문 해결로 처리돼야 합니다.
+    """
+    qid = request.data.get("pending_question_id")
+    if not qid:
+        return None
+    from apps.agent.models import PendingQuestion
+    q = PendingQuestion.objects.filter(pk=qid, target_user=request.user).first()
+    if not q:
+        raise BordoError("STATE_NOT_FOUND", "질문을 찾을 수 없습니다.",
+                         details={"pending_question_id": str(qid)})
+    if q.answered_at:
+        raise BordoError("DUPLICATE_EVENT", "이미 답변한 질문입니다.",
+                         details={"answered_at": q.answered_at})
+    return q
+
+
+def _message_page(request, room, member):
+    """
+    커서 페이징.
+
+    `date` 와 `before` 는 같이 쓰지 못합니다. 달력에서 날짜를 고르는 것과
+    위로 스크롤하는 것은 서로 다른 기준점이라, 둘을 겹치면 어느 쪽을 따를지
+    서버·클라이언트 해석이 갈립니다.
+    """
+    date = request.query_params.get("date")
+    before = request.query_params.get("before")
+    if date and before:
+        raise BordoError("VALIDATION_ERROR",
+                         "date 와 before 는 함께 쓸 수 없습니다. "
+                         "날짜 이동은 date, 이어보기는 before 입니다.")
+
+    qs = visible_messages(room, member)
+    if date:
+        try:
+            day = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            raise BordoError("VALIDATION_ERROR", "date 는 YYYY-MM-DD 입니다.")
+        start = timezone.make_aware(datetime.combine(day, time.min),
+                                    timezone.get_current_timezone())
+        qs = qs.filter(sent_at__gte=start, sent_at__lt=start + timedelta(days=1))
+        rows = list(qs.order_by("sent_at"))
+        return {"results": MessageSerializer(
+            rows, many=True, context=message_context(request.user, rows)).data,
+            "next_before": None,
+            "has_older": visible_messages(room, member).filter(
+                sent_at__lt=start).exists(),
+            "has_newer": visible_messages(room, member).filter(
+                sent_at__gte=start + timedelta(days=1)).exists()}
+
+    rows, next_before = cursor_page(
+        qs, before=before, limit=request.query_params.get("limit"),
+        order_field="-sent_at")
+    rows = list(reversed(rows))            # 화면은 오래된 것부터 그립니다
+    return {"results": MessageSerializer(
+        rows, many=True, context=message_context(request.user, rows)).data,
+        "next_before": next_before,
+        "has_older": next_before is not None,
+        "has_newer": False}
+
+
+@api_view(["PATCH", "DELETE"])
+def message_detail(request, message_id):
+    msg = (ChatMessage.objects.filter(pk=message_id)
+           .select_related("room").first())
+    if not msg:
+        raise BordoError("STATE_NOT_FOUND", "메시지를 찾을 수 없습니다.")
+    room, member = room_access(request.user, msg.room_id)
+
+    if request.method == "PATCH":
+        if msg.sender_id != request.user.id:
+            raise BordoError("TEAM_ACCESS_DENIED", "본인 메시지만 수정할 수 있습니다.")
+        if msg.is_agent:
+            raise BordoError("CHAT_ROOM_TYPE_NOT_ALLOWED",
+                             "대리인 발언은 판정 근거에 묶인 감사 대상이라 고칠 수 없습니다.")
+        if msg.deleted_at:
+            raise BordoError("STATE_NOT_FOUND", "삭제된 메시지입니다.")
+        window = timedelta(minutes=dj_settings.BORDO["CHAT_EDIT_WINDOW_MINUTES"])
+        if timezone.now() - msg.sent_at > window:
+            raise BordoError("CHAT_EDIT_WINDOW_EXPIRED",
+                             details={"window_minutes":
+                                      dj_settings.BORDO["CHAT_EDIT_WINDOW_MINUTES"]})
+        body = (request.data.get("body") or "").strip()
+        if not body:
+            raise BordoError("VALIDATION_ERROR", "body 는 비울 수 없습니다.")
+        msg.body, msg.edited_at = body, timezone.now()
+        msg.save(update_fields=["body", "edited_at"])
+        publish(room.project_id, "chat.message.updated",
+                {"room_id": str(room.id), "message_id": str(msg.id)})
+        return Response(MessageSerializer(
+            msg, context=message_context(request.user, [msg])).data)
+
+    # ── DELETE — 내용만 비웁니다
+    if msg.sender_id != request.user.id:
+        scope_team_id = room.team_id or (room.project.team_id if room.project_id else None)
+        if not scope_team_id:
+            raise BordoError("TEAM_ACCESS_DENIED", "본인 메시지만 삭제할 수 있습니다.")
+        me = team_membership(request.user, scope_team_id)
+        if me.team_role not in ADMINS:
+            raise BordoError("TEAM_ACCESS_DENIED", "본인 메시지만 삭제할 수 있습니다.")
+    if msg.deleted_at:
+        return Response(MessageSerializer(
+            msg, context=message_context(request.user, [msg])).data)
+
+    with transaction.atomic():
+        msg.deleted_at = timezone.now()
+        msg.body = ""
+        msg.is_important = False           # 중요 목록에서도 같이 빠집니다
+        msg.save(update_fields=["deleted_at", "body", "is_important"])
+        MessageImportance.objects.filter(message=msg).delete()
+        ChatAttachment.objects.filter(message=msg).delete()
+    publish(room.project_id, "chat.message.deleted",
+            {"room_id": str(room.id), "message_id": str(msg.id)})
+    return Response(MessageSerializer(
+        msg, context=message_context(request.user, [msg])).data)
+
+
+@api_view(["POST"])
+def read(request, room_id):
+    """`up_to_message_id` 까지 읽음. 생략하면 방 전체."""
+    room, member = room_access(request.user, room_id)
+    up_to = request.data.get("up_to_message_id")
+    if up_to:
+        anchor = ChatMessage.objects.filter(pk=up_to, room=room).first()
+        if not anchor:
+            raise BordoError("STATE_NOT_FOUND", "그 메시지는 이 방에 없습니다.")
+        mark = anchor.sent_at
+    else:
+        mark = timezone.now()
+
+    # 워터마크는 앞으로만 갑니다. 뒤로 돌리면 읽은 게 다시 안 읽음이 됩니다.
+    if member.last_read_at is None or mark > member.last_read_at:
+        member.last_read_at = mark
+        member.save(update_fields=["last_read_at", "updated_at"])
+
+    mine = RoomMember.objects.filter(user=request.user, left_at__isnull=True,
+                                     hidden_at__isnull=True).select_related("room")
+    total = sum(unread_count(m.room, m) for m in mine)
+    return Response({"room_id": str(room.id),
+                     "unread_count": unread_count(room, member),
+                     "total_unread": total})
+
+
+# ─────────────────────────────────────────── 중요 표시 · 확인
+@api_view(["PATCH"])
+def message_important(request, message_id):
+    msg = ChatMessage.objects.filter(pk=message_id).select_related("room").first()
+    if not msg:
+        raise BordoError("STATE_NOT_FOUND", "메시지를 찾을 수 없습니다.")
+    room, _ = room_access(request.user, msg.room_id)
+    if msg.deleted_at:
+        raise BordoError("STATE_NOT_FOUND", "삭제된 메시지입니다.")
+    if "is_important" not in request.data:
+        raise BordoError("VALIDATION_ERROR", "is_important 는 필수입니다.")
+
+    msg.is_important = bool(request.data["is_important"])
+    msg.save(update_fields=["is_important"])
+    if not msg.is_important:
+        # 표시를 내리면 확인 기록도 의미가 없어집니다.
+        MessageImportance.objects.filter(message=msg).delete()
+    publish(room.project_id, "chat.message.important_changed",
+            {"room_id": str(room.id), "message_id": str(msg.id),
+             "is_important": msg.is_important})
+    return Response(MessageSerializer(
+        msg, context=message_context(request.user, [msg])).data)
+
+
+@api_view(["POST"])
+def message_important_confirm(request, message_id):
+    """
+    `중요하시죠 - 확인되면 회색으로 - 상단 중요 채팅에서 제외됨`.
+
+    표시를 내리는 것과 다릅니다. `is_important` 는 true 로 남고 **내 확인 기록만**
+    생깁니다. 나중에 중요 메시지 이력을 되짚을 수 있어야 하기 때문입니다.
+    """
+    msg = ChatMessage.objects.filter(pk=message_id).select_related("room").first()
+    if not msg:
+        raise BordoError("STATE_NOT_FOUND", "메시지를 찾을 수 없습니다.")
+    room_access(request.user, msg.room_id)
+    if not msg.is_important:
+        raise BordoError("VALIDATION_ERROR", "중요 표시가 안 된 메시지입니다.")
+    MessageImportance.objects.get_or_create(message=msg, user=request.user)
+    return Response(MessageSerializer(
+        msg, context=message_context(request.user, [msg])).data)
+
+
+# ─────────────────────────────────────────── 첨부
+@api_view(["POST"])
+@parser_classes([MultiPartParser, FormParser])
+def attachments(request, room_id):
+    """
+    업로드만 하고 아직 메시지에 안 붙은 상태입니다.
+
+    `expires_at` 을 두는 이유 — 보내다 만 파일이 영원히 남으면 안 됩니다.
+    전송에 성공해야 `ATTACHED` 로 넘어가고 만료가 풀립니다.
+    """
+    room, _ = room_access(request.user, room_id)
+    f = request.FILES.get("file")
+    if not f:
+        raise BordoError("VALIDATION_ERROR", "file 이 필요합니다.")
+
+    mime = getattr(f, "content_type", "") or ""
+    att = ChatAttachment.objects.create(
+        room=room, uploader=request.user, name=f.name, size_bytes=f.size,
+        mime_type=mime,
+        kind=(ChatAttachment.Kind.IMAGE if mime.startswith("image/")
+              else ChatAttachment.Kind.FILE),
+        # 실제 저장소 연동 전까지는 자리만 잡아둡니다.
+        url=f"/media/chat/{room.id}/{f.name}",
+        expires_at=timezone.now() + timedelta(hours=ATTACHMENT_TTL_HOURS))
+    return Response(AttachmentSerializer(att).data, status=201)
+
+
+def _attach(room, user, attachment_ids, message):
+    rows = list(ChatAttachment.objects.filter(
+        id__in=attachment_ids, room=room, uploader=user))
+    found = {str(a.id) for a in rows}
+    missing = [str(a) for a in attachment_ids if str(a) not in found]
+    if missing:
+        raise BordoError("STATE_NOT_FOUND", "첨부를 찾을 수 없습니다.",
+                         details={"attachment_ids": missing})
+    already = [str(a.id) for a in rows if a.message_id]
+    if already:
+        raise BordoError("DUPLICATE_EVENT", "이미 다른 메시지에 붙은 첨부입니다.",
+                         details={"attachment_ids": already})
+    expired = [str(a.id) for a in rows if a.status == ChatAttachment.Status.EXPIRED]
+    if expired:
+        raise BordoError("STATE_NOT_FOUND", "만료된 첨부입니다. 다시 올리십시오.",
+                         details={"attachment_ids": expired})
+    ChatAttachment.objects.filter(id__in=[a.id for a in rows]).update(
+        message=message, status=ChatAttachment.Status.ATTACHED, expires_at=None)
+
+
+@api_view(["DELETE"])
+def attachment_detail(request, attachment_id):
+    att = ChatAttachment.objects.filter(pk=attachment_id).first()
+    if not att:
+        raise BordoError("STATE_NOT_FOUND", "첨부를 찾을 수 없습니다.")
+    room_access(request.user, att.room_id)
+    if att.uploader_id != request.user.id:
+        raise BordoError("TEAM_ACCESS_DENIED", "본인이 올린 첨부만 지울 수 있습니다.")
+    if att.message_id:
+        raise BordoError("REFERENCED_BY_OTHERS",
+                         "이미 전송된 첨부입니다. 메시지를 지우면 함께 사라집니다.",
+                         details={"message_id": str(att.message_id)})
+    att.delete()
+    return Response(status=204)
+
+
+# ─────────────────────────────────────────── 달력 · 요약 · 검색
+@api_view(["GET"])
+def active_dates(request, room_id):
+    """달력에서 `채팅한 날짜만 검은 색`. 없는 날은 못 누르게 합니다."""
+    room, member = room_access(request.user, room_id)
+    month = request.query_params.get("month") or timezone.now().strftime("%Y-%m")
+    try:
+        first = datetime.strptime(month + "-01", "%Y-%m-%d").date()
+    except ValueError:
+        raise BordoError("VALIDATION_ERROR", "month 는 YYYY-MM 입니다.")
+    nxt = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+    tz = timezone.get_current_timezone()
+    start = timezone.make_aware(datetime.combine(first, time.min), tz)
+    end = timezone.make_aware(datetime.combine(nxt, time.min), tz)
+    qs = visible_messages(room, member)
+
+    dates = sorted({timezone.localtime(s).date().isoformat() for s in
+                    qs.filter(sent_at__gte=start, sent_at__lt=end)
+                    .values_list("sent_at", flat=True)})
+    return Response({
+        "month": month,
+        "active_dates": dates,
+        "has_prev_month": qs.filter(sent_at__lt=start).exists(),
+        "has_next_month": qs.filter(sent_at__gte=end).exists(),
+    })
+
+
+@api_view(["GET"])
+def daily_summary(request, room_id):
+    """
+    `2026년 8월 9일 채팅 요약`.
+
+    `one_line` 과 `my_todos` 는 AI 산출물이라 1차에서는 빈 값으로 나갑니다.
+    빈 값과 `아직 생성 안 됨` 을 구분할 수 있도록 `generated_at` 을 같이 줍니다 —
+    화면이 `요약 준비 중` 과 `요약할 게 없음` 을 다르게 그려야 합니다.
+    """
+    room, member = room_access(request.user, room_id)
+    raw = request.query_params.get("date") or timezone.localtime().date().isoformat()
+    try:
+        day = datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        raise BordoError("VALIDATION_ERROR", "date 는 YYYY-MM-DD 입니다.")
+
+    row = DailyChatSummary.objects.filter(room=room, date=day).first()
+    if row:
+        body = DailySummarySerializer(row).data
+    else:
+        body = {"date": raw, "one_line": "", "my_todos": [], "schedules": [],
+                "generated_at": None}
+
+    tz = timezone.get_current_timezone()
+    start = timezone.make_aware(datetime.combine(day, time.min), tz)
+    body["message_count"] = visible_messages(room, member).filter(
+        sent_at__gte=start, sent_at__lt=start + timedelta(days=1)).count()
+    body["status"] = "READY" if row and row.generated_at else "PENDING"
+    return Response(body)
+
+
+@api_view(["GET"])
+def search(request, room_id):
+    """
+    방 안 검색.
+
+    결과를 누르면 그 위치로 이동해야 하므로 `date` 를 같이 줍니다 —
+    클라이언트가 `date` 로 다시 목록을 불러 해당 메시지로 스크롤합니다.
+    """
+    room, member = room_access(request.user, room_id)
+    q = (request.query_params.get("q") or "").strip()
+    if not q:
+        return Response(listing([]))
+    rows = (visible_messages(room, member)
+            .filter(body__icontains=q, deleted_at__isnull=True)
+            .order_by("-sent_at")[:100])
+    rows = list(rows)
+    ctx = message_context(request.user, rows)
+    return Response(listing([{
+        "message": MessageSerializer(m, context=ctx).data,
+        "date": timezone.localtime(m.sent_at).date().isoformat(),
+    } for m in rows]))

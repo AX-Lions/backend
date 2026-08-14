@@ -29,6 +29,11 @@ INSTALLED_APPS = [
     "apps.agent",
     "apps.meetings",
     "apps.home",
+    "apps.chat",
+    "apps.states",
+    "apps.tasks",
+    "apps.calendars",
+    "apps.documents",
 ]
 
 MIDDLEWARE = [
