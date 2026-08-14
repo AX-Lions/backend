@@ -1,13 +1,12 @@
 """
 프로젝트 일정.
 
-두 가지가 계약보다 늘었습니다. 둘 다 화면이 막혀서 넣었습니다.
+계약보다 늘어난 곳이 하나 있습니다. **일정 확정이 연결 회의 상태를 함께 올립니다** —
+계약에서는 둘이 따로 놀아 `일정은 확정인데 회의는 예정` 같은, 사용자가 해석할 수
+없는 상태가 만들어집니다.
 
-* **`GET /outbox-events/{id}` 와 `retry`** — 공지 실패를 사용자가 볼 방법이
-  계약에 없었습니다. `discord_notified: false` 만으로는 `안 보냄` 과
-  `보내다 실패` 가 구분되지 않아, 사용자는 공지가 나간 줄 알고 기다립니다.
-* **일정 확정이 연결 회의 상태를 함께 올립니다** — 계약에서는 둘이 따로 놀아
-  `일정은 확정인데 회의는 예정` 같은 상태가 만들어집니다.
+**Discord 발송함은 여기 없습니다.** 발송 큐·ACK·재시도는 A 담당이라,
+이 앱은 공지 요청을 `publish()` 로 흘리고 `discord_notified` 표시만 듭니다.
 """
 from datetime import datetime, time, timedelta
 
@@ -25,8 +24,8 @@ from apps.orgs.models import ProjectMember, TeamRole
 from config.errors import BordoError
 
 from .models import (CalendarEvent, EventKind, EventParticipant, EventStatus,
-                     OutboxEvent, OutboxStatus, Reminder)
-from .serializers import EventSerializer, OutboxSerializer
+                     Reminder)
+from .serializers import EventSerializer
 
 ADMINS = (TeamRole.OWNER, TeamRole.ADMIN)
 REMINDER_OFFSETS = {Reminder.Type.T_MINUS_1D: timedelta(days=1),
@@ -40,16 +39,7 @@ def _ctx(events):
     for p in EventParticipant.objects.filter(event_id__in=ids).select_related("user"):
         pmap.setdefault(p.event_id, []).append(p)
 
-    dmap = {}
-    for o in OutboxEvent.objects.filter(source_type="calendar_event",
-                                        source_id__in=ids).order_by("-created_at"):
-        dmap.setdefault(o.source_id, {
-            "outbox_event_id": str(o.id), "status": o.status,
-            "retry_count": o.retry_count, "error_code": o.error_code or None,
-            "next_retry_at": o.next_retry_at,
-            "can_retry": o.status in (OutboxStatus.RETRY_WAIT, OutboxStatus.DEAD),
-        })
-    return {"participant_map": pmap, "delivery_map": dmap}
+    return {"participant_map": pmap}
 
 
 def _load(user, event_id):
@@ -127,18 +117,10 @@ def events(request, project_id):
             ignore_conflicts=True)
 
     if request.data.get("notify_discord"):
-        outbox = _enqueue_announcement(event, request.user)
-        # 발송함에 담긴 시점에 표시를 올립니다. 여기서 안 올리면
-        # `공지가 나간 일정은 취소를 먼저` 규칙이 통째로 안 걸립니다.
-        event.discord_notified = True
-        event.save(update_fields=["discord_notified", "updated_at"])
-    else:
-        outbox = None
+        _request_announcement(event)
 
     body = EventSerializer(event, context=_ctx([event])).data
     body["conflicts"] = _conflicts(event, valid)
-    if outbox:
-        body["outbox_event_id"] = str(outbox.id)
     publish(project.id, "calendar.event.created", {"event_id": str(event.id)})
     return Response(body, status=201)
 
@@ -190,11 +172,6 @@ def event_detail(request, event_id):
         if moved:
             # 시각이 바뀌면 예약된 리마인더가 옛 시각을 가리킵니다. 다시 겁니다.
             _reschedule_reminders(event)
-            _enqueue(event, OutboxEvent.Type.SCHEDULE_CHANGED,
-                     f"{event.id}:moved:{int(event.start_at.timestamp())}",
-                     {"title": event.title, "start_at": event.start_at.isoformat(),
-                      "reason": request.data.get("reason") or ""},
-                     request.user)
             publish(event.project_id, "calendar.event.moved",
                     {"event_id": str(event.id), "start_at": event.start_at.isoformat()})
         return Response(EventSerializer(event, context=_ctx([event])).data)
@@ -312,12 +289,7 @@ def cancel(request, event_id):
         cancelled = Reminder.objects.filter(
             event=event, cancelled_at__isnull=True).update(cancelled_at=timezone.now())
 
-        outbox = None
-        if request.data.get("notify_participants", True) and event.discord_notified:
-            outbox = _enqueue(event, OutboxEvent.Type.SCHEDULE_CHANGED,
-                              f"{event.id}:cancel", {"action": "CANCEL_ANNOUNCEMENT",
-                                                     "title": event.title,
-                                                     "reason": reason}, request.user)
+        notify = bool(request.data.get("notify_participants", True)) and event.discord_notified
 
     people = list(EventParticipant.objects.filter(event=event)
                   .values_list("user_id", flat=True))
@@ -327,7 +299,8 @@ def cancel(request, event_id):
                     .exclude(status__in=(TaskStatus.COMPLETED, TaskStatus.REJECTED))
                     .values_list("id", flat=True)) if event.related_meeting_id else []
 
-    publish(event.project_id, "calendar.event.cancelled", {"event_id": str(event.id)})
+    publish(event.project_id, "calendar.event.cancelled",
+            {"event_id": str(event.id), "reason": reason, "announce": notify})
     return Response({
         "id": str(event.id), "status": event.status, "reason": reason,
         "impact": {"participants_notified": [str(u) for u in people],
@@ -335,36 +308,29 @@ def cancel(request, event_id):
                                       if event.related_meeting_id else None),
                    "cancelled_reminders": cancelled,
                    "affected_tasks": [str(t) for t in affected]},
-        "discord": ({"action": "CANCEL_ANNOUNCEMENT",
-                     "outbox_event_id": str(outbox.id)} if outbox else None),
+        "discord": ({"action": "CANCEL_ANNOUNCEMENT"} if notify else None),
         "cancelled_at": event.cancelled_at,
     })
 
 
-# ─────────────────────────────────────────── Discord 공지 (발송함까지만)
-def _enqueue(event, type_, key, payload, user):
+# ─────────────────────────────────────────── Discord 공지 요청
+def _request_announcement(event, channel="announcement"):
     """
-    발송함에 한 행 넣습니다. Discord 는 여기서 안 부릅니다.
+    공지를 **요청**만 합니다. 실제 발송은 A(Discord) 담당입니다.
 
-    같은 키가 다시 오면 기존 행을 돌려줍니다 — 중복 공지 방지.
+    여기서 Discord 를 직접 부르지 않는 건 설계 2원칙입니다 — 요청 트랜잭션 안에서
+    외부를 부르면 롤백돼도 메시지는 이미 나가 있습니다.
     """
-    try:
-        with transaction.atomic():
-            return OutboxEvent.objects.create(
-                team_id=event.project.team_id, project_id=event.project_id,
-                type=type_, target={"kind": "channel", "channel": "announcement"},
-                payload=payload, idempotency_key=key,
-                source_type="calendar_event", source_id=event.id)
-    except IntegrityError:
-        return OutboxEvent.objects.get(team_id=event.project.team_id,
-                                       idempotency_key=key)
-
-
-def _enqueue_announcement(event, user, channel="announcement"):
-    return _enqueue(event, OutboxEvent.Type.MEETING_ANNOUNCEMENT,
-                    f"{event.project.team_id}:{event.id}:announcement",
-                    {"title": event.title, "start_at": event.start_at.isoformat(),
-                     "channel": channel}, user)
+    if not event.discord_notified:
+        event.discord_notified = True
+        event.save(update_fields=["discord_notified", "updated_at"])
+    publish(event.project_id, "calendar.discord.announcement_requested", {
+        "event_id": str(event.id), "title": event.title,
+        "start_at": event.start_at.isoformat(), "channel": channel,
+        # A 가 발송함에 넣을 때 쓸 멱등 키. 같은 일정을 두 번 공지하면
+        # 참석자는 회의가 두 개인 줄 압니다.
+        "idempotency_key": f"{event.project.team_id}:{event.id}:announcement",
+    })
 
 
 @api_view(["POST"])
@@ -372,8 +338,8 @@ def notify_discord(request, event_id):
     """
     공지 요청.
 
-    `202` 는 **발송함에 담겼다**는 뜻이지 게시됐다는 뜻이 아닙니다.
-    실제 결과는 `GET /outbox-events/{id}` 로 확인합니다.
+    `202` 는 **요청이 접수됐다**는 뜻이지 게시됐다는 뜻이 아닙니다.
+    발송 상태 조회·재시도는 A 가 발송함을 붙이면서 함께 냅니다.
     """
     event, member = _load(request.user, event_id)
     if not _may_manage(event, member, request.user):
@@ -381,63 +347,7 @@ def notify_discord(request, event_id):
     if event.status == EventStatus.CANCELLED:
         raise BordoError("APPROVAL_REQUIRED", "취소된 일정은 공지할 수 없습니다.", status=409)
 
-    outbox = _enqueue_announcement(
-        event, request.user, request.data.get("channel") or "announcement")
-    if not event.discord_notified:
-        event.discord_notified = True
-        event.save(update_fields=["discord_notified", "updated_at"])
-    return Response({"outbox_event_id": str(outbox.id), "type": outbox.type,
-                     "status": outbox.status,
-                     "idempotency_key": outbox.idempotency_key,
-                     "poll_url": f"/api/v1/outbox-events/{outbox.id}"}, status=202)
-
-
-@api_view(["GET"])
-def outbox_detail(request, outbox_id):
-    """
-    발송 상태 조회.
-
-    계약에 없던 것을 넣었습니다. 공지가 실패했는데 화면에 표시가 없으면
-    사용자는 공지가 나간 줄 알고 아무도 안 오는 회의를 기다립니다.
-    """
-    row = OutboxEvent.objects.filter(pk=outbox_id).select_related("team").first()
-    if not row:
-        raise BordoError("STATE_NOT_FOUND", "발송 건을 찾을 수 없습니다.")
-    from apps.common.permissions import team_membership
-    member = team_membership(request.user, row.team_id)
-
-    body = OutboxSerializer(row).data
-    body["can_retry"] = (row.is_failed and member.team_role in ADMINS)
-    body["source"] = {"type": row.source_type,
-                      "id": str(row.source_id) if row.source_id else None}
-    return Response(body)
-
-
-@api_view(["POST"])
-def outbox_retry(request, outbox_id):
-    """
-    실패한 발송을 다시 큐에 올립니다.
-
-    성공한 건은 다시 안 보냅니다 — 같은 공지가 두 번 나가면 회의가 두 개인 줄 압니다.
-    """
-    row = OutboxEvent.objects.filter(pk=outbox_id).first()
-    if not row:
-        raise BordoError("STATE_NOT_FOUND", "발송 건을 찾을 수 없습니다.")
-    from apps.common.permissions import team_membership
-    member = team_membership(request.user, row.team_id)
-    if member.team_role not in ADMINS:
-        raise BordoError("TEAM_ACCESS_DENIED", "OWNER · ADMIN 만 재시도할 수 있습니다.")
-    if not row.is_failed:
-        raise BordoError("DUPLICATE_EVENT",
-                         "실패한 건만 재시도합니다. 이미 나간 공지를 다시 보내면 "
-                         "같은 회의가 두 번 공지됩니다.",
-                         details={"status": row.status})
-
-    row.status = OutboxStatus.PENDING
-    row.next_retry_at = None
-    row.error_code, row.error_message = "", ""
-    row.claimed_at = None
-    row.save(update_fields=["status", "next_retry_at", "error_code", "error_message",
-                            "claimed_at", "updated_at"])
-    return Response({"id": str(row.id), "status": row.status,
-                     "retry_count": row.retry_count})
+    _request_announcement(event, request.data.get("channel") or "announcement")
+    return Response({"event_id": str(event.id), "requested": True,
+                     "channel": request.data.get("channel") or "announcement"},
+                    status=202)

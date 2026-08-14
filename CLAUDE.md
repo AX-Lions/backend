@@ -201,7 +201,7 @@ publish(project_id, "task.completed", {"task_id": str(task.id)})
 | `apps/chat` | 채팅 5종 · 중요 · 첨부 · 달력 | **D** (API) |
 | `apps/states` | work · plan · thought · 활동 로그 | **D** |
 | `apps/tasks` | 태스크 · 상태 전이 · 진행률 | **D** |
-| `apps/calendars` | 일정 · 리마인더 · Outbox | **D** |
+| `apps/calendars` | 일정 · 리마인더 · 공지 **요청**(발송 아님) | **D** |
 | `apps/documents` | 문서 · 버전 · 비밀키 마스킹 | **D** |
 | `apps/discord` | 봇 연동 · 스킬 | **A** (예정) |
 
@@ -356,7 +356,7 @@ main                 배포 기준
 | 플로우 화살표 | 전달 1건 = 화살표 1개 | 사람 쌍마다 1개 + 종류별 개수 뱃지 (`arrows[].counts`) | 낱개를 그리면 두 사람 사이에 선이 열 개 겹칩니다 |
 | 콘텐츠 종류 | 회의 모드 3종 (`REVISION` 포함) | 6종 — 의견·요청사항·변동사항·**일정**·**결론**·**기타** | 필터 칸이 6개이고 화살표에 `일정` 뱃지가 실제로 붙어 있습니다 |
 | `REVISION` | 수정사항 | `CHANGE` 변동사항 | 화면 라벨과 중앙 요약표 헤더가 모두 `변동 사항` |
-| 브리핑 | narrative + used/deferred + needs_answer | **4섹션** + 정보 위치 칩 + 검색 | `확인이 필요해요` · `나에게 요청한 내용` 이 계약에 아예 없었습니다 |
+| 브리핑 | narrative + used/deferred + needs_answer | **4섹션** + 정보 위치 칩 + 검색 | `확인이 필요해요` · `나에게 요청한 내용` 이 계약에 아예 없었습니다. **구현은 B 담당** — 명세만 고쳐 뒀습니다 |
 | 홈 인사 | 문구를 교체 | 문구는 두고 **버튼을 추가** | 이름으로 맞이하는 인사가 사라지면 첫 화면 인상이 바뀝니다 |
 | 최근 회의 카드 | `main_agendas` · `main_opinions` | `main_decisions` · `agent_summary` · `missed` | 화면이 묻는 건 "무엇을 다뤘나"가 아니라 "무엇이 정해졌나" |
 | 대리인 호칭 | `AI 대리인` | **`{이름}의 Bordo`**, 화자일 때 **`Zero`** | `AI 대리인` 은 화면 어디에도 없는 낱말입니다 |
@@ -364,11 +364,24 @@ main                 배포 기준
 `used_answers` / `deferred_answers` 는 화면에서 빠졌지만 **응답에는 남깁니다** —
 대리인이 무엇을 근거로 답했는지는 추적성 자산이라 화면에 없다고 지우면 안 됩니다.
 
-### `나에게 요청한 내용` 을 바로 태스크로 안 만드는 이유
+### 담당이 갈리는 지점
 
-회의에서 넘어온 요청을 곧바로 `PENDING_APPROVAL` 태스크로 찍으면 승인 큐가
-남의 회의 요청으로 가득 찹니다. 그러면 승인이라는 행위가 뜻을 잃습니다.
-`POST /briefing-requests/{id}/accept` 로 사람이 받아들일 때 `TODO` 로 만듭니다.
+**명세는 화면을 따라 고쳤지만, 구현이 D 몫이 아닌 것들이 있습니다.**
+
+| 명세에 있는 것 | 구현 담당 | D 가 안 만든 이유 |
+|---|---|---|
+| `AiBriefing` 4섹션 · `/briefing-confirmations/…` · `/briefing-requests/…` | **B** | 브리핑은 대리인 산출물입니다 |
+| Outbox(발송함) · `/outbox-events/…` · ACK · 재시도 | **A** | Discord 발송 큐입니다 |
+
+`apps/calendars` 는 공지를 **요청만** 합니다 — `discord_notified` 표시를 올리고
+`calendar.discord.announcement_requested` 이벤트를 `publish()` 로 흘립니다.
+A 가 발송함을 붙이면 그 이벤트를 받아 큐에 넣습니다. 페이로드에 멱등 키를
+같이 실어 보내므로 같은 일정이 두 번 공지되지 않습니다.
+
+`나에게 요청한 내용` 을 바로 태스크로 안 만드는 이유는, 곧바로
+`PENDING_APPROVAL` 로 찍으면 승인 큐가 남의 회의 요청으로 가득 차
+승인이라는 행위가 뜻을 잃기 때문입니다 — B 가 accept 를 구현할 때
+`TODO` 로 만들면 됩니다(사람이 직접 받은 것이라 승인 단계가 필요 없습니다).
 
 ---
 

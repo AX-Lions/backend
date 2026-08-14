@@ -151,14 +151,12 @@ ev = call("POST", f"/projects/{PRJ}/calendar/events",
            "end_at": "2026-09-07T11:00:00+09:00", "notify_discord": True},
           expect=201, label="일정 생성 + 공지 요청")
 EV = ev["id"]
-OBX = ev.get("outbox_event_id")
 print(f"     현지 시각 = {json.dumps(ev['local_times'], ensure_ascii=False)[:120]}")
+assert ev["discord_notified"] is True, "공지 요청했는데 표시가 안 올랐습니다"
 call("POST", f"/calendar/events/{EV}/confirm", label="확정 (+리마인더 +회의 상태)")
 call("POST", f"/calendar/events/{EV}/confirm", label="재확정 — 리마인더 중복 없음")
-if OBX:
-    call("GET", f"/outbox-events/{OBX}", label="발송 상태 조회")
-    call("POST", f"/outbox-events/{OBX}/retry", expect=409,
-         label="성공 안 한 건 재시도 → 409")
+call("POST", f"/calendar/events/{EV}/notify-discord", {"channel": "announcement"},
+     expect=202, label="공지 재요청 → 202 (발송은 A 담당)")
 call("DELETE", f"/calendar/events/{EV}", expect=409,
      label="공지 나간 일정 삭제 → 409 (취소 먼저)")
 call("POST", f"/calendar/events/{EV}/cancel", {"reason": "문서 리뷰로 대체"},
@@ -264,7 +262,7 @@ if OTHER and ROOM != PROJECT_ROOM:
 call("GET", f"/chat/rooms/{uuid.uuid4()}", expect=404, label="남의 방 조회 → 404")
 
 # ═══════════════════════════════════════════ 디자인 반영분
-section("09/10. 디자인 반영 — 플로우 화살표 · Zero 브리핑 · 홈")
+section("09/10. 디자인 반영 — 플로우 화살표 · 홈")
 meetings = call("GET", f"/projects/{PRJ}/meetings", label="회의 목록")
 # 끝난 회의라야 플로우·브리핑이 있습니다. 예정 회의는 아직 그릴 게 없습니다.
 ended = [m for m in meetings["results"] if m["status"] == "ENDED"]
@@ -288,32 +286,9 @@ if MTG:
     call("GET", f"/meetings/{MTG}/flow?content_types=SCHEDULE,CONCLUSION",
          label="일정+결론 필터")
 
-    br = call("GET", f"/meetings/{MTG}/ai-briefing", label="Zero 브리핑 (4섹션)")
-    for k in ("narrative", "location_chips", "needs_confirmation",
-              "requests_to_me", "needs_answer"):
-        assert k in br, f"브리핑에 {k} 가 없습니다"
-    chips = " ".join(f"{c['label']} {c['count']}" for c in br["location_chips"])
-    print(f"     정보 위치 칩 = {chips}")
-    print(f"     확인 필요 {len(br['needs_confirmation'])} · "
-          f"나에게 요청 {len(br['requests_to_me'])} · "
-          f"답변 필요 {len(br['needs_answer'])}")
-    assert br["needs_confirmation"], "확인이 필요해요 섹션이 비었습니다"
-    assert br["requests_to_me"], "나에게 요청한 내용 섹션이 비었습니다"
-
-    call("GET", f"/meetings/{MTG}/ai-briefing?q=일정", label="브리핑 안 검색")
-
-    CONF = br["needs_confirmation"][0]["id"]
-    call("POST", f"/briefing-confirmations/{CONF}/confirm", label="변경 확인 처리")
-    after = call("GET", f"/meetings/{MTG}/ai-briefing", label="확인 후 브리핑")
-    assert len(after["needs_confirmation"]) < len(br["needs_confirmation"]), \
-        "확인했는데 카드가 안 빠집니다"
-
-    REQ = br["requests_to_me"][0]["id"]
-    acc = call("POST", f"/briefing-requests/{REQ}/accept", {"priority": "P1"},
-               label="요청 → 태스크로 받기")
-    assert acc["task"]["status"] == "TODO", "사람이 받은 요청인데 승인 대기입니다"
-    call("POST", f"/briefing-requests/{REQ}/accept", expect=409,
-         label="같은 요청 중복 받기 → 409")
+    br = call("GET", f"/meetings/{MTG}/ai-briefing", label="AI 브리핑 (B 담당 · 조회만)")
+    print(f"     활용 {len(br['used_answers'])} · 유보 {len(br['deferred_answers'])}"
+          f" · 답변필요 {len(br['needs_answer'])}")
 
 home = call("GET", "/home", label="홈")
 assert "shortcuts" in home, "shortcuts (Zero/Discord 바로가기) 가 없습니다"

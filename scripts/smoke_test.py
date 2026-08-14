@@ -91,10 +91,9 @@ work_edge = w["arrows"][0]["counts"][0]["edge_ids"][0]
 d2 = call("GET", f"/flow-edges/{work_edge}")
 print(f"     └ 문서 전달: document={bool(d2['document'])} sections={len((d2['document'] or {}).get('sections',[]))}")
 
-# Zero 브리핑 — 화면 4섹션
+# AI 브리핑
 br = call("GET", f"/meetings/{mid}/ai-briefing")
-print(f"     └ 칩 {len(br['location_chips'])} · 확인필요 {len(br['needs_confirmation'])}"
-      f" · 나에게요청 {len(br['requests_to_me'])} · 답변필요 {len(br['needs_answer'])}")
+print(f"     └ 활용 {len(br['used_answers'])} · 유보 {len(br['deferred_answers'])} · 답변필요 {len(br['needs_answer'])}")
 call("GET", f"/meetings/{mid}/pending-questions")
 
 # 대리인 설정

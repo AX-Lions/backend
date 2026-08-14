@@ -83,10 +83,6 @@ urlpatterns = [
 
     # ── 10. AI 대리인
     path(f"{API}/meetings/<uuid:meeting_id>/ai-briefing", meetings.ai_briefing),
-    path(f"{API}/briefing-confirmations/<uuid:confirmation_id>/confirm",
-         meetings.briefing_confirm),
-    path(f"{API}/briefing-requests/<uuid:request_id>/accept",
-         meetings.briefing_request_accept),
     path(f"{API}/meetings/<uuid:meeting_id>/pending-questions",
          meetings.meeting_pending_questions),
     path(f"{API}/me/agent/conversations", agent.conversations),
@@ -134,8 +130,6 @@ urlpatterns = [
     path(f"{API}/calendar/events/<uuid:event_id>/cancel", calendars.cancel),
     path(f"{API}/calendar/events/<uuid:event_id>/notify-discord",
          calendars.notify_discord),
-    path(f"{API}/outbox-events/<uuid:outbox_id>", calendars.outbox_detail),
-    path(f"{API}/outbox-events/<uuid:outbox_id>/retry", calendars.outbox_retry),
 
     # ── 16. 채팅
     path(f"{API}/chat/sidebar", chat.sidebar),

@@ -14,9 +14,8 @@ from django.utils import timezone
 
 from apps.accounts.models import User
 from apps.agent.models import AgentSettings, PendingQuestion
-from apps.meetings.models import (Agenda, AiBriefing, Attendance,
-                                  BriefingConfirmation, BriefingRequest,
-                                  FlowCategory, FlowContentType, FlowEdge, Meeting,
+from apps.meetings.models import (Agenda, AiBriefing, Attendance, FlowCategory,
+                                  FlowContentType, FlowEdge, Meeting,
                                   MeetingDocumentRef, MeetingParticipant,
                                   MeetingStatus, MeetingSummary, Surface, Utterance)
 from apps.orgs.models import (Favorite, Project, ProjectMember, RecentProject, Team,
@@ -150,7 +149,7 @@ class Command(BaseCommand):
         for i, (title, content, direction) in enumerate([
             ("회의 일정 조율", "시간대가 다른 팀원을 고려해 슬롯을 다시 잡는다.", "최비성 → 임수연, 서재민"),
             ("디자인 시안 마감", "8월 18일까지 확정하기로 합의.", "임수연 → 최비성"),
-            ("개발 일정 연장", "대리인이 유수인 대신 일정 연장 요청을 전달.", "유수인의 AI 대리인 → 최비성, 서재민"),
+            ("개발 일정 연장", "대리인이 유수인 대신 일정 연장 요청을 전달.", "유수인의 Bordo → 최비성, 서재민"),
         ]):
             agendas.append(Agenda.objects.create(
                 meeting=meeting, title=title, sort_order=i + 1, content=content,
@@ -253,29 +252,6 @@ class Command(BaseCommand):
             meeting=meeting, asker=users["서재민"], asker_name="서재민",
             target_user=owner, title="디자인 시안 마감 관련",
             body="8/18 마감이면 QA 기간이 3일뿐인데 괜찮을까요?")
-
-        # 브리핑 `확인이 필요해요` — 자리를 비운 사이 바뀐 것
-        first_edge = FlowEdge.objects.filter(meeting=meeting).order_by("occurred_at").first()
-        BriefingConfirmation.objects.create(
-            meeting=meeting, user=owner, title="백엔드 개발 일정 변경",
-            body="API 연동 완료일이 8/16 → 8/19로 변경됐어요.",
-            edge=first_edge, agenda=agendas[1],
-            occurred_at=ended_at - timedelta(minutes=33))
-        BriefingConfirmation.objects.create(
-            meeting=meeting, user=owner, title="디자인 수정 요청",
-            body="임수연님이 회의 화면의 우측 패널 너비 조정을 요청했어요.",
-            edge=first_edge, agenda=agendas[1],
-            occurred_at=ended_at - timedelta(minutes=30))
-
-        # 브리핑 `나에게 요청한 내용` — 아직 태스크가 아닙니다
-        BriefingRequest.objects.create(
-            meeting=meeting, user=owner, requester=users["서재민"],
-            requester_name="서재민", title="8/15까지 회의 화면 디자인 수정",
-            due_at=ended_at + timedelta(days=2), edge=first_edge)
-        BriefingRequest.objects.create(
-            meeting=meeting, user=owner, requester=users["임수연"],
-            requester_name="임수연", title="수정된 화면 개발팀에 공유",
-            note="다음 회의 전까지 확인이 필요해요.", edge=first_edge)
 
         self.stdout.write(self.style.SUCCESS(
             f"\n시드 완료\n"
