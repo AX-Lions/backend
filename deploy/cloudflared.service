@@ -23,7 +23,7 @@ Wants=network-online.target
 Type=simple
 User=zanviq
 Group=zanviq
-EnvironmentFile=/srv/bordo/backend/.env
+EnvironmentFile=/home/zanviq/bordo/backend/.env
 
 # --no-autoupdate: 자동 업데이트가 예고 없이 프로세스를 재시작합니다.
 #   시연 도중에 끊기면 곤란하므로 갱신은 사람이 정한 시점에 합니다.
