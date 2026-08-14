@@ -6,7 +6,6 @@
 
 # Excluded main file
 main3.py
-CLAUDE.md
 
 # Python
 __pycache__/
