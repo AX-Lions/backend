@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, linux, ARM64, bordo]
+    runs-on: [self-hosted, Linux, ARM64, bordo]
     timeout-minutes: 20
 
     steps:
