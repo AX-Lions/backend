@@ -1,0 +1,52 @@
+# Cloudflare Tunnel — 도메인을 이 서버의 백엔드로 연결합니다.
+#
+#   sudo cp deploy/cloudflared.service /etc/systemd/system/bordo-tunnel.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now bordo-tunnel
+#
+# 토큰은 유닛 파일이 아니라 .env 에서 읽습니다. 유닛 파일은 /etc 아래에 644 로
+# 놓이므로 여기에 토큰을 적으면 서버의 모든 사용자가 읽을 수 있습니다.
+#
+# 이 서버에는 다른 프로젝트의 터널이 이미 돌고 있습니다(컨테이너). 이름을
+# bordo-tunnel 로 분리해 서로 건드리지 않습니다.
+
+[Unit]
+Description=Bordo Cloudflare Tunnel
+Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
+
+After=network-online.target bordo-backend.service
+Wants=network-online.target
+# 백엔드가 아직 안 떴어도 터널은 뜹니다. 그 사이 요청은 502 가 되지만,
+# Requires 로 묶으면 백엔드 재시작마다 터널까지 끊겨 복구가 더 느립니다.
+
+[Service]
+Type=simple
+User=zanviq
+Group=zanviq
+EnvironmentFile=/home/zanviq/bordo/backend/.env
+
+# --no-autoupdate: 자동 업데이트가 예고 없이 프로세스를 재시작합니다.
+#   시연 도중에 끊기면 곤란하므로 갱신은 사람이 정한 시점에 합니다.
+# run --token: 대시보드에서 만든 터널에 붙습니다. 설정 파일이 따로 없어
+#   대회 측 서버로 옮길 때 토큰만 바꾸면 됩니다.
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# 네트워크만 하는 프로세스라 쓰기 권한이 필요 없습니다.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+MemoryMax=256M
+TasksMax=64
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bordo-tunnel
+
+[Install]
+WantedBy=multi-user.target
