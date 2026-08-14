@@ -31,6 +31,27 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 # admin·세션 폼은 Origin 을 대조합니다. 터널 도메인을 넣지 않으면 로그인이 403 입니다.
 CSRF_TRUSTED_ORIGINS = _csv("DJANGO_CSRF_TRUSTED_ORIGINS")
 
+
+def _flag(name: str, default: bool) -> bool:
+    return os.environ.get(name, "1" if default else "0") == "1"
+
+
+# 쿠키에 Secure 를 붙입니다. 배포는 터널이 TLS 를 끊어 주므로 기본으로 켜고,
+# 개발은 http 라 켜면 로그인이 안 됩니다.
+SESSION_COOKIE_SECURE = _flag("DJANGO_SECURE_COOKIES", not DEBUG)
+CSRF_COOKIE_SECURE = SESSION_COOKIE_SECURE
+
+# HSTS 는 기본 0(끔)입니다. 이 도메인은 다른 프로젝트가 쓰는 도메인의 하위입니다.
+# 켤 때도 SECURE_HSTS_INCLUDE_SUBDOMAINS 는 절대 켜지 마십시오 — 형제 서비스까지
+# HTTPS 전용으로 묶여 버리고, 브라우저에 캐시되면 되돌리는 데 시간이 걸립니다.
+SECURE_HSTS_SECONDS = int(os.environ.get("DJANGO_HSTS_SECONDS", "0"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+SECURE_HSTS_PRELOAD = False
+
+# Cloudflare 가 이미 http→https 로 돌려보냅니다. Django 에서 또 켜면 루프백으로
+# 들어오는 헬스체크까지 301 이 되어 배포 확인이 실패합니다. 필요하면 켤 수 있게만 둡니다.
+SECURE_SSL_REDIRECT = _flag("DJANGO_SSL_REDIRECT", False)
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
