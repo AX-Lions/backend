@@ -3,6 +3,9 @@
 Bordo 백엔드에서 작업할 때 참고하는 문서입니다.
 `bordo-openapi.yaml` 이 API 계약의 원본이고, 이 문서는 **그 계약을 코드로 옮길 때의 규칙**입니다.
 
+Django 5 + DRF. 상위 맥락은 `../CLAUDE.md` 와 `../.claude/docs/BordoProgress-v03.md`,
+저장소 3곳 공통 협업 규칙은 `CONTRIBUTING.md` 를 보십시오.
+
 ---
 
 ## 이 서비스가 뭘 하는가
@@ -121,6 +124,25 @@ raise BordoError("PROJECT_ACCESS_DENIED",
 `visibility=private` 문서, 참여자가 아닌 채팅방, 남의 비공개 생각은
 **403 이 아니라 404** 입니다. 403 을 주면 "그런 게 있긴 하다"가 새어 나갑니다.
 
+같은 이유로 `PRIVATE` 문서는 다른 Agent 에게 **존재 여부조차 반환하지 않습니다.**
+
+### 조회에는 스코프 필터를 반드시 건다
+
+모든 조회에 `team_id` / `project_id` 필터를 겁니다. 소프트 삭제는 매니저가
+갈라 줍니다 — `objects` 는 살아 있는 행만, `all_objects` 가 전부입니다.
+**기본 매니저를 우회하지 마십시오.**
+
+### 필터는 파이썬이 아니라 DB 쿼리로
+
+`content_types` · `surfaces` · `since_minutes` 는 전부 쿼리로 내립니다.
+`participant_ids` 만 JSON 배열이라 예외입니다.
+
+카테고리에 맞지 않는 필터가 오면 빈 배열이 아니라 **400** 입니다. 빈 배열을 주면
+"조건에 맞는 게 없다"와 "조건 자체가 틀렸다"를 클라이언트가 구별하지 못합니다.
+
+`FlowEdge.compute_opacity()` 는 조회 시각이 아니라 **회의 구간** 기준입니다.
+조회 시각으로 하면 같은 회의를 내일 열었을 때 그림이 달라집니다.
+
 ### 날짜는 들어오는 자리에서 파싱
 
 ```python
@@ -220,6 +242,23 @@ publish(project_id, "task.completed", {"task_id": str(task.id)})
 구역이 주석으로 나뉘어 있습니다. **자기 구역 끝에 붙이십시오.**
 남의 구역에 끼워 넣으면 머지에서 부딪힙니다.
 
+`config/settings.py` · `config/urls.py` · `apps/common/events.py` 셋은 A·B·D 가
+함께 건드리는 공용 파일입니다. **고쳤으면 알리십시오.**
+
+### 담당 사이 인터페이스
+
+앱을 넘나들지 않는 대신 아래 두 지점으로 붙습니다. 시그니처를 바꾸면 상대 쪽이
+말없이 깨지므로 바꾸기 전에 알립니다.
+
+```python
+# apps/agent/tasks.py — A(Discord)가 Utterance 저장 직후 호출. 반환값 없음, 대기 없음.
+@shared_task
+def run_agent_for_utterance(utterance_id: str) -> None
+
+# apps/common/events.py — 내부에서 transaction.on_commit() 처리
+publish(project_id, event_type, payload)
+```
+
 ---
 
 ## 개발 환경
@@ -233,8 +272,20 @@ uv pip install --python .venv/bin/python -r requirements.txt
 .venv/bin/python manage.py runserver
 ```
 
+Windows PowerShell 이면 앞의 두 줄 대신 이렇게 합니다. 이하 `.venv/bin/python` 은
+전부 `.venv\Scripts\python` 으로 읽으십시오.
+
+```powershell
+python -m venv .venv; .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
 기본 DB 는 SQLite 입니다. `DATABASE_URL` 이 있으면 PostgreSQL 을 씁니다
 (운영은 pgvector 때문에 PostgreSQL 전제).
+데모 계정 비밀번호는 전부 `Bordo!2026` 이고 `susu@bordo.dev` 가 팀 OWNER 이자
+회의 불참자입니다 — 브리핑·불참 뱃지를 볼 때 이 계정으로 보십시오.
+
+Celery 는 개발 중 `CELERY_TASK_ALWAYS_EAGER=True` 로 Redis 없이 동작시킵니다.
 
 ### 검증
 
@@ -402,6 +453,22 @@ A 가 발송함을 붙이면 그 이벤트를 받아 큐에 넣습니다. 페이
 
 ---
 
+## 현재 상태
+
+명세는 오퍼레이션 **172개**(`bordo-openapi.yaml` `0.0.4`), `config/urls.py` 에 라우트
+**89개**가 등록돼 있습니다.
+
+| 상태 | 영역 |
+|---|---|
+| 동작함 | 인증 · 팀 · 프로젝트 · 홈 · 회의 CRUD · 플로우 조회 · 대리인 설정 · 채팅 · 현재 상태 · 태스크 · 캘린더 · 문서 |
+| **껍데기** | `ai-briefing` · `pending-questions` · 플로우 엣지 — **시드가 넣은 하드코딩. 생성 코드 없음**(B 담당) |
+| 미구현 | Discord 13 · WebSocket · MCP 1 · 동기화 4 |
+
+> 껍데기 3종은 API 가 응답하므로 동작하는 것처럼 보입니다. 특히 **플로우 엣지는 핵심
+> 화면 2개 중 하나의 데이터원**입니다.
+
+---
+
 ## 알려진 미구현
 
 - **`Idempotency-Key` 가 동작하지 않습니다.** `apps/common/idempotency.py` 의
@@ -414,3 +481,15 @@ A 가 발송함을 붙이면 그 이벤트를 받아 큐에 넣습니다. 페이
 - 임베딩 검색은 2차입니다. 문서 검색은 지금 `icontains` 입니다.
 - `DailyChatSummary` 는 빈 껍데기입니다. 조회 계약만 확정해 뒀고 생성기는 B 담당입니다.
 - MCP(`/mcp`)와 동기화는 2차 범위라 없습니다.
+
+---
+
+## 다음 작업 (우선순위)
+
+1. 회의 시작·종료 `/internal/v1/meetings/start|end` — Discord Bot 이 호출
+2. Discord 자연어 제어 `/internal/v1/discord/commands` + 스킬 실행
+3. WebSocket `/ws/projects/{project_id}` — Channels. `publish()` 호출부는 안 바뀝니다
+4. AI 대리인 코어 — `services/llm.py` · `react.py` · `policy.py` · `briefing.py` · `tasks.py`
+5. Celery + Redis
+6. `meetings/0002` 후속 — 플로우 내용 종류가 6종이 됐으므로 `FlowEdge` 생성 코드가
+   새 종류(`일정` · `결론` · `기타`)를 따라와야 합니다 (B 담당)
