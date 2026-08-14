@@ -20,6 +20,17 @@ set -a; . ./.env; set +a
 
 # ── 1. 의존성 ────────────────────────────────────────────────
 log "의존성"
+# venv 안의 실행 스크립트는 shebang 에 절대 경로를 박아 둡니다. 프로젝트 폴더를
+# 옮기면 그 경로가 사라져 systemd 가 203/EXEC 로 죽습니다 — 파일은 있는데
+# 인터프리터가 없어서라, 로그만 보면 원인이 헷갈립니다.
+# 대회 측 서버로 옮길 때 또 겪을 일이므로 여기서 감지해 다시 만듭니다.
+if [ -d .venv ] && ! .venv/bin/python -c 'import sys' >/dev/null 2>&1; then
+  echo "  venv 가 현재 경로와 어긋납니다 — 다시 만듭니다"
+  rm -rf .venv
+elif [ -x .venv/bin/gunicorn ] && ! .venv/bin/gunicorn --version >/dev/null 2>&1; then
+  echo "  venv 스크립트의 경로가 어긋납니다 — 다시 만듭니다"
+  rm -rf .venv
+fi
 [ -d .venv ] || python3 -m venv .venv
 # requirements.txt 가 바뀌지 않았으면 건너뜁니다. 라즈베리파이에서 psycopg 빌드가
 # 매 배포마다 돌면 몇 분씩 걸립니다.
