@@ -117,6 +117,9 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+# collectstatic 이 모아 둘 위치. 없으면 배포에서 collectstatic 이 ImproperlyConfigured 로
+# 죽고, 넘어가더라도 admin 이 CSS 없이 뜹니다. 개발에서는 쓰이지 않습니다.
+STATIC_ROOT = Path(os.environ.get("DJANGO_STATIC_ROOT") or BASE_DIR / "staticfiles")
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # ─────────────────────────────────────────── DRF
