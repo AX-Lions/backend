@@ -67,12 +67,19 @@ ASGI_APPLICATION = "config.asgi.application"
 # ─────────────────────────────────────────── DB
 _db_url = os.environ.get("DATABASE_URL")
 if _db_url:
-    from urllib.parse import urlparse
+    from urllib.parse import urlparse, unquote
     u = urlparse(_db_url)
     DATABASES = {"default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": u.path.lstrip("/"), "USER": u.username, "PASSWORD": u.password,
+        "NAME": u.path.lstrip("/"),
+        # 생성한 비밀번호에 @ · / · # 이 들어가면 URL 인코딩해서 넣게 됩니다.
+        # 디코딩하지 않으면 인증만 조용히 실패하고 원인이 드러나지 않습니다.
+        "USER": unquote(u.username or ""),
+        "PASSWORD": unquote(u.password or ""),
         "HOST": u.hostname, "PORT": u.port or 5432,
+        # 요청마다 연결을 새로 여는 비용이 라즈베리파이에서는 눈에 띕니다.
+        # 0 이면 매 요청 새 연결 — 개발에서는 그 편이 편하므로 환경변수로 둡니다.
+        "CONN_MAX_AGE": int(os.environ.get("DJANGO_CONN_MAX_AGE", "60")),
     }}
 else:
     DATABASES = {"default": {
