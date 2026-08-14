@@ -1,0 +1,55 @@
+# Bordo 데이터베이스
+#
+# 이 파일은 DB 하나만 띄웁니다. 앱(gunicorn)과 터널은 systemd 프로세스로 돌기 때문에
+# 여기 없습니다. 프론트와 백엔드가 저장소부터 분리돼 있어 전체를 한 compose 로 묶으면
+# 어느 쪽 담당이 무엇을 띄우는지가 흐려집니다.
+#
+#   docker compose -f deploy/docker-compose.db.yml --env-file .env up -d
+#
+# 서버에는 이미 다른 프로젝트의 PostgreSQL 이 돌고 있습니다. name 과 포트를 분리해
+# 서로 건드리지 않게 합니다.
+
+name: bordo
+
+services:
+  db:
+    # pgvector 포함 이미지입니다. 지금 코드는 벡터를 쓰지 않지만, ReAct 검색이 붙으면
+    # 필요해집니다. 나중에 갈아타면 데이터를 옮겨야 하므로 처음부터 이쪽으로 둡니다.
+    image: pgvector/pgvector:pg17
+    container_name: bordo-db
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bordo}
+      POSTGRES_USER: ${POSTGRES_USER:-bordo}
+      # 기본값을 두지 않습니다. 비어 있으면 컨테이너가 뜨지 않고 즉시 알려줍니다.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?.env 에 POSTGRES_PASSWORD 를 설정하십시오}
+      # 저장은 UTC. 표시 시각 환산은 애플리케이션이 합니다.
+      TZ: UTC
+
+    ports:
+      # 루프백에만 엽니다. 외부 노출은 Cloudflare Tunnel 을 거치는 앱 포트 하나뿐이고,
+      # DB 는 어떤 경우에도 인터넷에서 닿으면 안 됩니다.
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+
+    volumes:
+      # SD카드가 아니라 전용 볼륨을 가리킵니다. 서버에서는 /srv/bordo/data 입니다.
+      - ${BORDO_DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
+
+    healthcheck:
+      # 마이그레이션을 DB 가 준비되기 전에 돌리면 실패합니다. 배포 스크립트가 이 상태를 봅니다.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bordo} -d ${POSTGRES_DB:-bordo}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    # PostgreSQL 은 공유 메모리를 쓰는데 도커 기본값 64MB 로는 정렬·해시 조인에서 막힙니다.
+    shm_size: 256mb
+
+    logging:
+      # 임시 서버의 SD카드 여유가 크지 않습니다. 로그가 무한히 쌓이지 않게 막습니다.
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
