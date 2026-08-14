@@ -82,12 +82,34 @@ class FlowFilterPresetSerializer(serializers.ModelSerializer):
 
 
 class AiBriefingSerializer(serializers.ModelSerializer):
+    """
+    우측 사이드바 `Zero 브리핑`.
+
+    네 섹션(`회의 한눈에 보기` · `확인이 필요해요` · `답변이 필요해요` ·
+    `나에게 요청한 내용`)은 각각 다른 테이블에서 오므로 뷰에서 한 번에 모아
+    context 로 넘깁니다. serializer 안에서 조회하면 브리핑 한 번에 쿼리가
+    섹션 수만큼 더 붙습니다.
+    """
+    location_chips = serializers.SerializerMethodField()
+    needs_confirmation = serializers.SerializerMethodField()
+    requests_to_me = serializers.SerializerMethodField()
     needs_answer = serializers.SerializerMethodField()
+    generated_at = serializers.DateTimeField(source="created_at", read_only=True)
 
     class Meta:
         model = AiBriefing
-        fields = ("meeting_id", "narrative", "used_answers", "deferred_answers",
-                  "needs_answer", "settings_version")
+        fields = ("meeting_id", "narrative", "location_chips", "needs_confirmation",
+                  "requests_to_me", "needs_answer", "used_answers",
+                  "deferred_answers", "settings_version", "generated_at")
+
+    def get_location_chips(self, obj):
+        return self.context.get("location_chips", [])
+
+    def get_needs_confirmation(self, obj):
+        return self.context.get("needs_confirmation", [])
+
+    def get_requests_to_me(self, obj):
+        return self.context.get("requests_to_me", [])
 
     def get_needs_answer(self, obj):
         return self.context.get("needs_answer", [])

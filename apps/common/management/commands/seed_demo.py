@@ -14,8 +14,9 @@ from django.utils import timezone
 
 from apps.accounts.models import User
 from apps.agent.models import AgentSettings, PendingQuestion
-from apps.meetings.models import (Agenda, AiBriefing, Attendance, FlowCategory,
-                                  FlowContentType, FlowEdge, Meeting,
+from apps.meetings.models import (Agenda, AiBriefing, Attendance,
+                                  BriefingConfirmation, BriefingRequest,
+                                  FlowCategory, FlowContentType, FlowEdge, Meeting,
                                   MeetingDocumentRef, MeetingParticipant,
                                   MeetingStatus, MeetingSummary, Surface, Utterance)
 from apps.orgs.models import (Favorite, Project, ProjectMember, RecentProject, Team,
@@ -173,20 +174,51 @@ class Command(BaseCommand):
             return {"id": f"{u.id}:agent" if agent else str(u.id),
                     "kind": "AGENT" if agent else "USER",
                     "user_id": str(u.id),
-                    "name": f"{u.name}의 AI 대리인" if agent else u.name,
+                    "name": f"{u.name}의 Bordo" if agent else u.name,
                     "avatar_url": u.avatar_url or None}
 
+        # 같은 사람 쌍에 여러 건을 넣습니다 — 화면의 화살표는 쌍마다 하나이고
+        # 그 위에 `의견 3` `요청사항 5` 처럼 종류별 개수가 붙기 때문입니다.
+        # 한 건씩만 두면 집계가 전부 1 로 나와 뱃지가 제대로인지 알 수 없습니다.
+        MT = FlowCategory.MEETING
         edges = [
-            (FlowCategory.MEETING, FlowContentType.OPINION, "의견",
+            (MT, FlowContentType.OPINION, "의견",
              node(users["최비성"]), [node(users["임수연"])], agendas[0], None,
              Surface.DISCORD, 48),
-            (FlowCategory.MEETING, FlowContentType.REQUEST, "요청 사항",
+            (MT, FlowContentType.OPINION, "의견",
+             node(users["최비성"]), [node(users["임수연"])], agendas[0], None,
+             Surface.DISCORD, 45),
+            (MT, FlowContentType.OPINION, "의견",
+             node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
+             Surface.SERVICE, 44),
+            (MT, FlowContentType.REQUEST, "요청사항",
+             node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
+             Surface.DISCORD, 41),
+            (MT, FlowContentType.REQUEST, "요청사항",
+             node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
+             Surface.DISCORD, 39),
+            (MT, FlowContentType.CHANGE, "변동사항",
+             node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
+             Surface.SERVICE, 33),
+
+            (MT, FlowContentType.REQUEST, "요청사항",
+             node(users["임수연"]), [node(owner, agent=True)], agendas[2], None,
+             Surface.DISCORD, 28),
+            (MT, FlowContentType.CHANGE, "변동사항",
+             node(users["임수연"]), [node(owner, agent=True)], agendas[2], None,
+             Surface.DISCORD, 26),
+            (MT, FlowContentType.SCHEDULE, "일정",
+             node(users["임수연"]), [node(owner, agent=True)], agendas[2], None,
+             Surface.SERVICE, 24),
+
+            (MT, FlowContentType.CONCLUSION, "결론",
              node(owner, agent=True),
              [node(users["최비성"]), node(users["서재민"])], agendas[2], None,
-             Surface.DISCORD, 26),
-            (FlowCategory.MEETING, FlowContentType.REVISION, "수정 사항",
-             node(users["임수연"]), [node(users["최비성"])], agendas[1], None,
-             Surface.SERVICE, 12),
+             Surface.DISCORD, 18),
+            (MT, FlowContentType.ETC, "기타",
+             node(owner, agent=True), [node(users["서재민"])], None, None,
+             Surface.SERVICE, 14),
+
             (FlowCategory.WORK, FlowContentType.DOCUMENT, "문서",
              node(users["최비성"]), [node(users["임수연"])], None, doc,
              Surface.SERVICE, 40),
@@ -221,6 +253,29 @@ class Command(BaseCommand):
             meeting=meeting, asker=users["서재민"], asker_name="서재민",
             target_user=owner, title="디자인 시안 마감 관련",
             body="8/18 마감이면 QA 기간이 3일뿐인데 괜찮을까요?")
+
+        # 브리핑 `확인이 필요해요` — 자리를 비운 사이 바뀐 것
+        first_edge = FlowEdge.objects.filter(meeting=meeting).order_by("occurred_at").first()
+        BriefingConfirmation.objects.create(
+            meeting=meeting, user=owner, title="백엔드 개발 일정 변경",
+            body="API 연동 완료일이 8/16 → 8/19로 변경됐어요.",
+            edge=first_edge, agenda=agendas[1],
+            occurred_at=ended_at - timedelta(minutes=33))
+        BriefingConfirmation.objects.create(
+            meeting=meeting, user=owner, title="디자인 수정 요청",
+            body="임수연님이 회의 화면의 우측 패널 너비 조정을 요청했어요.",
+            edge=first_edge, agenda=agendas[1],
+            occurred_at=ended_at - timedelta(minutes=30))
+
+        # 브리핑 `나에게 요청한 내용` — 아직 태스크가 아닙니다
+        BriefingRequest.objects.create(
+            meeting=meeting, user=owner, requester=users["서재민"],
+            requester_name="서재민", title="8/15까지 회의 화면 디자인 수정",
+            due_at=ended_at + timedelta(days=2), edge=first_edge)
+        BriefingRequest.objects.create(
+            meeting=meeting, user=owner, requester=users["임수연"],
+            requester_name="임수연", title="수정된 화면 개발팀에 공유",
+            note="다음 회의 전까지 확인이 필요해요.", edge=first_edge)
 
         self.stdout.write(self.style.SUCCESS(
             f"\n시드 완료\n"

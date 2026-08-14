@@ -83,6 +83,10 @@ urlpatterns = [
 
     # ── 10. AI 대리인
     path(f"{API}/meetings/<uuid:meeting_id>/ai-briefing", meetings.ai_briefing),
+    path(f"{API}/briefing-confirmations/<uuid:confirmation_id>/confirm",
+         meetings.briefing_confirm),
+    path(f"{API}/briefing-requests/<uuid:request_id>/accept",
+         meetings.briefing_request_accept),
     path(f"{API}/meetings/<uuid:meeting_id>/pending-questions",
          meetings.meeting_pending_questions),
     path(f"{API}/me/agent/conversations", agent.conversations),

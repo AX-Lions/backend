@@ -70,7 +70,13 @@ MY_ID = me["id"]
 teams = call("GET", "/teams", label="팀 목록")
 TEAM_ID = teams["results"][0]["id"]
 projects = call("GET", f"/teams/{TEAM_ID}/projects", label="프로젝트 목록")
+# 회의가 들어 있는 프로젝트를 고릅니다 — 플로우·브리핑 검증이 거기 매달려 있습니다.
 PRJ = projects["results"][0]["id"]
+for p in projects["results"]:
+    got = call("GET", f"/projects/{p['id']}/meetings", label=f"회의 확인 · {p['name']}")
+    if got.get("results"):
+        PRJ = p["id"]
+        break
 members = call("GET", f"/projects/{PRJ}/members", label="프로젝트 참여자")
 OTHER = next((m["user_id"] for m in members["results"] if m["user_id"] != MY_ID), None)
 
@@ -256,6 +262,70 @@ if OTHER and ROOM != PROJECT_ROOM:
          label="1:1 방에 사람 추가 → 409")
 
 call("GET", f"/chat/rooms/{uuid.uuid4()}", expect=404, label="남의 방 조회 → 404")
+
+# ═══════════════════════════════════════════ 디자인 반영분
+section("09/10. 디자인 반영 — 플로우 화살표 · Zero 브리핑 · 홈")
+meetings = call("GET", f"/projects/{PRJ}/meetings", label="회의 목록")
+# 끝난 회의라야 플로우·브리핑이 있습니다. 예정 회의는 아직 그릴 게 없습니다.
+ended = [m for m in meetings["results"] if m["status"] == "ENDED"]
+MTG = (ended or meetings["results"] or [{}])[0].get("id")
+
+if MTG:
+    fl = call("GET", f"/meetings/{MTG}/flow?category=MEETING", label="플로우 (화살표 집계)")
+    assert "arrows" in fl, "arrows 가 없습니다 (edges 그대로면 화살표가 겹칩니다)"
+    print(f"     노드 {len(fl['nodes'])} · 화살표 {len(fl['arrows'])}")
+    for a in fl["arrows"]:
+        badge = " ".join(f"{c['label']} {c['count']}" for c in a["counts"])
+        print(f"       {a['direction_label'] or a['id']} → {badge}")
+    # 한 쌍에 여러 건이 묶였는지 = 집계가 실제로 동작하는지
+    assert any(a["total_count"] > 1 for a in fl["arrows"]), "집계가 전부 1건입니다"
+    assert any(c["label"] == "일정" for a in fl["arrows"] for c in a["counts"]), \
+        "일정(SCHEDULE) 종류가 안 보입니다"
+    print(f"     필터 가능 종류 = {fl['filter_options']['content_types']}")
+
+    call("GET", f"/meetings/{MTG}/flow?content_types=REVISION", expect=400,
+         label="없어진 REVISION 필터 → 400")
+    call("GET", f"/meetings/{MTG}/flow?content_types=SCHEDULE,CONCLUSION",
+         label="일정+결론 필터")
+
+    br = call("GET", f"/meetings/{MTG}/ai-briefing", label="Zero 브리핑 (4섹션)")
+    for k in ("narrative", "location_chips", "needs_confirmation",
+              "requests_to_me", "needs_answer"):
+        assert k in br, f"브리핑에 {k} 가 없습니다"
+    chips = " ".join(f"{c['label']} {c['count']}" for c in br["location_chips"])
+    print(f"     정보 위치 칩 = {chips}")
+    print(f"     확인 필요 {len(br['needs_confirmation'])} · "
+          f"나에게 요청 {len(br['requests_to_me'])} · "
+          f"답변 필요 {len(br['needs_answer'])}")
+    assert br["needs_confirmation"], "확인이 필요해요 섹션이 비었습니다"
+    assert br["requests_to_me"], "나에게 요청한 내용 섹션이 비었습니다"
+
+    call("GET", f"/meetings/{MTG}/ai-briefing?q=일정", label="브리핑 안 검색")
+
+    CONF = br["needs_confirmation"][0]["id"]
+    call("POST", f"/briefing-confirmations/{CONF}/confirm", label="변경 확인 처리")
+    after = call("GET", f"/meetings/{MTG}/ai-briefing", label="확인 후 브리핑")
+    assert len(after["needs_confirmation"]) < len(br["needs_confirmation"]), \
+        "확인했는데 카드가 안 빠집니다"
+
+    REQ = br["requests_to_me"][0]["id"]
+    acc = call("POST", f"/briefing-requests/{REQ}/accept", {"priority": "P1"},
+               label="요청 → 태스크로 받기")
+    assert acc["task"]["status"] == "TODO", "사람이 받은 요청인데 승인 대기입니다"
+    call("POST", f"/briefing-requests/{REQ}/accept", expect=409,
+         label="같은 요청 중복 받기 → 409")
+
+home = call("GET", "/home", label="홈")
+assert "shortcuts" in home, "shortcuts (Zero/Discord 바로가기) 가 없습니다"
+print(f"     Zero 방 = {home['shortcuts']['agent_room_id']}, "
+      f"Discord 연결 = {home['shortcuts']['discord']['connected']}")
+if home["today_schedule"]:
+    a = home["today_schedule"][0]["action"]
+    print(f"     오늘 일정 버튼 = {a['label']} ({a['kind']})")
+if home["recent_meeting_summary"]:
+    s = home["recent_meeting_summary"]
+    print(f"     최근 회의 = {s['team_name']} / {s['title']} / 불참={s['missed']}")
+    assert "main_decisions" in s and "agent_summary" in s, "요약 카드 필드가 옛 모양입니다"
 
 # ═══════════════════════════════════════════ 결과
 print(f"\n{'═' * 60}")

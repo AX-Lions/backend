@@ -27,11 +27,24 @@ class FlowCategory(models.TextChoices):
 
 
 class FlowContentType(models.TextChoices):
+    """
+    화면 좌측 `필터링 > 내용` 체크박스와 1:1 입니다.
+
+    회의 모드가 6종인 이유 — 와이어프레임 필터에 칸이 6개이고 화살표 뱃지에
+    `일정` 이 실제로 붙어 있습니다. 3종으로 두면 회의에서 오간 일정 조정과
+    결론이 플로우에 표현될 자리가 없습니다.
+
+    `REVISION`(수정사항) → `CHANGE`(변동사항) 로 바꾼 건 화면 라벨을 따른 것입니다.
+    중앙 요약표 헤더도 `변동 사항` 입니다.
+    """
     DOCUMENT = "DOCUMENT", "문서"
     PLAN = "PLAN", "계획"
     OPINION = "OPINION", "의견"
     REQUEST = "REQUEST", "요청사항"
-    REVISION = "REVISION", "수정사항"
+    CHANGE = "CHANGE", "변동사항"
+    SCHEDULE = "SCHEDULE", "일정"
+    CONCLUSION = "CONCLUSION", "결론"
+    ETC = "ETC", "기타"
 
 
 class Surface(models.TextChoices):
@@ -264,6 +277,68 @@ class AiBriefing(TimeStamped):
             models.UniqueConstraint(fields=["meeting", "user"], name="uq_ai_briefing"),
         ]
         indexes = [models.Index(fields=["user", "read_at"])]
+
+
+class BriefingConfirmation(UUIDModel, TimeStamped):
+    """
+    브리핑 `확인이 필요해요` 카드.
+
+    `used_answers` / `deferred_answers` 와 다릅니다. 그 둘은 *대리인이 무엇을
+    답했나* 이고, 이건 *내가 없는 사이 무엇이 바뀌었나* 입니다.
+
+    **확인은 사람마다 따로 남습니다.** 같은 변경을 여러 명이 봐야 하는데
+    한 사람이 확인했다고 모두의 목록에서 사라지면 나머지는 영영 못 봅니다.
+    """
+    meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE,
+                                related_name="briefing_confirmations")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                             related_name="briefing_confirmations")
+    title = models.CharField(max_length=200)
+    body = models.TextField(blank=True, default="")
+    edge = models.ForeignKey(FlowEdge, on_delete=models.SET_NULL, null=True, blank=True,
+                             related_name="confirmations",
+                             help_text="`해당 내용 보기 →` 가 가리키는 화살표")
+    agenda = models.ForeignKey(Agenda, on_delete=models.SET_NULL, null=True, blank=True)
+    occurred_at = models.DateTimeField(null=True, blank=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "briefing_confirmation"
+        ordering = ["-occurred_at", "-created_at"]
+        indexes = [models.Index(fields=["meeting", "user", "confirmed_at"])]
+
+
+class BriefingRequest(UUIDModel, TimeStamped):
+    """
+    브리핑 `나에게 요청한 내용` 카드.
+
+    태스크와 닮았지만 **아직 태스크가 아닙니다.** 회의에서 나에게 넘어온 요청을
+    그대로 보여주고, 사람이 받아들이면 그때 태스크가 생깁니다.
+    바로 `PENDING_APPROVAL` 로 찍으면 승인 큐가 남의 회의 요청으로 가득 차
+    승인이라는 행위 자체가 뜻을 잃습니다.
+    """
+    meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE,
+                                related_name="briefing_requests")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                             related_name="briefing_requests",
+                             help_text="요청을 받은 사람")
+    requester = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                  null=True, related_name="sent_briefing_requests")
+    requester_name = models.CharField(max_length=100)      # 비정규화
+    title = models.CharField(max_length=200)
+    note = models.CharField(max_length=200, blank=True, default="",
+                            help_text="기한이 없을 때 대신 붙는 문구")
+    due_at = models.DateTimeField(null=True, blank=True)
+    edge = models.ForeignKey(FlowEdge, on_delete=models.SET_NULL, null=True, blank=True,
+                             related_name="requests")
+    accepted_task_id = models.UUIDField(null=True, blank=True,
+                                        help_text="받아들여 태스크가 된 경우 그 id")
+
+    class Meta:
+        db_table = "briefing_request"
+        ordering = ["due_at", "-created_at"]
+        indexes = [models.Index(fields=["meeting", "user"]),
+                   models.Index(fields=["user", "accepted_task_id"])]
 
 
 class FlowFilterPreset(UUIDModel, TimeStamped):

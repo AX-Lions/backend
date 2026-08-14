@@ -66,14 +66,16 @@ ended = [m for m in ms["results"] if m["status"] == "ENDED"][0]
 mid = ended["id"]
 call("GET", f"/meetings/{mid}")
 fl = call("GET", f"/meetings/{mid}/flow?category=MEETING")
-print(f"     └ 노드 {len(fl['nodes'])} · 엣지 {len(fl['edges'])}"
-      f" · opacity={[e['opacity'] for e in fl['edges']]}")
+# 화살표는 사람 쌍마다 하나이고 종류별 개수가 뱃지로 붙습니다.
+print(f"     └ 노드 {len(fl['nodes'])} · 화살표 {len(fl['arrows'])}"
+      f" · opacity={[a['opacity'] for a in fl['arrows']]}")
 w = call("GET", f"/meetings/{mid}/flow?category=WORK")
-print(f"     └ WORK 엣지 {len(w['edges'])} · 필터옵션 {w['filter_options']['content_types']}")
+print(f"     └ WORK 화살표 {len(w['arrows'])} · 필터옵션 {w['filter_options']['content_types']}")
 call("GET", f"/meetings/{mid}/flow?category=MEETING&content_types=DOCUMENT", expect=400,
      label="GET flow (회의모드에 DOCUMENT → 400)")
 f2 = call("GET", f"/meetings/{mid}/flow?category=MEETING&content_types=REQUEST")
-print(f"     └ 필터 적용 후 엣지 {len(f2['edges'])}")
+print(f"     └ 필터 적용 후 화살표 {len(f2['arrows'])}"
+      f" · 합계 {sum(a['total_count'] for a in f2['arrows'])}건")
 idx = call("GET", f"/meetings/{mid}/indexes?category=MEETING")
 print(f"     └ 인덱스 {idx['count']} · related_edge_ids={[len(r['related_edge_ids']) for r in idx['results']]}")
 call("GET", f"/meetings/{mid}/indexes?category=WORK")
@@ -81,16 +83,18 @@ st = call("GET", f"/meetings/{mid}/summary-table")
 print(f"     └ 발견한문제 {len(st['discovered_issues'])} · 변동 {len(st['changes'])} · 계획 {len(st['next_plans'])}")
 call("GET", f"/meetings/{mid}/context")
 ag = call("GET", f"/meetings/{mid}/agendas")
-edge_id = fl["edges"][0]["id"]
+# 뱃지를 누르면 그 종류에 묶인 낱개 전달로 내려갑니다.
+edge_id = fl["arrows"][0]["counts"][0]["edge_ids"][0]
 det = call("GET", f"/flow-edges/{edge_id}")
-print(f"     └ 화살표 상세: agenda={bool(det['agenda'])} document={bool(det['document'])}")
-work_edge = w["edges"][0]["id"]
+print(f"     └ 전달 상세: agenda={bool(det['agenda'])} document={bool(det['document'])}")
+work_edge = w["arrows"][0]["counts"][0]["edge_ids"][0]
 d2 = call("GET", f"/flow-edges/{work_edge}")
-print(f"     └ 문서 엣지: document={bool(d2['document'])} sections={len((d2['document'] or {}).get('sections',[]))}")
+print(f"     └ 문서 전달: document={bool(d2['document'])} sections={len((d2['document'] or {}).get('sections',[]))}")
 
-# AI 브리핑
+# Zero 브리핑 — 화면 4섹션
 br = call("GET", f"/meetings/{mid}/ai-briefing")
-print(f"     └ 활용 {len(br['used_answers'])} · 유보 {len(br['deferred_answers'])} · 답변필요 {len(br['needs_answer'])}")
+print(f"     └ 칩 {len(br['location_chips'])} · 확인필요 {len(br['needs_confirmation'])}"
+      f" · 나에게요청 {len(br['requests_to_me'])} · 답변필요 {len(br['needs_answer'])}")
 call("GET", f"/meetings/{mid}/pending-questions")
 
 # 대리인 설정

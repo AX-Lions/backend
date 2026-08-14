@@ -66,6 +66,25 @@ info:
 
     ---
 
+    ## 부르는 이름
+
+    화면에 그대로 나가는 문자열이 응답 필드에 들어가므로 여기서 고정합니다.
+
+    | 대상 | 표기 | 쓰는 곳 |
+    |---|---|---|
+    | 서비스 | **Bordo** | `안녕하세요, {이름}님 Bordo에 오신 것을 환영합니다.` |
+    | 내 대리인 | **나의 Bordo** | 채팅 사이드바 최상단, `Zero 바로가기` 대상 |
+    | 남의 대리인 | **{이름}의 Bordo** | 플로우 노드, `PEER_AGENT` 방 제목 |
+    | 대리인이 말할 때의 인격 | **Zero** | `Zero 브리핑`, `Zero 요약`, `Zero에게 물어보세요...` |
+
+    즉 **소유 관계를 말할 때는 `{이름}의 Bordo`, 대리인이 화자로 나설 때는 `Zero`** 입니다.
+    이전 판이 쓰던 `AI 대리인` 은 화면 어디에도 없는 낱말이라 걷어냈습니다.
+
+    ⚠️ **가정** — 와이어프레임 안에서도 두 이름이 섞여 있어(`임수연의 Bordo` 와
+    `Zero 브리핑` 이 같은 화면에 있음) 위 규칙으로 정리했습니다. 기획 확정 시 알려주십시오.
+
+    ---
+
     ## 읽는 순서
 
     1. **00 홈** → `GET /home` 한 방으로 첫 화면이 그려진다
@@ -204,7 +223,7 @@ info:
     |---|---|---|
     | `/teams/{id}/documents` 외 다수 | `/projects/{id}/...` | 프로젝트 계층 도입 |
     | `/teams/{id}/policy/me` | `/me/agent/settings` | 설정 패널이 팀과 무관 |
-    | `/teams/{id}/assistant/conversations` | `/me/agent/conversations` | `나의 AI 대리인` 은 단일 방 |
+    | `/teams/{id}/assistant/conversations` | `/me/agent/conversations` | `나의 Bordo` 는 단일 방 |
     | `/teams/{id}/pending-questions` | `/me/pending-questions` + `/meetings/{id}/pending-questions` | 브리핑이 회의 스코프 |
 
     ### 모양이 바뀐 것
@@ -682,7 +701,7 @@ paths:
         | 키 | 근거 |
         |---|---|
         | `always_open_briefing` | 홈 팝업 체크박스 `항상 브리핑 보러가기` |
-        | `dismissed_tooltips[]` | `AI 대리인을 입맛에 맞게 조정해보세요` 등 온보딩 툴팁의 `x`. 닫은 상태가 기기 간에 유지되어야 합니다 |
+        | `dismissed_tooltips[]` | `당신의 Bordo를 입맛에 맞게 조정해보세요!` 등 온보딩 툴팁의 `x`. 닫은 상태가 기기 간에 유지되어야 합니다 |
         | `chat_sidebar_collapsed` | 채팅창 확대/축소 상태. ⚠️ **가정** — 와이어프레임에 근거가 없어 관례대로 정했습니다. 기획 확정 시 알려주시면 반영합니다. 클라이언트 로컬 저장으로 충분할 수도 있습니다 |
       operationId: updatePreferences
       responses:
@@ -7376,7 +7395,7 @@ paths:
                           type: string
                         has_agent:
                           type: boolean
-                          description: true 면 필터에 `D의 AI 대리인` 항목이 하나 더 생긴다
+                          description: true 면 필터에 `{이름}의 Bordo` 항목이 하나 더 생긴다
                 required:
                 - results
               example:
@@ -7644,7 +7663,7 @@ paths:
                 my_agent_room:
                   id: room_me
                   type: AI
-                  title: 나의 AI 대리인
+                  title: 나의 Bordo
                   team_id: null
                   team_name: null
                   project_id: null
@@ -7870,7 +7889,7 @@ paths:
         - `DIRECT` 는 이미 방이 있으면 **새로 만들지 않고 기존 방을 200 으로 돌려줍니다.**
           플로우 화면의 `팀원 오른쪽 클릭 → 메시지 보내기` 도 이 엔드포인트를 씁니다.
         - `TEAM` / `PROJECT` 는 팀·프로젝트당 1개뿐이라 `member_ids` 를 무시합니다.
-        - `PEER_AGENT` 는 상대 1명 필수 — 분할화면의 `임수연의 AI 대리인` 이 이 타입입니다.
+        - `PEER_AGENT` 는 상대 1명 필수 — 분할화면의 `임수연의 Bordo` 가 이 타입입니다.
       operationId: createChatRoom
       responses:
         '201':
@@ -8055,7 +8074,7 @@ paths:
         |---|---|
         | `DIRECT` · `PEER_AGENT` | **내 목록에서만 숨김.** 상대는 그대로 보이고, 새 메시지가 오면 다시 나타납니다 |
         | `TEAM` · `PROJECT` | 방에서 나감. 팀·프로젝트 소속은 유지됩니다 |
-        | `AI` | `409` — 나의 AI 대리인 방은 없앨 수 없습니다 |
+        | `AI` | `409` — 나의 Bordo 방은 없앨 수 없습니다 |
 
         **어느 경우에도 메시지는 지워지지 않습니다.** 1:1 대화를 한쪽이 지운다고 상대의 기록까지
         사라지면 안 되기 때문입니다.
@@ -8679,7 +8698,7 @@ paths:
                 - id: nd_d_agent
                   kind: AGENT
                   user_id: usr_d
-                  name: D의 AI 대리인
+                  name: 임수연의 Bordo
                   avatar_url: null
                 edges:
                 - id: edg_1
@@ -9458,6 +9477,133 @@ paths:
           type: string
         description: 회의 ID
         example: mtg_88
+      - name: q
+        in: query
+        required: false
+        schema:
+          type: string
+        description: |-
+          브리핑 안 검색(`Zero 브리핑` 헤더의 돋보기).
+          제목·본문·질문에 걸쳐 걸러서 각 섹션을 좁혀 돌려줍니다.
+        example: 일정
+  /api/v1/briefing-confirmations/{confirmation_id}/confirm:
+    post:
+      tags:
+      - 10. AI 대리인
+      summary: 변경 사항 확인 처리
+      description: |-
+        `확인이 필요해요` 카드를 확인 처리합니다. 카드가 목록에서 빠집니다.
+
+        **확인은 사용자별입니다.** 같은 변경을 여러 사람이 봐야 하므로,
+        한 사람이 눌렀다고 다른 사람의 브리핑에서 사라지면 안 됩니다.
+      operationId: confirmBriefingItem
+      responses:
+        '200':
+          description: 확인됨
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BriefingConfirmation'
+              example:
+                id: bcf_1
+                title: 백엔드 개발 일정 변경
+                body: API 연동 완료일이 8/16 → 8/19로 변경됐어요.
+                edge_id: edg_2
+                agenda_id: agd_3
+                confirmed_at: '2026-08-13T09:12:00+09:00'
+                occurred_at: '2026-08-12T14:31:00+09:00'
+        '401':
+          $ref: '#/components/responses/E401'
+        '403':
+          $ref: '#/components/responses/E403'
+        '404':
+          $ref: '#/components/responses/E404'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: confirmation_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: 확인 카드 ID
+        example: bcf_1
+      - $ref: '#/components/parameters/IdempotencyKey'
+  /api/v1/briefing-requests/{request_id}/accept:
+    post:
+      tags:
+      - 10. AI 대리인
+      summary: 나에게 온 요청을 태스크로 받기
+      description: |-
+        `나에게 요청한 내용` 카드를 태스크로 만듭니다.
+
+        회의에서 넘어온 요청을 곧바로 태스크로 찍지 않고 이 단계를 두는 이유 —
+        받아들일지는 사람이 정합니다. 자동으로 `PENDING_APPROVAL` 을 만들면
+        승인 큐가 남의 회의 요청으로 가득 차 승인이라는 행위가 뜻을 잃습니다.
+
+        만들어지는 태스크는 사람이 직접 받은 것이므로 `TODO` 로 시작합니다.
+      operationId: acceptBriefingRequest
+      responses:
+        '200':
+          description: 태스크로 만들어짐
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_id:
+                    type: string
+                  task:
+                    $ref: '#/components/schemas/Task'
+              example:
+                request_id: brq_1
+                task:
+                  id: task_31
+                  title: 8/15까지 회의 화면 디자인 수정
+                  status: TODO
+                  priority: P1
+                  assignee_id: usr_me
+                  due_at: '2026-08-15T18:00:00+09:00'
+                  created_by_agent: false
+                  source_meeting: mtg_88
+        '401':
+          $ref: '#/components/responses/E401'
+        '403':
+          $ref: '#/components/responses/E403'
+        '404':
+          $ref: '#/components/responses/E404'
+        '409':
+          description: '`DUPLICATE_EVENT` — 이미 받은 요청'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: request_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: 요청 카드 ID
+        example: brq_1
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                due_at:
+                  anyOf:
+                  - type: string
+                    format: date-time
+                    description: RFC3339 (오프셋 포함)
+                  - type: 'null'
+                priority:
+                  $ref: '#/components/schemas/Priority'
   /api/v1/meetings/{meeting_id}/pending-questions:
     get:
       tags:
@@ -13214,11 +13360,11 @@ components:
 
         | 값 | 새 채팅 화면 라벨 | 설명 |
         |---|---|---|
-        | `AI` | `AI 채팅` | 나의 AI 대리인. 사용자당 1개, 팀과 무관 |
+        | `AI` | `AI 채팅` | `나의 Bordo`. 사용자당 1개, 팀과 무관 |
         | `DIRECT` | `개인채팅` | 1:1 |
         | `TEAM` | `팀 채팅` | 팀 단체 |
         | `PROJECT` | `프로젝트 채팅` | 프로젝트 단체. 사이드바 `단체 채팅 바로가기` 대상 |
-        | `PEER_AGENT` | (생성 화면에 없음) | `임수연의 AI 대리인` — 상대의 대리인과 1:1. 분할화면에서 열린다 |
+        | `PEER_AGENT` | (생성 화면에 없음) | `임수연의 Bordo` — 상대의 대리인과 1:1. 분할화면에서 열린다 |
     ChatAttachment:
       type: object
       properties:
@@ -13496,12 +13642,22 @@ components:
       - PLAN
       - OPINION
       - REQUEST
-      - REVISION
+      - CHANGE
+      - SCHEDULE
+      - CONCLUSION
+      - ETC
       description: |-
         엣지가 무엇을 전달했는지. 좌측 `필터링 > 내용` 체크박스와 1:1 대응한다.
 
         - `WORK` 모드: `DOCUMENT`(문서) · `PLAN`(계획)
-        - `MEETING` 모드: `OPINION`(의견) · `REQUEST`(요청사항) · `REVISION`(수정사항)
+        - `MEETING` 모드: `OPINION`(의견) · `REQUEST`(요청사항) · `CHANGE`(변동사항)
+          · `SCHEDULE`(일정) · `CONCLUSION`(결론) · `ETC`(기타)
+
+        와이어프레임 `필터링 > 내용` 의 체크박스가 6칸이고 화살표 뱃지에 `일정` 이
+        실제로 붙어 있어 회의 모드를 6종으로 맞췄습니다.
+
+        `REVISION` → `CHANGE` 로 바꾼 이유 — 화면 라벨과 중앙 요약표 헤더가 모두
+        `변동 사항` 입니다. `수정사항` 으로 두면 화면에 없는 낱말이 API 에만 남습니다.
     FlowNode:
       type: object
       properties:
@@ -13513,7 +13669,7 @@ components:
           - USER
           - AGENT
           description: |-
-            `AGENT` 는 `D의 AI 대리인` 처럼 표기됩니다.
+            `AGENT` 는 `임수연의 Bordo` 처럼 표기됩니다.
 
             **서비스 안에서 움직이는 대리인과 Discord 회의에 참석한 대리인은 노드 하나로 합칩니다.**
             데이터를 공유하는 같은 대리인인데 동그라미를 둘로 나누면 화살표만 두 배로 늘고
@@ -13593,6 +13749,88 @@ components:
       - content_type
       - label
       - occurred_at
+      description: |-
+        **전달 한 건.** 화면에 그려지는 화살표가 아니라 그 안에 묶이는 낱개입니다.
+        화살표는 `FlowArrow` 이며, 이 리소스는 `GET /flow-edges/{edge_id}` 상세에서 씁니다.
+    FlowArrow:
+      type: object
+      properties:
+        id:
+          type: string
+          description: '`{from_node_id}->{to_node_id}` 로 만든 합성 키. 같은 회의 안에서 안정적입니다.'
+        from_node_id:
+          type: string
+        to_node_ids:
+          type: array
+          items:
+            type: string
+        direction_label:
+          type: string
+          description: '예: `AI 대리인 → A, B`'
+        counts:
+          type: array
+          items:
+            type: object
+            properties:
+              content_type:
+                $ref: '#/components/schemas/FlowContentType'
+              label:
+                type: string
+                description: '화면에 그대로 쓰는 한국어. 예: `의견`, `변동사항`'
+              count:
+                type: integer
+              edge_ids:
+                type: array
+                items:
+                  type: string
+                description: 이 종류에 묶인 전달들. 뱃지를 누르면 이걸로 상세를 엽니다.
+            required:
+            - content_type
+            - label
+            - count
+          description: |-
+            **종류별 개수 뱃지.** 와이어프레임의 화살표에는 `의견 3` `요청사항 5`
+            `변동사항 2` 처럼 종류마다 개수가 붙습니다.
+
+            서버가 세서 내려주는 이유 — 클라이언트가 `edges[]` 를 받아
+            `(from, to, content_type)` 으로 묶어 세면, 필터가 걸린 상태에서 숫자가
+            화면마다 달라집니다. 집계 기준이 서버에 하나만 있어야 합니다.
+        total_count:
+          type: integer
+        participant_avatar_urls:
+          type: array
+          items:
+            type: string
+        extra_participant_count:
+          type: integer
+        latest_occurred_at:
+          type: string
+          format: date-time
+          description: RFC3339 (오프셋 포함). 화살표 정렬·진하기 계산의 기준입니다.
+        opacity:
+          type: number
+          minimum: 0
+          maximum: 1
+        surfaces:
+          type: array
+          items:
+            type: string
+            enum:
+            - SERVICE
+            - DISCORD
+          description: 이 화살표에 섞인 출처. 서비스와 Discord 가 함께면 둘 다 들어갑니다.
+      required:
+      - id
+      - from_node_id
+      - to_node_ids
+      - counts
+      - total_count
+      - latest_occurred_at
+      description: |-
+        **화면에 그려지는 화살표 하나.** 보내는 사람과 받는 사람 쌍마다 하나이며,
+        그 사이에 오간 전달들을 종류별로 세어 뱃지로 답니다.
+
+        낱개 전달(`FlowEdge`)을 그대로 그리면 사람 둘 사이에 화살표가 열 개 겹칩니다.
     MeetingFlow:
       type: object
       properties:
@@ -13607,10 +13845,13 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/FlowNode'
-        edges:
+        arrows:
           type: array
           items:
-            $ref: '#/components/schemas/FlowEdge'
+            $ref: '#/components/schemas/FlowArrow'
+          description: |-
+            **캔버스에 그릴 화살표.** 보내는 사람·받는 사람 쌍마다 하나이며
+            종류별 개수 뱃지가 붙어 있습니다. 필터를 걸면 개수도 함께 줄어듭니다.
         filter_options:
           type: object
           properties:
@@ -13651,7 +13892,7 @@ components:
       - meeting_id
       - category
       - nodes
-      - edges
+      - arrows
     MeetingIndexItem:
       type: object
       properties:
@@ -13855,12 +14096,123 @@ components:
         chat_room_id:
           type: string
           description: '**질문을 클릭하면 답변용 채팅창이 활성화되므로** 방 ID 를 같이 내려준다.'
+        answered_at:
+          anyOf:
+          - type: string
+            format: date-time
+            description: RFC3339 (오프셋 포함)
+          - type: 'null'
+          description: 답하면 채워지고 카드가 사라집니다.
       required:
       - question_id
       - asker_name
       - title
       - body
       - chat_room_id
+    BriefingChip:
+      type: object
+      properties:
+        content_type:
+          $ref: '#/components/schemas/FlowContentType'
+        label:
+          type: string
+          description: '화면에 그대로 쓰는 한국어. 예: `결정`, `요청`, `수정`, `미해결`'
+        count:
+          type: integer
+        edge_ids:
+          type: array
+          items:
+            type: string
+          description: 칩을 누르면 포커싱할 화살표들
+      required:
+      - content_type
+      - label
+      - count
+      description: |-
+        `회의 한눈에 보기` 요약 아래의 **정보 위치 칩**.
+
+        와이어프레임의 `결정 3` `요청 2` `수정 4` `미해결 2` 가 이것입니다.
+        요약문을 읽고 곧바로 "그게 회의 어디였지"로 건너뛰는 통로입니다.
+    BriefingConfirmation:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+          description: '예: `백엔드 개발 일정 변경`'
+        body:
+          type: string
+          description: '예: `API 연동 완료일이 8/16 → 8/19로 변경됐어요.`'
+        edge_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: '`해당 내용 보기 →` 가 가리키는 화살표'
+        agenda_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+        confirmed_at:
+          anyOf:
+          - type: string
+            format: date-time
+            description: RFC3339 (오프셋 포함)
+          - type: 'null'
+        occurred_at:
+          type: string
+          format: date-time
+          description: RFC3339 (오프셋 포함)
+      required:
+      - id
+      - title
+      - body
+      description: |-
+        `확인이 필요해요` 카드.
+
+        **`used_answers` / `deferred_answers` 와 다릅니다.** 그 둘은 *대리인이 무엇을
+        답했나* 이고, 이건 *내가 없는 사이 무엇이 바뀌었나* 입니다. 자리를 비운 사람이
+        돌아와서 가장 먼저 봐야 하는 것이라 별도 섹션으로 뺐습니다.
+    BriefingRequest:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+          description: '예: `8/15까지 회의 화면 디자인 수정`'
+        requester_name:
+          type: string
+          description: '예: `서재민`. 화면에는 `서재민님이 요청했어요` 로 그립니다.'
+        note:
+          type: string
+          description: '기한이 없을 때 대신 붙는 문구. 예: `다음 회의 전까지 확인이 필요해요.`'
+        due_at:
+          anyOf:
+          - type: string
+            format: date-time
+            description: RFC3339 (오프셋 포함)
+          - type: 'null'
+        edge_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+        task_id:
+          anyOf:
+          - type: string
+            description: 이 요청이 태스크로 승격됐으면 그 id
+          - type: 'null'
+      required:
+      - id
+      - title
+      - requester_name
+      description: |-
+        `나에게 요청한 내용` 카드.
+
+        태스크와 닮았지만 **아직 태스크가 아닙니다.** 회의에서 나에게 넘어온 요청을
+        그대로 보여주는 자리이며, 사람이 받아들이면 `task_id` 가 붙습니다.
+        곧바로 `PENDING_APPROVAL` 태스크로 만들면 승인 화면에 남의 회의 요청까지
+        쏟아져 승인 큐가 뜻을 잃습니다.
     AiBriefing:
       type: object
       properties:
@@ -13868,31 +14220,64 @@ components:
           type: string
         narrative:
           type: string
-          description: '`회의의 어느 부분에서 논쟁점 답변을 활용했고 회의의 어느 부분에서 답변을 유보했는지` 서술'
-        used_answers:
+          description: |-
+            `회의 한눈에 보기` 의 2~3줄 요약.
+
+            와이어프레임 예시: `이번 회의에서는 백엔드 개발 진행 상황과 프론트엔드/디자인
+            싱크를 중심으로 논의했어요. API 연동 일정이 변경되었으며, 디자인 최종안은
+            다음 회의 전까지 확정하기로 했어요.`
+        location_chips:
           type: array
           items:
-            $ref: '#/components/schemas/BriefingAnchor'
-          description: 대리인이 실제로 답한 지점
-        deferred_answers:
+            $ref: '#/components/schemas/BriefingChip'
+          description: 요약 아래 `정보 위치 칩`
+        needs_confirmation:
           type: array
           items:
-            $ref: '#/components/schemas/BriefingAnchor'
-          description: 판단을 유보한 지점
+            $ref: '#/components/schemas/BriefingConfirmation'
+          description: '`확인이 필요해요` 섹션'
+        requests_to_me:
+          type: array
+          items:
+            $ref: '#/components/schemas/BriefingRequest'
+          description: '`나에게 요청한 내용` 섹션'
         needs_answer:
           type: array
           items:
             $ref: '#/components/schemas/NeedsAnswerQuestion'
-          description: '`답변 필요` 섹션'
+          description: '`답변이 필요해요` 섹션'
+        used_answers:
+          type: array
+          items:
+            $ref: '#/components/schemas/BriefingAnchor'
+          description: 대리인이 실제로 답한 지점. 화면에는 안 그리고 감사·추적용으로 남깁니다.
+        deferred_answers:
+          type: array
+          items:
+            $ref: '#/components/schemas/BriefingAnchor'
+          description: 판단을 유보한 지점. 화면에는 안 그리고 감사·추적용으로 남깁니다.
         settings_version:
           type: integer
           description: 이 브리핑이 어느 설정 버전으로 판정됐는지
+        generated_at:
+          anyOf:
+          - type: string
+            format: date-time
+            description: RFC3339 (오프셋 포함)
+          - type: 'null'
       required:
       - meeting_id
       - narrative
-      - used_answers
-      - deferred_answers
+      - location_chips
+      - needs_confirmation
+      - requests_to_me
       - needs_answer
+      description: |-
+        우측 사이드바 `Zero 브리핑` 전체.
+
+        와이어프레임의 섹션 순서를 그대로 따릅니다 —
+        `회의 한눈에 보기`(+정보 위치 칩) → `확인이 필요해요` → `답변이 필요해요`
+        → `나에게 요청한 내용`. 아래에는 `Zero 채팅창` 이 고정으로 붙습니다.
     AgentConversation:
       type: object
       properties:
@@ -13924,13 +14309,15 @@ components:
           - WELCOME
           - BRIEFING_AVAILABLE
           description: |-
-            환영 문구 분기.
+            환영 영역 분기.
 
-            - `WELCOME` → `안녕하세요, {user_name}님 Bordo에 오신 것을 환영합니다.`
-            - `BRIEFING_AVAILABLE` → `브리핑이 있어요` 류로 교체
+            - `WELCOME` → 문구만. `안녕하세요, {user_name}님 Bordo에 오신 것을 환영합니다.`
+            - `BRIEFING_AVAILABLE` → **문구는 그대로 두고** 우측에
+              `Zero 브리핑 보러가기` 버튼이 함께 뜹니다.
 
-            와이어프레임 주석 `Claude처럼 브리핑할 게 있으면 이 "보르도에 오신 것을 환영합니다." 문구를
-            "브리핑이 있어요"같은 문구로 바꾸기` 근거.
+            ⚠️ 이전 판은 "문구를 교체한다"고 적었지만, 와이어프레임 실물은 문구를
+            유지한 채 버튼을 더합니다. 화면을 따릅니다 — 문구를 갈아끼우면
+            사용자 이름으로 맞이하는 인사가 사라져 첫 화면의 인상이 바뀝니다.
         briefing_pending:
           type: object
           properties:
@@ -13984,12 +14371,50 @@ components:
                 type: string
                 format: date-time
                 description: RFC3339 (오프셋 포함)
+              ends_at:
+                anyOf:
+                - type: string
+                  format: date-time
+                  description: RFC3339 (오프셋 포함)
+                - type: 'null'
               project_id:
                 type: string
               project_name:
                 type: string
               title:
                 type: string
+              meeting_id:
+                anyOf:
+                - type: string
+                - type: 'null'
+              action:
+                type: object
+                properties:
+                  kind:
+                    type: string
+                    enum:
+                    - JOIN_DISCORD
+                    - OPEN_MEETING
+                    - OPEN_PROJECT
+                    description: 행 오른쪽 버튼이 무엇을 하는지
+                  label:
+                    type: string
+                    description: '버튼에 쓰는 한국어. 예: `참여하기`, `보러가기`'
+                  url:
+                    anyOf:
+                    - type: string
+                      description: '`JOIN_DISCORD` 일 때 Discord 딥링크'
+                    - type: 'null'
+                required:
+                - kind
+                - label
+                description: |-
+                  **행마다 붙는 버튼.** 와이어프레임 `일정정보 + 버튼` 이 근거입니다.
+
+                  회의가 Discord 에서 열리므로 버튼의 뜻이 일정마다 다릅니다 —
+                  연결된 채널이 있으면 `참여하기`, 없으면 `보러가기` 입니다.
+                  클라이언트가 필드 조합으로 추측하면 채널이 없는 회의에
+                  참여 버튼이 뜹니다.
             required:
             - at
             - project_id
@@ -14002,29 +14427,48 @@ components:
             properties:
               meeting_id:
                 type: string
+              team_name:
+                type: string
+                description: '카드 첫 줄. 와이어프레임 예시 `멋사 중앙해커톤`'
               project_name:
                 type: string
-              main_agendas:
+              title:
+                type: string
+                description: '카드 둘째 줄. 예: `글로벌 회의 일정 및 개발 방향 논의`'
+              occurred_at:
+                anyOf:
+                - type: string
+                  format: date-time
+                  description: RFC3339 (오프셋 포함)
+                - type: 'null'
+                description: '우측 상단 `08.12 · 11:32`'
+              missed:
+                type: boolean
+                description: |-
+                  `불참한 회의` 뱃지.
+
+                  이 카드가 존재하는 이유 자체가 "자리를 비운 사이 무슨 일이
+                  있었나" 이므로, 내가 그 회의에 있었는지가 카드의 성격을 바꿉니다.
+              main_decisions:
                 type: array
                 items:
                   type: string
-                description: '`주요 안건`'
-              main_opinions:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    speaker:
-                      type: string
-                    text:
-                      type: string
-                  required:
-                  - speaker
-                  - text
-                description: '`주요 의견`. 예: `참석자2: 어쩌구저쩌구`'
+                description: |-
+                  `주요 결정`. 예: `8월 18일까지 디자인 시안 확정`, `개발 일정 1주 연장`
+
+                  이전 판의 `main_agendas`(주요 안건)를 대체합니다 — 화면이 묻는 건
+                  "무엇을 다뤘나"가 아니라 "무엇이 정해졌나" 입니다.
+              agent_summary:
+                type: string
+                description: |-
+                  `Zero 요약` — 대리인이 한 문장으로 줄인 것.
+                  예: `"디자인 작업을 우선 진행한 후 개발팀에 전달하기로 결정했어요."`
+
+                  이전 판의 `main_opinions[]`(발언자별 인용)를 대체합니다.
+                  카드가 좁아 발언 목록이 들어가지 않습니다.
             required:
             - meeting_id
-            - project_name
+            - title
             description: '`최근 회의 요약` 카드. 클릭 시 `해당 회의 페이지로 넘어가짐`.'
           - type: 'null'
         project_progress:
@@ -14042,6 +14486,38 @@ components:
           items:
             $ref: '#/components/schemas/ProjectSummary'
           description: 사이드바 `즐겨찾기`
+        shortcuts:
+          type: object
+          properties:
+            agent_room_id:
+              anyOf:
+              - type: string
+              - type: 'null'
+              description: |-
+                사이드바 `Zero 바로가기` 가 여는 방.
+
+                이게 없으면 홈에서 대리인 방으로 가려고 채팅 사이드바
+                (`GET /chat/sidebar`)를 통째로 한 번 더 불러야 합니다.
+            discord:
+              anyOf:
+              - type: object
+                properties:
+                  guild_id:
+                    type: string
+                  url:
+                    type: string
+                    description: '브라우저에서 여는 주소. 예: `https://discord.com/channels/{guild_id}`'
+                  connected:
+                    type: boolean
+                required:
+                - connected
+              - type: 'null'
+              description: |-
+                사이드바 `Discord 바로가기`.
+
+                **주소를 서버가 조립해 내려줍니다.** 클라이언트가 guild_id 로
+                URL 을 만들면 채널 연결이 안 된 팀에서도 버튼이 활성화됩니다.
+          description: 사이드바 하단 `바로가기버튼모음`
       required:
       - user_name
       - greeting_mode

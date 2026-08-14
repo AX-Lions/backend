@@ -31,6 +31,28 @@ def _my_project_ids(user):
     return list(joined)
 
 
+def _shortcuts(user):
+    """
+    사이드바 하단 `바로가기버튼모음`.
+
+    `Zero 바로가기` 에 방 id 를 실어 보내는 이유 — 없으면 홈에서 대리인 방으로
+    가려고 채팅 사이드바를 통째로 한 번 더 불러야 합니다.
+
+    Discord 주소도 서버가 조립합니다. 클라이언트가 guild_id 로 URL 을 만들면
+    연결이 안 된 팀에서도 버튼이 활성화됩니다.
+    """
+    from apps.chat.services import ensure_ai_room
+
+    room = ensure_ai_room(user)
+    guild_id = ""       # A 담당(Discord 연동)이 붙으면 팀 연결에서 읽어옵니다.
+    return {
+        "agent_room_id": str(room.id),
+        "discord": ({"guild_id": guild_id, "connected": True,
+                     "url": f"https://discord.com/channels/{guild_id}"}
+                    if guild_id else {"connected": False}),
+    }
+
+
 @api_view(["GET"])
 def home(request):
     user = request.user
@@ -86,8 +108,14 @@ def home(request):
         "project_name": m.project_name,
         "title": m.title,
         "meeting_id": str(m.id),
-        "channel": "Discord" if m.discord_channel_id else None,
         "discord_channel_id": m.discord_channel_id or None,
+        # 행마다 붙는 버튼. 회의가 Discord 에서 열리므로 뜻이 일정마다 달라
+        # 서버가 정해 내려줍니다 — 클라이언트가 필드 조합으로 추측하면
+        # 채널이 없는 회의에도 `참여하기` 가 뜹니다.
+        "action": ({"kind": "JOIN_DISCORD", "label": "참여하기",
+                    "url": f"https://discord.com/channels/{m.discord_channel_id}"}
+                   if m.discord_channel_id
+                   else {"kind": "OPEN_MEETING", "label": "보러가기", "url": None}),
     } for m in today]
 
     # ── 최근 회의 요약 카드
@@ -97,16 +125,23 @@ def home(request):
     summary_card = None
     if last_ended:
         s = MeetingSummary.objects.filter(meeting=last_ended).first()
-        att = my_attendance.get(last_ended.id)
+        # 이 회의가 어느 팀 것인지. 카드 첫 줄이 팀 이름입니다.
+        team_name = (Project.objects.filter(pk=last_ended.project_id)
+                     .values_list("team_name", flat=True).first() or "")
+        att = (MeetingParticipant.objects
+               .filter(meeting=last_ended, user=user)
+               .values_list("attendance", flat=True).first())
         summary_card = {
             "meeting_id": str(last_ended.id),
+            "team_name": team_name,
             "project_name": last_ended.project_name,
             "title": last_ended.title,
-            "ended_at": last_ended.ended_at,
+            "occurred_at": last_ended.ended_at,
+            # 이 카드가 있는 이유 자체가 "자리를 비운 사이 무슨 일이 있었나" 라,
+            # 내가 그 자리에 있었는지가 카드의 성격을 바꿉니다.
             "missed": att in (Attendance.ABSENT, Attendance.DELEGATED),
             "main_decisions": (s.changes if s else []) + (s.next_plans if s else []),
             "agent_summary": s.one_line if s else "",
-            "main_opinions": s.main_opinions if s else [],
         }
 
     # ── 사이드바
@@ -120,8 +155,11 @@ def home(request):
 
     return Response({
         "user_name": user.name,
+        # 문구는 그대로 두고 `Zero 브리핑 보러가기` 버튼이 함께 뜹니다.
+        # 문구를 갈아끼우면 이름으로 맞이하는 인사가 사라집니다.
         "greeting_mode": "BRIEFING_AVAILABLE" if briefing["exists"] else "WELCOME",
         "briefing_pending": briefing,
+        "shortcuts": _shortcuts(user),
         "recent_meetings": recent_meetings,
         "today_schedule": today_schedule,
         "recent_meeting_summary": summary_card,
