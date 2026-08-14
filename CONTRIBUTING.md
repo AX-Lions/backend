@@ -122,7 +122,7 @@ docs/24-meeting-decision
 
 - `main` · `develop`에 **직접 푸시하지 않습니다.** force push는 어떤 경우에도 금지.
 - 브랜치는 머지되면 지웁니다.
-- 저장소별 정비 필요: `frontend`는 `main` 생성, `discord`는 `develop` 생성.
+- 세 저장소 모두 `main` · `develop`이 준비돼 있습니다. PR은 `develop`으로 엽니다.
 
 ---
 
