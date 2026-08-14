@@ -4,7 +4,7 @@
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now bordo-backend
 #
-# 경로가 /srv/bordo/backend 가 아니면 아래 세 줄(WorkingDirectory·EnvironmentFile·
+# 경로가 /home/zanviq/bordo/backend 가 아니면 아래 세 줄(WorkingDirectory·EnvironmentFile·
 # ExecStart)과 RequiresMountsFor 를 바꾸십시오.
 
 [Unit]
@@ -13,22 +13,22 @@ Documentation=https://github.com/AX-Lions/backend
 
 # 코드와 DB 가 별도 볼륨에 있습니다. 마운트 전에 뜨면 빈 디렉터리를 보고
 # 엉뚱한 곳에 파일을 만들기 시작합니다 — 이 프로젝트에서 실제로 겪은 실패입니다.
-RequiresMountsFor=/srv/bordo
+RequiresMountsFor=/home/zanviq/bordo
 
 # DB 는 컨테이너입니다. docker 가 준비된 뒤에 뜨게 합니다.
 After=network-online.target docker.service
 Wants=network-online.target
-After=srv-bordo.mount
+After=home-zanviq-bordo.mount
 
 [Service]
 Type=notify
 User=zanviq
 Group=zanviq
-WorkingDirectory=/srv/bordo/backend
-EnvironmentFile=/srv/bordo/backend/.env
+WorkingDirectory=/home/zanviq/bordo/backend
+EnvironmentFile=/home/zanviq/bordo/backend/.env
 
-ExecStart=/srv/bordo/backend/.venv/bin/gunicorn \
-    --config /srv/bordo/backend/deploy/gunicorn.conf.py \
+ExecStart=/home/zanviq/bordo/backend/.venv/bin/gunicorn \
+    --config /home/zanviq/bordo/backend/deploy/gunicorn.conf.py \
     config.wsgi:application
 
 ExecReload=/bin/kill -s HUP $MAINPID
@@ -54,8 +54,10 @@ TasksMax=256
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ProtectHome=read-only
-ReadWritePaths=/srv/bordo
+# 프로젝트가 홈 아래(/home/zanviq/bordo)에 있어 read-only 로 두면 쓰기가 막힙니다.
+# 대신 ReadWritePaths 로 필요한 경로만 엽니다.
+ProtectHome=false
+ReadWritePaths=/home/zanviq/bordo
 
 StandardOutput=journal
 StandardError=journal
