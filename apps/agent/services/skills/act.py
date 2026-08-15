@@ -39,25 +39,6 @@ def _principal(ctx: SkillContext):
     return User.objects.filter(pk=ctx.principal_id).first()
 
 
-def _flow_artifact(ctx: SkillContext, kind: str, title: str) -> None:
-    """
-    후보가 서버에 쌓인 것을 플로우에 남깁니다.
-
-    "AI 가 뭘 만들어 뒀다" 가 화면에 안 보이면, 승인 대기 목록에 항목이 갑자기
-    생긴 것처럼 보입니다. 어느 회의에서 나온 것인지가 승인 판단의 근거입니다.
-    """
-    if not ctx.meeting_id:
-        return
-    from apps.meetings.models import Meeting
-
-    from ..flow import artifact_proposed
-
-    meeting = Meeting.objects.filter(pk=ctx.meeting_id).first()
-    me = _principal(ctx)
-    if meeting and me:
-        artifact_proposed(meeting, principal=me, kind=kind, title=title)
-
-
 # ═══════════════════════════════════════════ 발언
 
 class SendMessageSkill(SkillBase):
@@ -226,7 +207,6 @@ class ProposeTaskSkill(SkillBase):
             created_by_id=ctx.principal_id,
             source_meeting_id=ctx.meeting_id,
         )
-        _flow_artifact(ctx, "task", title)
         return SkillResult(ok=True,
                            message="승인 대기 상태로 등록했습니다. 확정은 본인이 합니다.",
                            data={"task_id": str(task.id), "status": task.status})
@@ -278,7 +258,6 @@ class ProposeScheduleSkill(SkillBase):
             start_at=start_at, end_at=end_at,
             created_by_id=ctx.principal_id,
         )
-        _flow_artifact(ctx, "schedule", title)
         return SkillResult(ok=True,
                            message="초안으로 등록했습니다. 확정은 본인이 합니다.",
                            data={"event_id": str(event.id), "status": event.status})
