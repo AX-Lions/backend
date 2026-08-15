@@ -27,6 +27,7 @@ ERROR_CODES = {
     # Discord 연동 — 봇이 discord_user_id·guild_id 로 물어보는데 이어진 것이 없을 때
     "USER_NOT_FOUND":                (404, "연결된 계정을 찾을 수 없습니다.", False),
     "TEAM_NOT_FOUND":                (404, "연결된 팀을 찾을 수 없습니다.", False),
+    "TEAM_AMBIGUOUS":                (409, "연결할 팀을 골라 주십시오.", False),
     # 문서 / 상태
     "DOCUMENT_NOT_FOUND":            (404, "문서를 찾을 수 없습니다.", False),
     "DOCUMENT_ACCESS_DENIED":        (403, "문서에 접근할 수 없습니다.", False),

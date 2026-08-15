@@ -57,7 +57,7 @@ def _team_of(guild_id: str):
     link = GuildLink.objects.filter(guild_id=str(guild_id)).select_related("team").first()
     if link is None:
         raise BordoError("TEAM_NOT_FOUND",
-                         "이 Discord 서버에 연결된 팀이 없습니다. 웹에서 먼저 연결하십시오.")
+                         "이 Discord 서버에 연결된 팀이 없습니다. /bordo-link-team 으로 먼저 연결하십시오.")
     return link.team
 
 
@@ -121,6 +121,65 @@ def teams_current(request):
     return Response({"linked": bool(rows),
                      "teams": [{"team_id": str(m.team_id), "name": m.team.name,
                                 "role": m.team_role} for m in rows]})
+
+
+@internal(["POST"])
+def teams_link(request):
+    """
+    이 Discord 서버를 팀에 연결합니다.
+
+    ## 왜 연결 코드를 따로 두지 않는가
+
+    계정 연결에는 코드가 필요했습니다. Discord 계정과 Bordo 계정이 **서로를 모르니**
+    둘을 잇는 증거가 있어야 했습니다.
+
+    팀 연결에는 필요 없습니다. 이미 이어진 계정으로 부르므로 서버가 그 사람이 팀
+    OWNER 인지 압니다. Discord 서버 권한은 봇이 슬래시 명령에서 확인합니다.
+    **두 증거가 이미 확보돼 있어 코드를 한 번 더 주고받을 이유가 없습니다.**
+
+    ## 봇이 반드시 해야 하는 것
+
+    `manage_guild` 권한 확인입니다. 백엔드는 Discord 권한을 알 수 없어, 이걸 봇이
+    안 하면 **아무나 이 서버를 남의 팀에 붙일 수 있습니다.**
+    """
+    from apps.orgs.models import TeamMember, TeamRole
+
+    guild_id = str(request.data.get("guild_id") or "").strip()
+    if not guild_id:
+        raise BordoError("VALIDATION_ERROR", "guild_id 는 필수입니다.")
+
+    user = _user_of(request.data.get("discord_user_id") or "")
+
+    # 팀을 만들거나 관리할 수 있는 사람만 연결합니다. 일반 멤버가 붙이면
+    # 팀 전체의 회의가 그 서버로 흘러갑니다.
+    memberships = list(TeamMember.objects
+                       .filter(user=user, team_role__in=[TeamRole.OWNER, TeamRole.ADMIN])
+                       .select_related("team"))
+    if not memberships:
+        raise BordoError("TEAM_ACCESS_DENIED",
+                         "팀의 소유자 또는 관리자만 서버를 연결할 수 있습니다.")
+
+    team_id = str(request.data.get("team_id") or "").strip()
+    if team_id:
+        chosen = next((m for m in memberships if str(m.team_id) == team_id), None)
+        if chosen is None:
+            raise BordoError("TEAM_ACCESS_DENIED", "그 팀의 소유자 또는 관리자가 아닙니다.")
+    elif len(memberships) == 1:
+        chosen = memberships[0]
+    else:
+        # 어느 팀인지 서버가 정하면 안 됩니다. 잘못 고르면 남의 팀 회의가
+        # 이 서버로 흘러가고, 되돌려도 그 사이 오간 발언은 남습니다.
+        raise BordoError(
+            "TEAM_AMBIGUOUS", "연결할 팀을 골라 주십시오.",
+            details={"teams": [{"team_id": str(m.team_id), "name": m.team.name}
+                               for m in memberships]})
+
+    link, created = GuildLink.objects.update_or_create(
+        guild_id=guild_id,
+        defaults=dict(team=chosen.team, linked_by=user))
+
+    return Response({"team_id": str(link.team_id), "name": chosen.team.name,
+                     "created": created}, status=201 if created else 200)
 
 
 # ═══════════════════════════════════════════ 대리 참석
@@ -356,12 +415,17 @@ def deputy_ask(request):
     if not question:
         raise BordoError("VALIDATION_ERROR", "question 은 필수입니다.")
 
-    target = _user_of(request.data.get("target_discord_id") or "")
+    # 봇이 쓰는 이름과 명세의 이름이 다릅니다. 뜻이 같아 백엔드가 둘 다 받습니다 —
+    # 봇을 고치는 동안 호출이 통째로 실패하는 것보다 낫습니다.
+    target = _user_of(request.data.get("target_discord_id")
+                      or request.data.get("target") or "")
+
+    asker_id = (request.data.get("asker_discord_id")
+                or request.data.get("requester_discord_id") or "")
     asker = None
-    if request.data.get("asker_discord_id"):
+    if asker_id:
         from apps.accounts.models import User
-        asker = User.objects.filter(
-            discord_user_id=str(request.data["asker_discord_id"])).first()
+        asker = User.objects.filter(discord_user_id=str(asker_id)).first()
 
     meeting = Meeting.objects.filter(
         discord_channel_id=str(request.data.get("thread_id") or ""),

@@ -110,6 +110,62 @@ class TeamTest(Base):
         self.assertEqual(len(r.json()["teams"]), 1)
 
 
+class TeamLinkTest(Base):
+    """
+    서버-팀 연결. 코드를 따로 두지 않고 이미 이어진 계정의 권한으로 판정합니다.
+    """
+
+    def setUp(self):
+        GuildLink.objects.all().delete()
+
+    def _link(self, **kw):
+        payload = {"guild_id": "새서버", "discord_user_id": "dc-me"}
+        payload.update(kw)
+        return self.post("/teams/link", payload)
+
+    def test_owner_can_link(self):
+        r = self._link()
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(GuildLink.objects.get(guild_id="새서버").team_id, self.team.id)
+
+    def test_relink_overwrites(self):
+        self._link()
+        r = self._link()
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["created"])
+
+    def test_plain_member_is_rejected(self):
+        """일반 멤버가 붙이면 팀 전체의 회의가 그 서버로 흘러갑니다."""
+        TeamMember.objects.filter(user=self.me).update(team_role="MEMBER")
+        self.assertEqual(self._link().status_code, 403)
+
+    def test_unlinked_account_is_rejected(self):
+        """계정 연결이 먼저입니다."""
+        self.assertEqual(self._link(discord_user_id="모르는사람").status_code, 404)
+
+    def test_multiple_teams_needs_a_choice(self):
+        """잘못 고르면 남의 팀 회의가 이 서버로 흘러갑니다."""
+        other = Team.objects.create(name="다른 팀", created_by=self.me)
+        TeamMember.objects.create(team=other, user=self.me, team_role="OWNER")
+        r = self._link()
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(len(r.json()["error"]["details"]["teams"]), 2)
+
+    def test_explicit_team_id(self):
+        other = Team.objects.create(name="다른 팀", created_by=self.me)
+        TeamMember.objects.create(team=other, user=self.me, team_role="OWNER")
+        r = self._link(team_id=str(other.id))
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(GuildLink.objects.get(guild_id="새서버").team_id, other.id)
+
+    def test_team_i_do_not_own(self):
+        stranger = User.objects.create_user(email="x@bordo.dev", password="x" * 10,
+                                            name="남", discord_user_id="dc-x")
+        theirs = Team.objects.create(name="남의 팀", created_by=stranger)
+        r = self._link(team_id=str(theirs.id))
+        self.assertEqual(r.status_code, 403)
+
+
 class DelegateTest(Base):
 
     def setUp(self):
@@ -318,3 +374,18 @@ class DeputyAskTest(Base):
         self.assertEqual(
             self.post("/deputy/ask", {"target_discord_id": "없음",
                                       "question": "x"}).status_code, 404)
+
+    def test_bot_field_names_also_work(self):
+        """봇이 쓰는 이름과 명세의 이름이 다릅니다. 둘 다 받습니다."""
+        from apps.agent.services.react import RunOutcome
+        from apps.agent.models import AgentRun
+
+        run = AgentRun.objects.create(user=self.me)
+        with patch("apps.agent.services.react.run",
+                   return_value=RunOutcome(run=run, answered=True, text="ok")) as spy:
+            r = self.post("/deputy/ask", {"target": "dc-me",
+                                          "requester_discord_id": "dc-mate",
+                                          "question": "x"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(spy.call_args.kwargs["principal"], self.me)
+        self.assertEqual(spy.call_args.kwargs["asker"], self.mate)

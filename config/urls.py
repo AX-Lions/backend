@@ -161,6 +161,7 @@ urlpatterns = [
     # 않게 하기 위해서입니다.
     path(f"{INTERNAL}/discord/connect/code", discord_internal.connect_code),
     path(f"{INTERNAL}/teams/current", discord_internal.teams_current),
+    path(f"{INTERNAL}/teams/link", discord_internal.teams_link),
     path(f"{INTERNAL}/delegate/on", discord_internal.delegate_on),
     path(f"{INTERNAL}/delegate/off", discord_internal.delegate_off),
     path(f"{INTERNAL}/deputy/ask", discord_internal.deputy_ask),
