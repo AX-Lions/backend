@@ -65,6 +65,13 @@ class SkillContext:
     #: POLICY 스냅샷. 실행 중 설정이 바뀌어도 한 번의 실행은 같은 정책으로 끝납니다.
     settings_snapshot: dict = field(default_factory=dict)
 
+    #: 비공개 기록을 검색에 포함할지.
+    #:
+    #: 회의 대리에서는 False 입니다 — 본인이 비공개로 표시한 것을 대리인이 남 앞에서
+    #: 꺼내면 되돌릴 수 없습니다. 반대로 **본인이 자기 AI 와 대화할 때는** 숨길 이유가
+    #: 없으므로 True 로 켭니다. 같은 검색 코드가 두 상황을 다르게 다뤄야 합니다.
+    allow_private: bool = False
+
     def is_principal(self, user_id) -> bool:
         return str(user_id) == str(self.principal_id)
 
