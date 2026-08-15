@@ -8,7 +8,7 @@ log = logging.getLogger("bordo")
 class BackendClient:
     def __init__(self, base_url: str, service_token: str, timeout: float = 5.0, max_retries: int = 2):
         self.base_url = base_url.rstrip("/")
-        self.headers = {"Authorization": f"Bearer {service_token}"}
+        self.headers = {"X-Service-Token": service_token}
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.max_retries = max_retries
         self._session: aiohttp.ClientSession | None = None
