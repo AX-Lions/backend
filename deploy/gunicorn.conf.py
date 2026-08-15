@@ -18,20 +18,28 @@ bind = os.environ.get("BORDO_BIND", "127.0.0.1:8010")
 _default_workers = min(multiprocessing.cpu_count() + 1, 5)
 workers = int(os.environ.get("BORDO_WORKERS", _default_workers))
 
-# 동기 워커입니다. WebSocket 이 붙으면 그때 Channels + uvicorn 으로 갑니다 —
-# 지금 비동기 워커로 두면 DB 커넥션 재사용과 맞물려 문제만 늘어납니다.
-worker_class = "sync"
+# ASGI 워커입니다. WSGI(sync) 로는 WebSocket 이 아예 안 붙습니다.
+#
+# gunicorn 을 유지하고 워커만 바꾸는 이유 — 프로세스 관리·재시작·상한 설정이
+# 이미 여기 있습니다. uvicorn 을 직접 띄우면 그걸 다시 만들어야 합니다.
+worker_class = "uvicorn.workers.UvicornWorker"
 
-# ReAct 검색과 LLM 호출은 느립니다. 기본 30초로는 정상 요청도 끊깁니다.
+# ASGI 워커에서 이 값은 **요청 시간이 아니라 워커 무응답 감지** 기준입니다.
+# WebSocket 이 오래 열려 있어도 워커는 계속 신호를 보내므로 끊기지 않습니다.
 timeout = int(os.environ.get("BORDO_TIMEOUT", "120"))
 
 # keep-alive 를 터널의 idle 보다 짧게 둡니다. 반대면 이미 닫힌 연결로 응답하려다
 # 502 가 간헐적으로 납니다.
 keepalive = 15
 
-# 워커를 주기적으로 재활용해 누수가 쌓이지 않게 합니다. jitter 는 모든 워커가
-# 동시에 재시작해 순간적으로 응답이 비는 것을 막습니다.
-max_requests = 1000
+# 워커 재활용은 꺼 둡니다.
+#
+# WSGI 시절에는 누수 방지에 유용했지만, 지금은 워커가 WebSocket 을 오래 물고
+# 있습니다. 재활용이 돌면 **연결된 사용자가 통째로 끊깁니다** — 회의 중에
+# 화면이 멈추는 쪽이 메모리보다 큰 문제입니다.
+#
+# 켜야 하면 환경변수로 올리되, 끊김을 감수한다는 뜻입니다.
+max_requests = int(os.environ.get("BORDO_MAX_REQUESTS", "0"))
 max_requests_jitter = 100
 
 # 그레이스풀 재시작 시 처리 중이던 요청을 끝낼 시간.
