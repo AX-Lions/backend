@@ -26,4 +26,20 @@ class BordoCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         result = await self.backend.get("/internal/v1/teams/current", params={"discord_user_id": str(interaction.user.id)})
         await interaction.followup.send(str(result), ephemeral=True)
-        
+
+    @app_commands.command(
+        name="ask-bordo",
+        description="특정 대리인에게 질문을 전달합니다."
+    )
+    @app_commands.describe(target="질문 대상 대리인", question="질문 내용")
+    async def ask_bordo(self, interaction: discord.Interaction, target: str, question: str):
+        await interaction.response.defer()
+
+        await self.backend.post("/internal/v1/deputy/ask", json={
+            "requester_discord_id": str(interaction.user.id),
+            "target": target,
+            "question": question,
+        })
+
+        # 답변은 즉시 생성하지 않고 Outbox를 통해 게시된다.
+        await interaction.followup.send("질문을 전달했습니다. 답변은 곧 게시됩니다.")
