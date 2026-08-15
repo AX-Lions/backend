@@ -179,4 +179,9 @@ BORDO = {
     "DEFAULT_PAGE_SIZE": 50,
     "MAX_HOPS": 3,                      # AI↔AI 무한 대화 차단
     "SERVICE_TOKEN": os.environ.get("BORDO_SERVICE_TOKEN", "dev-service-token"),
+
+    # 대리인 유보 판정 임계값. 코드에 박으면 시연 중에 조정할 수 없습니다.
+    # 값을 올리면 더 자주 유보하고, 내리면 더 자주 답합니다.
+    "AGENT_STALE_DAYS": int(os.environ.get("BORDO_AGENT_STALE_DAYS", "14")),
+    "AGENT_CONFIDENCE_MIN": float(os.environ.get("BORDO_AGENT_CONFIDENCE_MIN", "0.7")),
 }
