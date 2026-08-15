@@ -31,15 +31,18 @@ class BordoCog(commands.Cog):
         name="ask-bordo",
         description="특정 대리인에게 질문을 전달합니다."
     )
-    @app_commands.describe(target="질문 대상 대리인", question="질문 내용")
-    async def ask_bordo(self, interaction: discord.Interaction, target: str, question: str):
+    @app_commands.describe(target="질문할 대리인의 주인", question="질문 내용")
+    async def ask_bordo(self, interaction: discord.Interaction, target: discord.Member, question: str):
         await interaction.response.defer()
 
-        await self.backend.post("/internal/v1/deputy/ask", json={
+        result = await self.backend.post("/internal/v1/deputy/ask", json={
             "requester_discord_id": str(interaction.user.id),
-            "target": target,
+            "target_discord_id": str(target.id),
             "question": question,
+            "thread_id": str(interaction.channel_id),
         })
 
-        # 답변은 즉시 생성하지 않고 Outbox를 통해 게시된다.
-        await interaction.followup.send("질문을 전달했습니다. 답변은 곧 게시됩니다.")
+        # Outbox consumer가 아직 없어서, 지금은 응답 본문에 바로 담겨 오는 답변/유보를
+        # 그대로 게시한다. consumer가 붙으면 그때 옮긴다.
+        body = (result or {}).get("body", "답변을 받아오지 못했습니다.")
+        await interaction.followup.send(body)
