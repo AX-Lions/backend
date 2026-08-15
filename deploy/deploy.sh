@@ -82,7 +82,14 @@ log "설정 점검"
 # ── 6. 재시작 ────────────────────────────────────────────────
 log "서비스 재시작"
 if systemctl is-enabled --quiet bordo-backend 2>/dev/null; then
-  sudo systemctl reload-or-restart bordo-backend
+  # reload 가 아니라 restart 입니다.
+  #
+  # reload-or-restart 는 유닛 파일이 바뀌어도 **ExecStart 를 다시 읽지 않습니다.**
+  # gunicorn 에 HUP 을 보낼 뿐이라 마스터는 옛 인자로 계속 돕니다. 실제로
+  # WSGI → ASGI 로 바꿨는데 WSGI 가 그대로 돌아 500 이 났습니다.
+  #
+  # 어차피 워커가 교체되면 WebSocket 은 끊깁니다. reload 로 얻는 것이 없습니다.
+  sudo systemctl restart bordo-backend
   # 워커도 함께 갈아야 합니다. 웹만 재시작하면 옛 코드의 대리인이 계속 돕니다.
   if systemctl is-enabled --quiet bordo-worker 2>/dev/null; then
     sudo systemctl restart bordo-worker
