@@ -148,7 +148,17 @@ class MeetingCog(commands.Cog):
         meeting = self.active_meeting_threads.pop(thread_id)
         transcript = self.meeting_transcripts.pop(thread_id, [])
 
-        # 회의록 작성 및 todo 함수 들어갈 자리 #
+        async with interaction.channel.typing():
+            wrapup = await self.openai_service.generate_meeting_wrapup(transcript)
+
+        embed = discord.Embed(
+            title=f"📝 회의 요약 · {meeting['agenda']}",
+            description=wrapup["summary"],
+            color=discord.Color.green(),
+        )
+        if wrapup["todos"]:
+            embed.add_field(name="TODO", value="\n".join(f"- [ ] {t}" for t in wrapup["todos"]), inline=False)
+        await interaction.channel.send(embed=embed)
 
         await interaction.channel.send("🔴 **회의가 종료되었습니다.**")
 
