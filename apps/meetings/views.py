@@ -247,7 +247,10 @@ def flow(request, meeting_id):
     present = {e.content_type for e in edges}
     return Response({
         "meeting_id": str(meeting.id),
-        "meeting_label": f"{meeting.scheduled_at:%-m/%-d} {meeting.title}",
+        # `%-m` 은 glibc 확장이라 Windows 에서 ValueError 로 터집니다. 배포 서버는
+        # 리눅스지만 프론트 담당이 로컬에서 이 화면을 열면 500 을 받습니다.
+        "meeting_label": (f"{meeting.scheduled_at.month}/{meeting.scheduled_at.day} "
+                          f"{meeting.title}"),
         "category": cat,
         "nodes": nodes,
         "arrows": _arrows(edges),

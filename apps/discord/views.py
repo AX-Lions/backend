@@ -308,7 +308,7 @@ def meeting_end(request):
     봇은 원본만 보냅니다. 봇이 요약하면 그 과정에서 빠진 내용이 영영 사라지고,
     나중에 대리인이 사람마다 다르게 정리해 주지 못합니다.
     """
-    from apps.agent.services import briefing
+    from apps.agent.services import briefing, flow
     from apps.meetings.models import Meeting, MeetingStatus
 
     # 빈 thread_id 로 조회하면 웹에서 만든 회의(discord_channel_id="")가 잡혀
@@ -325,6 +325,19 @@ def meeting_end(request):
     meeting.status = MeetingStatus.ENDED
     meeting.ended_at = ended_at
     meeting.save(update_fields=["status", "ended_at", "updated_at"])
+
+    # 플로우 진하기를 다시 계산합니다.
+    #
+    # 회의 중에 만든 엣지는 전부 1.0 으로 저장돼 있습니다 — 만들 때는 ended_at 이
+    # 없어 "가장 최근" 이 곧 자기 자신이기 때문입니다. 여기서 구간이 확정되므로
+    # 이때 한 번 채워야 그라데이션이 실제로 보입니다.
+    #
+    # 브리핑보다 먼저 합니다. 브리핑 생성은 LLM 을 타서 실패할 수 있는데,
+    # 그것 때문에 화면 진하기까지 못 고치면 손해가 큽니다.
+    try:
+        flow.recompute_for_meeting(meeting)
+    except Exception:                                          # noqa: BLE001
+        logger.exception("플로우 진하기 재계산 실패 meeting=%s", meeting.id)
 
     # 요약과 브리핑은 여기서 만듭니다. 실패해도 회의 종료 자체는 되돌리지
     # 않습니다 — 종료가 안 되면 봇이 계속 발언을 넘깁니다.
