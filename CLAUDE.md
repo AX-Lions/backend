@@ -259,6 +259,51 @@ def run_agent_for_utterance(utterance_id: str) -> None
 publish(project_id, event_type, payload)
 ```
 
+### Outbox — 서버가 쓰고 봇이 가져갑니다
+
+`apps/agent/models.py` 의 `OutboxEvent` 입니다. **외부 호출을 요청 트랜잭션 안에서
+하지 않기 위한 장치**입니다 — 롤백돼도 Discord 메시지는 이미 나가 있습니다.
+행 하나만 남기고 봇이 폴링해 게시한 뒤 결과를 돌려줍니다.
+
+| 필드 | 값 | 비고 |
+|---|---|---|
+| `team` | FK | |
+| `idempotency_key` | str(120) | **`(team, idempotency_key)` 유니크** |
+| `kind` | `MESSAGE` · `ANNOUNCEMENT` · `DM` | |
+| `channel_id` | str(40) | 봇이 그대로 씁니다. 서버는 해석하지 않습니다 |
+| `payload` | JSON | |
+| `status` | `PENDING` · `SENT` · `FAILED` · `DEAD` | |
+| `attempts` / `max_attempts` | int | 기본 상한 5 |
+| `available_at` | datetime | **이 시각 전에는 가져가지 않습니다** |
+| `last_error` | text | 2000자에서 자릅니다 |
+| `run` | FK → `AgentRun` | nullable |
+
+봇의 폴링 쿼리는 이 모양입니다. 인덱스가 여기에 맞춰져 있습니다.
+
+```python
+OutboxEvent.objects.filter(status="PENDING", available_at__lte=now).order_by("available_at")
+```
+
+결과 반영은 모델 메서드로 합니다.
+
+```python
+event.mark_sent()              # 성공
+event.mark_failed("오류 내용")   # 실패 → 지수 백오프 후 PENDING, 상한 초과 시 DEAD
+```
+
+**`DEAD` 는 사람이 봐야 하는 상태입니다.** 무한 재시도는 같은 오류를 반복하고,
+그냥 버리면 사용자는 대리인이 말한 줄 알고 있습니다.
+
+멱등키는 방향에 따라 규칙이 다릅니다.
+
+```
+나가는 쪽 (서버 → 봇)   run_id 나 발언 식별자
+들어오는 쪽 (봇 → 서버)  guild_id + channel_id + message_id
+```
+
+> `/internal/v1` 의 폴링·ACK 엔드포인트는 **A 담당**입니다. 모델과 계약을 먼저 만들어
+> 두었으니 양쪽이 독립적으로 진행할 수 있습니다. 스키마를 바꿔야 하면 알려 주십시오.
+
 ---
 
 ## 개발 환경

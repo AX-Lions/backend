@@ -3,8 +3,11 @@ AI 대리인.
 
 설정은 팀이 아니라 **사람**에게 붙습니다. 사람 하나에 대리인 하나입니다.
 """
+from datetime import timedelta
+
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 from apps.common.models import TimeStamped, UUIDModel
 
@@ -160,3 +163,106 @@ class PendingQuestion(UUIDModel, TimeStamped):
         db_table = "pending_question"
         indexes = [models.Index(fields=["target_user", "answered_at"]),
                    models.Index(fields=["meeting"])]
+
+
+class OutboxEvent(UUIDModel, TimeStamped):
+    """
+    Discord 로 나갈 것들의 대기열.
+
+    ## 왜 큐를 거치는가
+
+    **외부 호출을 요청 트랜잭션 안에서 하면 안 됩니다.** 트랜잭션이 롤백돼도
+    Discord 메시지는 이미 나가 있습니다. 되돌릴 방법이 없습니다.
+
+    여기에는 행 하나만 남기고, 봇이 폴링해서 가져가 게시한 뒤 결과를 돌려줍니다.
+    DB 커밋과 발송이 분리되므로 롤백되면 행도 함께 사라집니다.
+
+    ## 멱등키
+
+    `(team, idempotency_key)` 가 유니크입니다. 같은 발언을 두 번 큐에 넣어도
+    한 번만 나갑니다. 네트워크가 끊겨 재시도할 때 중복 게시를 막는 유일한 장치입니다.
+
+    봇 쪽에서 들어오는 이벤트의 멱등키는 `guild_id + channel_id + message_id` 이고,
+    나가는 쪽은 `run_id` 나 발언 식별자를 씁니다 — 방향이 다르므로 규칙도 다릅니다.
+
+    ## 상태
+
+        PENDING ──▶ SENT       봇이 게시 성공
+            │
+            └────▶ FAILED ──▶ PENDING   재시도 대기
+                       │
+                       └────▶ DEAD      상한 초과. 사람이 봐야 함
+
+    `DEAD` 를 따로 둔 이유는 조용히 사라지는 것을 막기 위해서입니다. 무한 재시도는
+    같은 오류를 계속 반복하고, 그냥 버리면 아무도 모릅니다.
+    """
+
+    class Kind(models.TextChoices):
+        MESSAGE = "MESSAGE", "회의 발언"
+        ANNOUNCEMENT = "ANNOUNCEMENT", "일정 공지"
+        DM = "DM", "개인 알림"
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "대기"
+        SENT = "SENT", "발송됨"
+        FAILED = "FAILED", "실패 (재시도 대기)"
+        DEAD = "DEAD", "포기 (사람 확인 필요)"
+
+    team = models.ForeignKey("orgs.Team", on_delete=models.CASCADE,
+                             related_name="outbox_events")
+    #: 같은 팀 안에서 유일. 재시도 시 중복 게시를 막습니다.
+    idempotency_key = models.CharField(max_length=120)
+
+    kind = models.CharField(max_length=16, choices=Kind.choices)
+    #: 봇이 그대로 쓰는 값. 서버는 채널을 해석하지 않습니다.
+    channel_id = models.CharField(max_length=40, blank=True, default="")
+    payload = models.JSONField(default=dict)
+
+    status = models.CharField(max_length=10, choices=Status.choices,
+                              default=Status.PENDING, db_index=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    max_attempts = models.PositiveSmallIntegerField(default=5)
+    #: 이 시각 전에는 봇이 가져가지 않습니다. 실패할수록 뒤로 밉니다.
+    available_at = models.DateTimeField(default=timezone.now, db_index=True)
+    last_error = models.TextField(blank=True, default="")
+    sent_at = models.DateTimeField(null=True, blank=True)
+
+    #: 어떤 실행이 만든 발언인가. 삭제돼도 큐는 남아야 하므로 SET_NULL 입니다.
+    run = models.ForeignKey(AgentRun, on_delete=models.SET_NULL,
+                            null=True, blank=True, related_name="outbox_events")
+
+    class Meta:
+        db_table = "outbox_event"
+        constraints = [
+            models.UniqueConstraint(fields=["team", "idempotency_key"],
+                                    name="uniq_outbox_team_idem"),
+        ]
+        # 봇의 폴링 쿼리 그대로입니다: PENDING 중 available_at 지난 것을 오래된 순으로.
+        indexes = [models.Index(fields=["status", "available_at"])]
+
+    def __str__(self):
+        return f"{self.kind} {self.status} {self.idempotency_key}"
+
+    # ── 봇이 결과를 돌려줄 때 ──────────────────────────────
+    def mark_sent(self):
+        self.status = self.Status.SENT
+        self.sent_at = timezone.now()
+        self.last_error = ""
+        self.save(update_fields=["status", "sent_at", "last_error", "updated_at"])
+
+    def mark_failed(self, error: str = ""):
+        """
+        재시도 간격을 지수로 늘립니다.
+
+        같은 간격으로 반복하면 Discord 가 잠시 불안정할 때 재시도가 몰려
+        상황을 더 나쁘게 만듭니다.
+        """
+        self.attempts += 1
+        self.last_error = (error or "")[:2000]
+        if self.attempts >= self.max_attempts:
+            self.status = self.Status.DEAD
+        else:
+            self.status = self.Status.PENDING
+            self.available_at = timezone.now() + timedelta(seconds=30 * (2 ** (self.attempts - 1)))
+        self.save(update_fields=["status", "attempts", "last_error",
+                                 "available_at", "updated_at"])
