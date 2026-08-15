@@ -107,9 +107,12 @@ def run(*, principal, question: str, meeting=None, project_id=None,
 
     steps: list[dict] = []
     evidence: list[dict] = []
+    seen: set = set()
 
-    def _step(kind: str, **payload):
-        steps.append({"kind": kind, "at": timezone.now().isoformat(), **payload})
+    def _step(step_kind: str, **payload):
+        # 인자 이름을 kind 로 두면 payload 의 kind 키와 부딪혀 TypeError 로 죽습니다.
+        # 루프 한가운데서 터지는 자리라 실제로 실행하기 전에는 안 드러났습니다.
+        steps.append({"kind": step_kind, "at": timezone.now().isoformat(), **payload})
 
     try:
         # ── 1. 의도 분류 ──────────────────────────────────
@@ -156,7 +159,8 @@ def run(*, principal, question: str, meeting=None, project_id=None,
         for i in range(MAX_STEPS):
             resp: LLMResponse = client.chat(messages, catalog, system)
             if not resp.ok:
-                _step("llm_error", error=resp.error[:300], kind=resp.error_kind)
+                _step("llm_error", error=resp.error[:300],
+                      error_kind=resp.error_kind)
                 run_obj.steps = steps
                 run_obj.evidence = evidence
                 return _fail(run_obj, resp.error)
@@ -172,7 +176,14 @@ def run(*, principal, question: str, meeting=None, project_id=None,
                 _step("skill", name=call.name, args=call.arguments,
                       ok=result.ok, message=result.message,
                       found=len(result.evidence))
-                evidence.extend(result.evidence)
+                # 같은 기록을 두 번 담지 않습니다. 모델은 검색어를 바꿔 가며
+                # 여러 번 부르는데, 그때마다 쌓으면 같은 근거가 여러 건으로
+                # 세어져 유보 판정이 "근거가 많다" 고 착각합니다.
+                for item in result.evidence:
+                    key = (item.get("source_type"), item.get("source_id"))
+                    if key not in seen:
+                        seen.add(key)
+                        evidence.append(item)
                 messages.append(LLMClient.tool_message(call, result.data))
         else:
             # 상한 소진. 강제로 답을 만들게 하지 않습니다 — 그 순간 지어내기가
@@ -213,7 +224,15 @@ def run(*, principal, question: str, meeting=None, project_id=None,
 # ── 상태 기록 ──────────────────────────────────────────────
 
 def _snapshot_of(principal) -> dict:
-    s = getattr(principal, "agent_settings", None)
+    """
+    실행 시작 시점의 POLICY 를 DB 에서 새로 읽습니다.
+
+    `principal.agent_settings` 로 가면 인스턴스에 캐시된 값이 잡힙니다. 사용자가
+    회의 직전에 설정을 바꿨는데 그 전에 불러온 객체를 들고 있으면 **낡은 정책으로
+    판정**하게 되고, 스냅샷에도 낡은 값이 박혀 나중에 재현할 때 사실과 어긋납니다.
+    """
+    from ..models import AgentSettings
+    s = AgentSettings.objects.filter(user=principal).first()
     return s.as_snapshot() if s else {}
 
 
