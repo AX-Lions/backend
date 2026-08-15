@@ -136,18 +136,37 @@ def delegate_prompt_given(meeting, user, prompt: str):
 
     발언마다 불리므로 **한 회의에 한 번만** 남깁니다. 매번 그리면 질문 열 개짜리
     회의에서 같은 화살표가 열 번 겹칩니다.
+
+    "있는지 보고 없으면 넣는다" 는 그대로 두면 뚫립니다. 회의 중 발언 두 개가
+    다른 워커에서 동시에 처리되면 둘 다 "없다" 를 보고 둘 다 넣습니다.
+    그 사람의 참가자 행을 잠가 순서를 만듭니다 — 락 범위가 (회의, 사람) 하나라
+    다른 회의나 다른 참석자의 처리를 막지 않습니다.
+
+    FlowEdge 에 유니크 제약을 거는 방법도 있지만, 그러려면 `apps.meetings` 에
+    마이그레이션을 넣어야 합니다. 화살표 중복이라는 화면 문제를 잡자고 공용 앱의
+    스키마를 건드릴 일은 아닙니다.
     """
+    from apps.meetings.models import MeetingParticipant
+
     if not (prompt or "").strip():
         return None
-    already = FlowEdge.objects.filter(
-        meeting=meeting, label="사전 지시",
-        from_node__id=str(user.id)).exists()
-    if already:
-        return None
-    return record(meeting,
-                  from_node=user_node(user), to_nodes=[agent_node(user)],
-                  label="사전 지시", content_type=FlowContentType.REQUEST,
-                  occurred_at=meeting.scheduled_at)
+
+    with transaction.atomic():
+        locked = (MeetingParticipant.objects
+                  .select_for_update()
+                  .filter(meeting=meeting, user=user)
+                  .first())
+        if locked is None:
+            return None
+        already = FlowEdge.objects.filter(
+            meeting=meeting, label="사전 지시",
+            from_node__id=str(user.id)).exists()
+        if already:
+            return None
+        return record(meeting,
+                      from_node=user_node(user), to_nodes=[agent_node(user)],
+                      label="사전 지시", content_type=FlowContentType.REQUEST,
+                      occurred_at=meeting.scheduled_at)
 
 
 def question_routed(meeting, *, asker, target, surface=Surface.DISCORD):
