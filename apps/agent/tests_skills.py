@@ -119,7 +119,29 @@ class SearchRecordsTest(Base):
         """'찾았는데 없었다' 와 '검색이 터졌다' 는 다릅니다."""
         r = self.skill.run({"query": "존재하지않는단어zzz"}, self.ctx())
         self.assertTrue(r.ok)
-        self.assertEqual(r.evidence, [])
+
+    def test_no_match_falls_back_to_my_recent_records(self):
+        """
+        빈손으로 돌려주면 모델이 검색어만 바꿔 가며 헛돕니다.
+        무엇이 있는지 보여주면 다음 호출에서 정확한 말로 다시 찾습니다.
+        """
+        r = self.skill.run({"query": "존재하지않는단어zzz"}, self.ctx())
+        self.assertTrue(r.evidence)
+        self.assertTrue(all(e["owner_is_principal"] for e in r.evidence))
+
+    def test_fallback_is_inferred_so_it_cannot_be_answered_on(self):
+        """길잡이는 근거가 아닙니다. 그대로 답으로 가면 R3 에 걸려야 합니다."""
+        r = self.skill.run({"query": "존재하지않는단어zzz"}, self.ctx())
+        self.assertTrue(all(e["match"] == "inferred" for e in r.evidence))
+
+    def test_token_search_finds_across_wording(self):
+        """
+        모델은 'DB 스키마 작업 진행상황' 처럼 문장에 가까운 검색어를 만듭니다.
+        저장된 제목은 'team_members 마이그레이션' 이라 통째로는 안 걸립니다.
+        """
+        r = self.skill.run({"query": "마이그레이션 진행 상황"}, self.ctx())
+        ids = [e["source_id"] for e in r.evidence]
+        self.assertIn(str(self.mine.id), ids)
 
     def test_empty_query_is_rejected(self):
         self.assertFalse(self.skill.run({"query": ""}, self.ctx()).ok)
