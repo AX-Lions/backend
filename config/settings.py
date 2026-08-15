@@ -76,6 +76,7 @@ INSTALLED_APPS = [
     "apps.tasks",
     "apps.calendars",
     "apps.documents",
+    "apps.discord",
 ]
 
 MIDDLEWARE = [
