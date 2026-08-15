@@ -9,9 +9,12 @@
     1. 의미 있는 변화만 남는가 — 검색 호출까지 그리면 화살표에 묻혀 아무것도 안 보입니다
     2. 기록이 실패해도 대리인은 계속 도는가 — 화살표 하나 때문에 답변이 사라지면 안 됩니다
 """
+from datetime import timedelta
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.conf import settings
+from django.db import DatabaseError
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from apps.accounts.models import User
@@ -23,6 +26,9 @@ from apps.meetings.models import (Attendance, FlowContentType, FlowEdge, Meeting
                                   MeetingParticipant, Surface, Utterance)
 from apps.orgs.models import Project, Team
 from apps.states.models import WorkItem
+
+#: 서비스 토큰 테스트용. 실제 설정값을 쓰면 비어 있는 개발 환경에서 통과해 버립니다.
+_TOKEN = "test-service-token-flow"
 
 
 class FakeLLM:
@@ -120,8 +126,23 @@ class AnswerFlowTest(Base):
         names = {n["name"] for n in e.to_nodes}
         self.assertEqual(names, {"임수연", "최비성"})
         # 대리인 본인은 청중이 아닙니다.
-        self.assertEqual(e.from_node["name"], "서재민의 AI")
+        self.assertEqual(e.from_node["name"], "서재민의 Bordo")
         self.assertNotIn("서재민", names)
+
+    def test_audience_order_is_stable(self):
+        """
+        순서가 흔들리면 조회 API 가 화살표를 묶는 키도 흔들립니다. 같은 두 사람
+        사이 화살표가 어떤 회의에서는 하나로, 어떤 회의에서는 둘로 쪼개집니다.
+        """
+        self._run(self._answering())
+        first = [n["id"] for n in FlowEdge.objects.get(label="대리인 답변").to_nodes]
+
+        FlowEdge.objects.all().delete()
+        self._run(self._answering())
+        second = [n["id"] for n in FlowEdge.objects.get(label="대리인 답변").to_nodes]
+
+        self.assertEqual(first, second)
+        self.assertEqual(second, sorted(second), "user_id 정렬이 안 걸렸습니다")
 
     def test_agent_node_is_one_node_across_surfaces(self):
         """
@@ -130,7 +151,7 @@ class AnswerFlowTest(Base):
         """
         self._run(self._answering())
         e = FlowEdge.objects.get(label="대리인 답변")
-        self.assertEqual(e.from_node["id"], f"agent:{self.absent.id}")
+        self.assertEqual(e.from_node["id"], f"{self.absent.id}:agent")
         self.assertEqual(e.surface, Surface.DISCORD)
 
     def test_participant_ids_are_extracted(self):
@@ -209,17 +230,145 @@ class FailureTest(Base):
         self.assertEqual(FlowEdge.objects.count(), 0)
         self.assertEqual(OutboxEvent.objects.count(), 1, "답변이 회의에 안 나갔습니다")
 
+    def test_lookup_failure_outside_record_also_spared(self):
+        """
+        `record()` 안쪽만 보호하면 부족합니다.
+
+        청중을 구하는 참석자 조회는 그 바깥에서 돕니다. 거기서 터지면 예외가
+        위로 올라가 **대리인이 회의에서 입을 다뭅니다.** 화살표를 못 그리는 것과
+        답변이 통째로 사라지는 것은 전혀 다른 이야기입니다.
+        """
+        llm = self._answering()
+        with patch("apps.agent.services.flow.answered",
+                   side_effect=RuntimeError("DB 끊김")):
+            self._run(llm)
+        self.assertEqual(OutboxEvent.objects.count(), 1, "답변이 회의에 안 나갔습니다")
+
+    def test_recording_failure_inside_a_transaction_keeps_the_briefing(self):
+        """
+        브리핑 생성은 `@transaction.atomic` 안에서 돕니다. 화살표를 못 그렸다고
+        브리핑이 통째로 날아가면 안 됩니다.
+
+        **이 테스트가 세이브포인트의 필요성까지 증명하지는 못합니다.**
+        진짜 이유는 PostgreSQL 이 오류 난 트랜잭션을 abort 상태로 만들어 이후
+        쿼리를 전부 거부한다는 것인데, 테스트 DB(SQLite)와 모킹한 예외로는
+        그 상태를 만들 수 없습니다. `flow.record()` 의 세이브포인트는 운영
+        DB 기준의 방어이고, 여기서는 브리핑이 살아남는 것까지만 봅니다.
+        """
+        from apps.agent.services import briefing
+
+        self._run(self._answering())
+        with patch("apps.meetings.models.FlowEdge.save",
+                   side_effect=DatabaseError("제약 위반")):
+            b = briefing.build_for_user(
+                self.meeting, self.absent,
+                client=FakeLLM(LLMResponse(text="정리했습니다")))
+
+        self.assertIsNotNone(b, "브리핑이 통째로 날아갔습니다")
+        self.assertEqual(FlowEdge.objects.filter(label="부재중 브리핑").count(), 0)
+
 
 class OpacityTest(Base):
+    """
+    진하기는 **회의가 끝난 뒤에 채워집니다.**
 
-    def test_opacity_is_computed_from_the_meeting_span(self):
+    만들 때는 회의가 진행 중이라 `ended_at` 이 없고, `compute_opacity()` 의
+    `newest` 가 `now` 라 방금 만든 엣지는 언제나 비율 1.0 입니다. 다시 계산하지
+    않으면 화면이 통째로 균일해집니다 — 범위(0.25~1.0)만 보는 테스트로는
+    이걸 못 잡습니다. 값이 실제로 갈리는지를 봐야 합니다.
+    """
+
+    def _spread_edges(self):
         """
-        조회 시각 기준으로 하면 같은 회의를 내일 열었을 때 그림이 달라집니다.
+        두 시간짜리 회의에 화살표 세 개 — 시작·중간·끝.
+
+        시작을 과거로 당깁니다. `setUpTestData` 의 회의는 방금 시작한 것이라
+        구간이 0 이고, 그러면 `compute_opacity()` 가 전부 1.0 을 돌려주어
+        재계산이 됐는지 안 됐는지를 구별할 수 없습니다.
+        """
+        start = timezone.now() - timedelta(hours=2)
+        self.meeting.started_at = start
+        self.meeting.scheduled_at = start
+        self.meeting.save(update_fields=["started_at", "scheduled_at"])
+        for i in range(3):
+            flow.record(self.meeting,
+                        from_node=flow.user_node(self.speaker),
+                        to_nodes=[flow.agent_node(self.absent)],
+                        label=f"질문{i}", content_type=FlowContentType.REQUEST,
+                        occurred_at=start + timedelta(hours=i))
+
+    def test_in_meeting_edges_are_all_flat(self):
+        """
+        진행 중인 회의에서 만든 엣지는 전부 1.0 입니다.
+
+        `occurred_at` 이 `now` 이고 `ended_at` 이 없어 `newest` 도 `now` 라,
+        방금 만든 엣지는 언제나 자기가 가장 최근입니다. **이게 정상 동작이고,
+        그래서 회의가 끝날 때 다시 계산해야 합니다.** 이 사실을 눌러 두지 않으면
+        아래 재계산이 왜 필요한지가 테스트만 읽어서는 안 드러납니다.
         """
         self._run(self._answering())
-        for e in FlowEdge.objects.all():
-            self.assertGreaterEqual(e.opacity, 0.25)
-            self.assertLessEqual(e.opacity, 1.0)
+        # 사전 지시는 회의 시작 시각으로 찍히므로 예외입니다. 회의 중에 생긴
+        # 것들만 봅니다 — 실제 회의에서는 이쪽이 거의 전부입니다.
+        vals = set(FlowEdge.objects.exclude(label="사전 지시")
+                   .values_list("opacity", flat=True))
+        self.assertEqual(vals, {1.0}, f"실제 경로에서 나온 값: {vals}")
+
+    def test_recompute_at_meeting_end_actually_spreads(self):
+        self._spread_edges()
+        self.meeting.ended_at = self.meeting.started_at + timedelta(hours=2)
+        self.meeting.save(update_fields=["ended_at"])
+
+        self.assertEqual(flow.recompute_for_meeting(self.meeting), 3)
+
+        vals = list(FlowEdge.objects.order_by("occurred_at")
+                    .values_list("opacity", flat=True))
+        self.assertEqual(vals, sorted(vals), "최근일수록 진해야 합니다")
+        self.assertEqual(len(set(vals)), 3, f"값이 안 갈렸습니다: {vals}")
+        self.assertGreaterEqual(min(vals), 0.25)
+        self.assertLessEqual(max(vals), 1.0)
+
+    def test_recompute_is_stable_across_days(self):
+        """
+        조회 시각으로 계산하면 같은 회의를 내일 열었을 때 그림이 달라집니다.
+        회의 구간은 고정이므로 몇 번을 돌려도 같은 값이어야 합니다.
+        """
+        self._spread_edges()
+        self.meeting.ended_at = self.meeting.started_at + timedelta(hours=2)
+        self.meeting.save(update_fields=["ended_at"])
+
+        flow.recompute_for_meeting(self.meeting)
+        first = list(FlowEdge.objects.order_by("occurred_at")
+                     .values_list("opacity", flat=True))
+        flow.recompute_for_meeting(self.meeting)
+        second = list(FlowEdge.objects.order_by("occurred_at")
+                      .values_list("opacity", flat=True))
+        self.assertEqual(first, second)
+
+    @override_settings(BORDO={**settings.BORDO, "SERVICE_TOKEN": _TOKEN})
+    def test_meeting_end_triggers_recompute(self):
+        """
+        재계산 함수가 있어도 회의 종료에서 안 부르면 화면은 그대로 균일합니다.
+
+        회의 중 상태를 그대로 만들어 둡니다 — 시각은 구간에 퍼져 있지만 저장된
+        값은 전부 1.0. 이렇게 해 두지 않으면 종료가 재계산을 안 불러도
+        테스트가 통과해 버립니다.
+        """
+        self._spread_edges()
+        FlowEdge.objects.update(opacity=1.0)
+
+        self.meeting.discord_channel_id = "th-1"
+        self.meeting.save(update_fields=["discord_channel_id"])
+
+        r = self.client.post(
+            "/internal/v1/meetings/end",
+            {"thread_id": "th-1"},
+            content_type="application/json",
+            HTTP_X_SERVICE_TOKEN=_TOKEN)
+        self.assertEqual(r.status_code, 200, r.content[:300])
+
+        vals = set(FlowEdge.objects.values_list("opacity", flat=True))
+        self.assertNotEqual(vals, {1.0}, "회의 종료가 진하기를 다시 계산하지 않았습니다")
+        self.assertEqual(len(vals), 3)
 
 
 class ArtifactTest(Base):
@@ -319,7 +468,7 @@ class FlowScreenTest(Base):
         self.assertTrue(data["arrows"], "회의를 했는데 화살표가 하나도 없습니다")
         # 사람 쌍마다 하나로 묶입니다 — 사전 지시 · 질문 · 답변은 쌍이 다 다릅니다.
         self.assertEqual(len(data["arrows"]), 3)
-        self.assertIn("서재민의 AI", {n["name"] for n in data["nodes"]})
+        self.assertIn("서재민의 Bordo", {n["name"] for n in data["nodes"]})
         self.assertIn(Surface.DISCORD, data["filter_options"]["surfaces"])
 
     def test_content_filter_reaches_generated_edges(self):
@@ -338,14 +487,43 @@ class FlowScreenTest(Base):
 
 
 class NodeShapeTest(TestCase):
-    """노드 모양은 프론트가 그대로 읽습니다. 키가 빠지면 화면이 깨집니다."""
+    """
+    노드 모양은 프론트가 그대로 읽습니다. 키가 빠지면 화면이 깨집니다.
+
+    **`seed_demo.py` 와 글자 하나까지 같아야 합니다.** 프론트는 `id` 로 노드를
+    합치므로, 표기가 갈리면 시드 회의와 실제 회의에서 같은 사람의 대리인이
+    화면에 두 개로 그려집니다.
+    """
+
+    def setUp(self):
+        self.u = User.objects.create_user(email="n@bordo.dev", password="x" * 10,
+                                          name="유수인")
+
+    def test_node_shape_matches_seed(self):
+        # seed_demo.py 의 node() 가 만드는 모양 그대로입니다.
+        #   USER   {u.id}          / {name}
+        #   AGENT  {u.id}:agent    / {name}의 Bordo
+        self.assertEqual(flow.user_node(self.u)["id"], str(self.u.id))
+        self.assertEqual(flow.agent_node(self.u)["id"], f"{self.u.id}:agent")
+        self.assertEqual(flow.agent_node(self.u)["name"], "유수인의 Bordo")
+        self.assertEqual(flow.user_node(self.u)["kind"], "USER")
+
+    def test_agent_is_not_called_ai(self):
+        """
+        `AI 대리인` 은 화면 어디에도 없는 낱말입니다. CLAUDE.md 의
+        `디자인이 계약을 이겼던 곳` 에 호칭이 못박혀 있습니다.
+        """
+        self.assertNotIn("AI", flow.agent_node(self.u)["name"])
+
+    def test_avatar_is_carried(self):
+        """
+        조회 API 가 화살표의 아바타 목록을 `to_nodes[].avatar_url` 에서 모읍니다.
+        키가 없으면 아바타가 영원히 빈 배열입니다.
+        """
+        self.assertIn("avatar_url", flow.user_node(self.u))
+        self.assertIn("avatar_url", flow.agent_node(self.u))
 
     def test_server_node_has_no_user(self):
         n = flow.server_node()
-        self.assertEqual(set(n), {"id", "kind", "user_id", "name"})
+        self.assertEqual(set(n), {"id", "kind", "user_id", "name", "avatar_url"})
         self.assertIsNone(n["user_id"])
-
-    def test_agent_name_follows_the_owner(self):
-        u = User.objects.create_user(email="n@bordo.dev", password="x" * 10, name="유수인")
-        self.assertEqual(flow.agent_node(u)["name"], "유수인의 AI")
-        self.assertEqual(flow.user_node(u)["kind"], "USER")
