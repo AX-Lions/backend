@@ -28,7 +28,7 @@ logger = logging.getLogger("bordo.agent")
 def run_agent_for_utterance(utterance_id: str) -> None:
     from apps.meetings.models import Utterance
 
-    from .services import react, targeting
+    from .services import flow, react, targeting
     from .services.skills import SkillContext
     from .services.skills.act import SpeakInMeetingSkill
 
@@ -50,6 +50,14 @@ def run_agent_for_utterance(utterance_id: str) -> None:
         # 회의 발언 대부분은 질문이 아닙니다. 아무도 안 부르는 것이 정상입니다.
         return
 
+    # 화면에 남기는 것은 여기서 시작합니다. 대리인이 실패하더라도 "이 질문이 저
+    # 사람의 대리인에게 갔다" 는 사실은 남아야 합니다 — 답이 없는 것과 질문이
+    # 닿지도 않은 것은 사용자에게 전혀 다른 이야기입니다.
+    flow.delegate_prompt_given(utterance.meeting, target.user,
+                               target.delegate_prompt or "")
+    flow.question_routed(utterance.meeting, asker=utterance.participant,
+                         target=target.user)
+
     try:
         outcome = react.run(
             principal=target.user,
@@ -70,7 +78,38 @@ def run_agent_for_utterance(utterance_id: str) -> None:
         # 떠들면 회의가 어지러워지고, 사람이 할 수 있는 일도 없습니다.
         return
 
+    _record_flow(outcome, utterance, target.user)
     _speak(outcome, utterance)
+
+
+def _record_flow(outcome, utterance, principal) -> None:
+    """
+    답변과 유보를 화면에 남깁니다.
+
+    둘을 **다른 종류로** 기록합니다. 화면에서 "답했다" 와 "확인이 필요하다" 가
+    같은 색으로 보이면, 유보를 보여 주는 의미가 사라집니다.
+    """
+    from apps.meetings.models import Attendance, MeetingParticipant
+
+    from .services import flow
+
+    if not outcome.answered:
+        flow.deferred(utterance.meeting, principal=principal,
+                      asker=utterance.participant)
+        return
+
+    # 받는 쪽은 그 자리에 있던 사람들입니다. 질문자 한 명에게만 그리면 회의에서
+    # 모두가 들은 사실이 화면에 남지 않습니다.
+    audience = [p.user for p in
+                MeetingParticipant.objects
+                .filter(meeting_id=utterance.meeting_id,
+                        attendance=Attendance.PRESENT)
+                .exclude(user_id=principal.id)
+                .select_related("user")]
+    if not audience and utterance.participant:
+        # 참석 상태가 아직 안 들어온 회의도 있습니다. 최소한 질문자에게는 그립니다.
+        audience = [utterance.participant]
+    flow.answered(utterance.meeting, principal=principal, audience=audience)
 
 
 def _speak(outcome, utterance) -> None:
