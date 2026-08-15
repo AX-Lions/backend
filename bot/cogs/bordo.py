@@ -26,4 +26,23 @@ class BordoCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         result = await self.backend.get("/internal/v1/teams/current", params={"discord_user_id": str(interaction.user.id)})
         await interaction.followup.send(str(result), ephemeral=True)
-        
+
+    @app_commands.command(
+        name="ask-bordo",
+        description="특정 대리인에게 질문을 전달합니다."
+    )
+    @app_commands.describe(target="질문할 대리인의 주인", question="질문 내용")
+    async def ask_bordo(self, interaction: discord.Interaction, target: discord.Member, question: str):
+        await interaction.response.defer()
+
+        result = await self.backend.post("/internal/v1/deputy/ask", json={
+            "requester_discord_id": str(interaction.user.id),
+            "target_discord_id": str(target.id),
+            "question": question,
+            "thread_id": str(interaction.channel_id),
+        })
+
+        # Outbox consumer가 아직 없어서, 지금은 응답 본문에 바로 담겨 오는 답변/유보를
+        # 그대로 게시한다. consumer가 붙으면 그때 옮긴다.
+        body = (result or {}).get("body", "답변을 받아오지 못했습니다.")
+        await interaction.followup.send(body)
