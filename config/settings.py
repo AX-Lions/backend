@@ -53,6 +53,10 @@ SECURE_HSTS_PRELOAD = False
 SECURE_SSL_REDIRECT = _flag("DJANGO_SSL_REDIRECT", False)
 
 INSTALLED_APPS = [
+    # daphne 는 staticfiles 보다 앞에 와야 합니다. runserver 를 ASGI 로 바꿔
+    # 개발 중에도 WebSocket 이 붙습니다.
+    "daphne",
+    "channels",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -171,6 +175,20 @@ CORS_ALLOW_ALL_ORIGINS = not CORS_ALLOWED_ORIGINS
 CORS_ALLOW_HEADERS = list(__import__("corsheaders.defaults", fromlist=["default_headers"]).default_headers) + [
     "idempotency-key", "x-service-token",
 ]
+
+# ─────────────────────────────────────────── 실시간
+# Redis 가 있으면 그것을, 없으면 인메모리를 씁니다. 인메모리는 프로세스 안에서만
+# 도므로 워커가 여럿이면 이벤트가 한쪽에서만 보입니다 — 개발 전용입니다.
+_redis = os.environ.get("REDIS_URL")
+if _redis:
+    CHANNEL_LAYERS = {"default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {"hosts": [_redis]},
+    }}
+else:
+    CHANNEL_LAYERS = {"default": {
+        "BACKEND": "channels.layers.InMemoryChannelLayer",
+    }}
 
 # ─────────────────────────────────────────── Celery
 # 개발에서는 브로커 없이 그 자리에서 실행합니다. 운영에서 켜 두면 요청 스레드가
