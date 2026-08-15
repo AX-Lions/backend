@@ -42,6 +42,29 @@ def publish(project_id, event_type, payload=None, *, user_id=None):
 
 
 def _deliver(body):
-    """3단계에서 B 가 여기를 Channels 로 교체합니다."""
-    logger.info("event %s project=%s user=%s payload=%s",
-                body["event_type"], body["project_id"], body["user_id"], body["payload"])
+    """
+    Channels 그룹으로 흘립니다.
+
+    **호출부는 한 줄도 바뀌지 않았습니다.** `publish()` 를 부르는 쪽은 이 함수가
+    로그를 찍든 소켓으로 나가든 모릅니다.
+
+    여기서 예외를 밖으로 던지지 않습니다. 실시간 전달이 실패했다고 이미 커밋된
+    쓰기 요청까지 500 으로 되돌릴 수는 없습니다 — 화면이 늦게 갱신될 뿐입니다.
+    """
+    logger.info("event %s project=%s user=%s", body["event_type"],
+                body["project_id"], body["user_id"])
+    try:
+        from asgiref.sync import async_to_sync
+        from channels.layers import get_channel_layer
+
+        layer = get_channel_layer()
+        if layer is None:
+            return
+
+        message = {"type": "bordo.event", "body": body}
+        if body["project_id"]:
+            async_to_sync(layer.group_send)(f"project.{body['project_id']}", message)
+        if body["user_id"]:
+            async_to_sync(layer.group_send)(f"user.{body['user_id']}", message)
+    except Exception:                                          # noqa: BLE001
+        logger.warning("실시간 전달 실패 %s", body["event_type"], exc_info=True)

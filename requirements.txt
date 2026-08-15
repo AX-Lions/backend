@@ -9,6 +9,8 @@ openai>=2.0
 
 # 대리인 비동기 실행
 celery>=5.4
+channels[daphne]>=4.1
+channels-redis>=4.2
 
 # PostgreSQL — 운영 전제. DATABASE_URL 이 있으면 이 드라이버를 씁니다.
 psycopg[binary]>=3.2
