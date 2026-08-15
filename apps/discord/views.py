@@ -38,10 +38,6 @@ from .models import GuildLink, LinkCode
 
 logger = logging.getLogger("bordo.discord")
 
-#: 봇이 부르는 모든 뷰에 붙습니다. 사람 인증을 타지 않습니다.
-_internal = [api_view, authentication_classes, permission_classes]
-
-
 def internal(methods):
     """`@api_view` + 인증 해제 + 서비스 토큰 검사를 한 번에."""
     def deco(fn):
@@ -53,8 +49,26 @@ def internal(methods):
     return deco
 
 
+def _require(value, field: str) -> str:
+    """
+    빈 값을 조회에 넣지 않습니다.
+
+    미연동 사용자는 `discord_user_id=""` 로 저장되고, 웹에서 만든 회의는
+    `discord_channel_id=""` 입니다. 빈 문자열로 조회하면 **"못 찾음" 이 아니라
+    아무 행이나 잡힙니다** — 남의 대리인이 답하거나 남의 회의가 종료됩니다.
+
+    호출부마다 가드를 두는 대신 여기서 막습니다. 조회를 하나 더 추가할 때
+    가드를 빠뜨리는 일이 없어야 합니다.
+    """
+    v = str(value or "").strip()
+    if not v:
+        raise BordoError("VALIDATION_ERROR", f"{field} 는 필수입니다.")
+    return v
+
+
 def _team_of(guild_id: str):
-    link = GuildLink.objects.filter(guild_id=str(guild_id)).select_related("team").first()
+    guild_id = _require(guild_id, "guild_id")
+    link = GuildLink.objects.filter(guild_id=guild_id).select_related("team").first()
     if link is None:
         raise BordoError("TEAM_NOT_FOUND",
                          "이 Discord 서버에 연결된 팀이 없습니다. /bordo-link-team 으로 먼저 연결하십시오.")
@@ -63,7 +77,8 @@ def _team_of(guild_id: str):
 
 def _user_of(discord_user_id: str):
     from apps.accounts.models import User
-    user = User.objects.filter(discord_user_id=str(discord_user_id)).first()
+    discord_user_id = _require(discord_user_id, "discord_user_id")
+    user = User.objects.filter(discord_user_id=discord_user_id).first()
     if user is None:
         raise BordoError("USER_NOT_FOUND",
                          "연결된 계정이 없습니다. /bordo-connect 로 먼저 연결하십시오.")
@@ -79,21 +94,31 @@ def connect_code(request):
 
     **코드는 서버가 만듭니다.** 봇이 만들면 서버가 그 값을 믿을 근거가 없습니다.
     """
-    discord_user_id = str(request.data.get("discord_user_id") or "").strip()
-    if not discord_user_id:
-        raise BordoError("VALIDATION_ERROR", "discord_user_id 는 필수입니다.")
+    discord_user_id = _require(request.data.get("discord_user_id"),
+                               "discord_user_id")
 
     # 이전에 발급한 살아 있는 코드는 무효로 만듭니다. 여러 개가 동시에 살아 있으면
     # 어느 것이 최신인지 사용자가 알 수 없습니다.
     LinkCode.objects.filter(discord_user_id=discord_user_id,
                             used_at=None).update(used_at=timezone.now())
 
-    code = secrets.token_hex(3).upper()      # 6자리. DM 으로 옮겨 적기 좋은 길이
-    row = LinkCode.objects.create(
-        code=code, discord_user_id=discord_user_id,
-        guild_id=str(request.data.get("guild_id") or ""),
-        expires_at=timezone.now() + timezone.timedelta(minutes=LinkCode.TTL_MINUTES),
-    )
+    # 6자리라 드물게 겹칩니다. 그때 500 을 내면 사용자는 이유를 알 수 없습니다.
+    row = None
+    for _ in range(5):
+        try:
+            row = LinkCode.objects.create(
+                code=secrets.token_hex(3).upper(),
+                discord_user_id=discord_user_id,
+                guild_id=str(request.data.get("guild_id") or ""),
+                expires_at=timezone.now() + timezone.timedelta(
+                    minutes=LinkCode.TTL_MINUTES),
+            )
+            break
+        except IntegrityError:
+            continue
+    if row is None:
+        raise BordoError("INTERNAL_ERROR",
+                         "코드 발급에 실패했습니다. 다시 시도해 주십시오.")
     return Response({"code": row.code,
                      "expires_at": row.expires_at.isoformat(),
                      "ttl_minutes": LinkCode.TTL_MINUTES}, status=201)
@@ -144,11 +169,8 @@ def teams_link(request):
     """
     from apps.orgs.models import TeamMember, TeamRole
 
-    guild_id = str(request.data.get("guild_id") or "").strip()
-    if not guild_id:
-        raise BordoError("VALIDATION_ERROR", "guild_id 는 필수입니다.")
-
-    user = _user_of(request.data.get("discord_user_id") or "")
+    guild_id = _require(request.data.get("guild_id"), "guild_id")
+    user = _user_of(request.data.get("discord_user_id"))
 
     # 팀을 만들거나 관리할 수 있는 사람만 연결합니다. 일반 멤버가 붙이면
     # 팀 전체의 회의가 그 서버로 흘러갑니다.
@@ -185,13 +207,9 @@ def teams_link(request):
 # ═══════════════════════════════════════════ 대리 참석
 
 def _set_delegate(request, on: bool):
-    discord_user_id = str(request.data.get("discord_user_id") or "").strip()
-    if not discord_user_id:
-        raise BordoError("VALIDATION_ERROR", "discord_user_id 는 필수입니다.")
-
     from apps.meetings.models import Attendance, MeetingParticipant, MeetingStatus
 
-    user = _user_of(discord_user_id)
+    user = _user_of(request.data.get("discord_user_id"))
 
     # 진행 중이거나 예정된 회의에만 적용합니다. 끝난 회의의 참석 상태를 뒤늦게
     # 바꾸면 그때 대리인이 왜 답했는지 기록과 어긋납니다.
@@ -227,15 +245,10 @@ def meeting_start(request):
     from apps.meetings.models import (Attendance, Meeting, MeetingParticipant,
                                       MeetingStatus)
 
-    guild_id = str(request.data.get("guild_id") or "").strip()
-    if not guild_id:
-        raise BordoError("VALIDATION_ERROR", "guild_id 는 필수입니다.")
-    team = _team_of(guild_id)
+    team = _team_of(request.data.get("guild_id"))
 
-    thread_id = str(request.data.get("thread_id")
-                    or request.data.get("text_channel_id") or "").strip()
-    if not thread_id:
-        raise BordoError("VALIDATION_ERROR", "thread_id 는 필수입니다.")
+    thread_id = _require(request.data.get("thread_id")
+                         or request.data.get("text_channel_id"), "thread_id")
 
     # 같은 스레드로 두 번 들어오면 기존 회의를 돌려줍니다. 봇이 재시도할 때
     # 회의가 두 개 생기면 발언이 갈라져 어느 쪽도 온전하지 않습니다.
@@ -263,15 +276,20 @@ def meeting_start(request):
             started_at=timezone.now(), discord_channel_id=thread_id,
             created_by=creator,
         )
-        for row in request.data.get("participants") or []:
-            from apps.accounts.models import User
-            u = User.objects.filter(
-                discord_user_id=str(row.get("discord_user_id") or "")).first()
-            if u is None:
-                # 계정을 아직 연결하지 않은 참석자는 건너뜁니다. 회의 자체는
-                # 진행돼야 하고, 그 사람은 나중에 연결하면 됩니다.
-                continue
-            delegated = str(row.get("status") or "") == "delegated"
+        from apps.accounts.models import User
+
+        rows = request.data.get("participants") or []
+        # 빈 id 는 걸러냅니다. 그대로 조회하면 미연동 사용자 아무나 잡혀
+        # 남의 회의에 등록됩니다.
+        by_discord = {str(r.get("discord_user_id") or "").strip(): r
+                      for r in rows if str(r.get("discord_user_id") or "").strip()}
+
+        # 참석자마다 쿼리를 날리지 않습니다. 인원이 늘면 그대로 늘어납니다.
+        # 계정을 아직 연결하지 않은 참석자는 여기서 빠집니다 — 회의 자체는
+        # 진행돼야 하고, 그 사람은 나중에 연결하면 됩니다.
+        for u in User.objects.filter(discord_user_id__in=by_discord.keys()):
+            delegated = str(
+                by_discord[u.discord_user_id].get("status") or "") == "delegated"
             MeetingParticipant.objects.update_or_create(
                 meeting=meeting, user=u,
                 defaults=dict(user_name=u.name, delegated=delegated,
@@ -293,7 +311,9 @@ def meeting_end(request):
     from apps.agent.services import briefing
     from apps.meetings.models import Meeting, MeetingStatus
 
-    thread_id = str(request.data.get("thread_id") or "").strip()
+    # 빈 thread_id 로 조회하면 웹에서 만든 회의(discord_channel_id="")가 잡혀
+    # 엉뚱한 팀의 회의가 강제 종료됩니다.
+    thread_id = _require(request.data.get("thread_id"), "thread_id")
     meeting = Meeting.objects.filter(discord_channel_id=thread_id).first()
     if meeting is None:
         raise BordoError("MEETING_NOT_FOUND", "해당 스레드의 회의를 찾을 수 없습니다.")
@@ -339,7 +359,8 @@ def discord_messages(request):
     from apps.agent.tasks import run_agent_for_utterance
     from apps.meetings.models import Meeting, MeetingStatus, Utterance
 
-    thread_id = str(request.data.get("thread_id") or "").strip()
+    # 위와 같은 이유입니다. 빈 값이면 웹 회의 스레드로 발언이 새어 들어갑니다.
+    thread_id = _require(request.data.get("thread_id"), "thread_id")
     body = (request.data.get("content") or request.data.get("body") or "").strip()
     if not body:
         return Response({"skipped": "empty"}, status=202)
@@ -378,22 +399,24 @@ def discord_presence(request):
     """온라인 여부. 대리 참석 판단의 보조 신호입니다."""
     from apps.meetings.models import Attendance, MeetingParticipant, MeetingStatus
 
-    discord_user_id = str(request.data.get("discord_user_id") or "").strip()
+    discord_user_id = _require(request.data.get("discord_user_id"), "discord_user_id")
     status = str(request.data.get("status") or "").lower()
-    if not discord_user_id:
-        raise BordoError("VALIDATION_ERROR", "discord_user_id 는 필수입니다.")
 
     from apps.accounts.models import User
     user = User.objects.filter(discord_user_id=discord_user_id).first()
     if user is None:
         return Response({"skipped": "unlinked"}, status=202)
 
+    # idle·dnd 는 자리에 있는 상태입니다. 비운 것은 offline·invisible 뿐입니다.
+    # online 만 재실로 보면 잠깐 자리를 비운 표시만으로 결석 처리됩니다.
+    present = status in ("online", "idle", "dnd")
+
     # 대리 참석을 켜 둔 사람은 건드리지 않습니다. 본인이 명시적으로 정한 것을
     # 접속 상태 같은 약한 신호로 뒤집으면 안 됩니다.
     changed = (MeetingParticipant.objects
                .filter(user=user, delegated=False,
                        meeting__status=MeetingStatus.ACTIVE)
-               .update(attendance=(Attendance.PRESENT if status == "online"
+               .update(attendance=(Attendance.PRESENT if present
                                    else Attendance.ABSENT)))
     return Response({"updated": changed})
 
@@ -427,9 +450,12 @@ def deputy_ask(request):
         from apps.accounts.models import User
         asker = User.objects.filter(discord_user_id=str(asker_id)).first()
 
-    meeting = Meeting.objects.filter(
-        discord_channel_id=str(request.data.get("thread_id") or ""),
-        status=MeetingStatus.ACTIVE).first()
+    # thread_id 는 선택입니다(DM 에서도 물을 수 있음). 다만 빈 값으로 조회하면
+    # 웹에서 만든 회의(discord_channel_id="")가 잡혀 엉뚱한 회의에 묶입니다.
+    thread_id = str(request.data.get("thread_id") or "").strip()
+    meeting = (Meeting.objects.filter(discord_channel_id=thread_id,
+                                      status=MeetingStatus.ACTIVE).first()
+               if thread_id else None)
 
     outcome = react.run(
         principal=target, question=question, meeting=meeting,
