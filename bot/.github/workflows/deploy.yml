@@ -1,0 +1,65 @@
+# main 에 머지되면 서버에 반영합니다.
+#
+# 서버가 가정용 회선 뒤에 있어 GitHub 이 밖에서 들어올 수 없습니다. 서버에 둔
+# self-hosted 러너가 작업을 가져가는 방향으로 붙입니다.
+#
+# 러너는 저장소 단위라 다른 저장소의 러너를 빌려 쓸 수 없습니다.
+# bordo-discord 라벨로 이 저장소 작업만 받습니다.
+name: 배포
+
+on:
+  push:
+    branches: [main]
+  # 코드 변경 없이 다시 배포해야 할 때가 있습니다(토큰 교체·복구).
+  workflow_dispatch:
+
+# 배포가 겹치면 봇이 두 번 재시작하면서 게이트웨이 세션이 꼬입니다.
+# 앞선 배포를 취소하지 않고 순서대로 흘립니다.
+concurrency:
+  group: deploy-discord
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, Linux, ARM64, bordo-discord]
+    timeout-minutes: 15
+
+    steps:
+      # actions/checkout 을 쓰지 않습니다. 러너 작업공간에 받아서 옮기는 대신
+      # 봇이 실제로 도는 디렉터리를 직접 갱신합니다. 사본이 둘이면
+      # "어느 쪽이 도는 코드인지"가 흐려집니다.
+      - name: 배포
+        run: |
+          set -euo pipefail
+          cd "$BOT_DIR"
+
+          PREV=$(git rev-parse HEAD)
+          echo "현재: $PREV"
+
+          git fetch --prune origin
+          # checkout -B 로 브랜치까지 맞춥니다.
+          #
+          # reset --hard 만 하면 현재 브랜치를 옮기지 않고 그 브랜치를 덮어씁니다.
+          # 서버에서 확인하다 다른 브랜치를 체크아웃해 두면 다음 배포가 그것을
+          # 조용히 갈아엎고, git status 만 보고는 무엇이 도는지 알 수 없습니다.
+          #
+          # reset --hard 는 추적되지 않는 파일을 지우지 않습니다. .env 는 안전합니다.
+          # git clean 은 쓰지 마십시오 — .env 와 venv 가 날아갑니다.
+          git checkout -B "${GITHUB_REF_NAME}" "origin/${GITHUB_REF_NAME}"
+          git reset --hard "origin/${GITHUB_REF_NAME}"
+          echo "대상: $(git rev-parse HEAD)"
+
+          if ./deploy/deploy.sh; then
+            echo "배포 완료"
+          else
+            echo "::error::배포 실패 — 이전 커밋으로 되돌립니다 ($PREV)"
+            git reset --hard "$PREV"
+            ./deploy/deploy.sh || echo "::error::되돌리기도 실패했습니다. 수동 확인이 필요합니다."
+            exit 1
+          fi
+        env:
+          BOT_DIR: /home/zanviq/bordo/discord
+
+      - name: 실패 시 로그
+        if: failure()
+        run: journalctl -u bordo-discord -n 50 --no-pager
