@@ -1,6 +1,6 @@
-# Bordo 데이터베이스
+# Bordo 데이터 계층 — PostgreSQL + Redis
 #
-# 이 파일은 DB 하나만 띄웁니다. 앱(gunicorn)과 터널은 systemd 프로세스로 돌기 때문에
+# 이 파일은 저장소 둘만 띄웁니다. 앱(gunicorn)과 터널은 systemd 프로세스로 돌기 때문에
 # 여기 없습니다. 프론트와 백엔드가 저장소부터 분리돼 있어 전체를 한 compose 로 묶으면
 # 어느 쪽 담당이 무엇을 띄우는지가 흐려집니다.
 #
@@ -49,6 +49,40 @@ services:
 
     logging:
       # 임시 서버의 SD카드 여유가 크지 않습니다. 로그가 무한히 쌓이지 않게 막습니다.
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    # Channels 그룹과 Celery 큐가 함께 씁니다.
+    #
+    # 없으면 Channels 는 인메모리로 떨어지고, 그러면 **워커가 여럿일 때 이벤트가
+    # 한쪽 워커에 붙은 사용자에게만 보입니다.** 화면이 사람마다 다르게 보이는데
+    # 오류는 안 납니다 — 찾기 가장 어려운 종류입니다.
+    image: redis:7-alpine
+    container_name: bordo-redis
+    restart: unless-stopped
+
+    # 메모리가 차면 오래된 키부터 버립니다. Celery 큐가 밀려 서버가 멎는 것보다
+    # 작업 몇 개를 잃는 편이 낫습니다.
+    command: >
+      redis-server
+      --maxmemory ${REDIS_MAXMEMORY:-256mb}
+      --maxmemory-policy allkeys-lru
+      --save ""
+
+    ports:
+      # 루프백에만 엽니다. Redis 는 기본으로 인증이 없어 외부에 열면 그대로 뚫립니다.
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+    logging:
       driver: json-file
       options:
         max-size: "10m"
