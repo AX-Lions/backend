@@ -31,7 +31,8 @@ class MeetingCog(commands.Cog):
     # 공통 함수
     # --------------------------------------------------
 
-    def _now_iso(self) -> str:
+    @staticmethod
+    def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
 
     async def announce_to_thread(self, thread_id: int, text: str) -> None:
@@ -104,7 +105,7 @@ class MeetingCog(commands.Cog):
 
         await thread.send(announcement)
 
-        result = await self.backend.post("/internal/v1/meetings",
+        result = await self.backend.post("/internal/v1/meetings/start",
             json={
                 "guild_id": str(interaction.guild_id),
                 "text_channel_id": str(interaction.channel_id),
