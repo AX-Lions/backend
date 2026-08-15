@@ -208,7 +208,13 @@ BORDO = {
     "CHAT_EDIT_WINDOW_MINUTES": 15,     # 메시지 수정 제한
     "DEFAULT_PAGE_SIZE": 50,
     "MAX_HOPS": 3,                      # AI↔AI 무한 대화 차단
-    "SERVICE_TOKEN": os.environ.get("BORDO_SERVICE_TOKEN", "dev-service-token"),
+    # 기본값을 두지 않습니다.
+    #
+    # 이 값을 실제로 검증하는 코드가 생겼습니다(/internal/v1). 기본값이 살아 있으면
+    # 배포에서 환경변수를 빠뜨렸을 때 **저장소를 볼 수 있는 사람은 누구나**
+    # 봇 전용 API 를 부를 수 있습니다. 비어 있으면 인증이 전부 401 로 닫힙니다 —
+    # 조용히 열려 있는 것보다 눈에 띄게 막히는 편이 낫습니다.
+    "SERVICE_TOKEN": os.environ.get("BORDO_SERVICE_TOKEN", ""),
 
     # 대리인 유보 판정 임계값. 코드에 박으면 시연 중에 조정할 수 없습니다.
     # 값을 올리면 더 자주 유보하고, 내리면 더 자주 답합니다.
