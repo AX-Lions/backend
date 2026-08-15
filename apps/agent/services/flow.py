@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 
+from django.db import transaction
 from django.utils import timezone
 
 from apps.meetings.models import FlowCategory, FlowContentType, FlowEdge, Surface
@@ -100,7 +101,16 @@ def record(meeting, *, from_node: dict, to_nodes: list[dict], label: str,
             occurred_at=occurred_at or timezone.now(),
         )
         edge.opacity = edge.compute_opacity()
-        edge.save()
+
+        # 저장을 세이브포인트로 감쌉니다.
+        #
+        # 이 함수는 트랜잭션 안에서도 불립니다(briefing.build_for_user 는
+        # @transaction.atomic). 거기서 DB 오류가 나면 **예외를 잡아도 트랜잭션은
+        # 이미 오염됩니다** — PostgreSQL 이 트랜잭션을 abort 상태로 만들어 이후
+        # 쿼리를 전부 거부합니다. 잡아서 넘어간다는 이 함수의 약속이 그대로
+        # 깨지고, 브리핑이 통째로 날아갑니다.
+        with transaction.atomic():
+            edge.save()
         return edge
     except Exception:                                          # noqa: BLE001
         # 화살표 하나를 못 그렸다고 대리인의 답변이 취소되면 안 됩니다.
