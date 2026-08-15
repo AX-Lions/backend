@@ -26,6 +26,9 @@ class GeneralCog(commands.Cog):
         if message.author.bot:
             return  # Bot/대리인 발신 제외
 
+        if message.guild is None:
+            return  # DM은 대상 밖 (guild_id 필요한 idempotency_key 구성 불가)
+
         # [TEMP] 활성 회의 스레드의 대화는 종료 시 요약·TODO 생성을 위해 임시로 기록해둔다.
         if message.channel.id in self.meeting_cog.meeting_transcripts:
             self.meeting_cog.meeting_transcripts[message.channel.id].append({
