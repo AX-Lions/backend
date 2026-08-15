@@ -112,6 +112,12 @@ def build_for_user(meeting, user, client=None):
                       used_answers=used, deferred_answers=deferred,
                       settings_version=version),
     )
+
+    # 회의가 끝난 뒤 무엇이 본인에게 전달됐는지 화면에 남깁니다. 이게 없으면
+    # "내가 없는 동안 무슨 일이 있었지" 의 마지막 칸이 비어 있습니다.
+    from . import flow
+    flow.briefing_delivered(meeting, principal=user)
+
     return briefing
 
 
