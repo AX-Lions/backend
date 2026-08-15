@@ -20,6 +20,15 @@ RequiresMountsFor=/home/zanviq/bordo
 After=network-online.target bordo-backend.service
 Wants=network-online.target
 
+# 재시작 상한은 [Service] 가 아니라 여기에 옵니다.
+#
+# [Service] 에 두면 systemd 가 "Unknown key ... ignoring" 만 남기고 **조용히
+# 무시합니다.** 유닛은 정상으로 보이는데 상한이 안 걸린 상태가 됩니다.
+# 토큰이 틀리면 봇이 즉시 죽고, 그대로 두면 무한 재시작으로 Discord 에
+# 로그인 시도를 퍼부어 토큰이 잠깁니다.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
 [Service]
 Type=simple
 User=zanviq
@@ -36,13 +45,9 @@ ExecStart=/home/zanviq/bordo/discord/.venv/bin/python -u main.py
 
 # 게이트웨이 연결이 끊기면 discord.py 가 스스로 재접속합니다. 여기서 잡는 건
 # 프로세스가 통째로 죽은 경우입니다.
-#
-# 토큰이 틀리면 즉시 죽습니다. 무한 재시작으로 Discord 에 로그인 시도를 퍼부으면
-# 토큰이 잠깁니다. 5분에 5회로 끊고 failed 로 남깁니다.
+# 상한은 위 [Unit] 의 StartLimit* 가 겁니다.
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 # 게이트웨이를 정상 종료할 시간. 여기서 끊으면 Discord 쪽에 세션이 남아
 # 다음 기동에서 RESUME 이 꼬입니다.
