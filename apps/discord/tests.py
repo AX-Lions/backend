@@ -8,8 +8,10 @@
 """
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
+
+from django.conf import settings
 
 from apps.accounts.models import User
 from apps.agent.models import AgentSettings
@@ -18,11 +20,16 @@ from apps.meetings.models import (Attendance, Meeting, MeetingParticipant,
                                   MeetingStatus, Utterance)
 from apps.orgs.models import Project, Team, TeamMember
 
-TOKEN = "dev-service-token"
+#: 테스트 전용 토큰. 설정에 기본값을 두지 않으므로 여기서 주입합니다 —
+#: 저장소에 실제로 쓰이는 값이 남지 않게 하기 위해서입니다.
+TOKEN = "test-only-token"
 GUILD = "guild-1"
 THREAD = "thread-1"
 
+_SETTINGS = {**settings.BORDO, "SERVICE_TOKEN": TOKEN}
 
+
+@override_settings(BORDO=_SETTINGS)
 class Base(TestCase):
 
     @classmethod
@@ -389,3 +396,110 @@ class DeputyAskTest(Base):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(spy.call_args.kwargs["principal"], self.me)
         self.assertEqual(spy.call_args.kwargs["asker"], self.mate)
+
+
+@override_settings(BORDO=_SETTINGS)
+class EmptyValueTest(Base):
+    """
+    리뷰(#38)에서 나온 것. 빈 값이 "못 찾음" 이 아니라 **아무 행이나** 잡았습니다.
+
+    미연동 사용자는 `discord_user_id=""`, 웹에서 만든 회의는
+    `discord_channel_id=""` 로 저장됩니다. 여기가 뚫리면 남의 대리인이 답하고
+    남의 회의가 종료됩니다.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # 계정을 연결하지 않은 사람들. 빈 문자열로 저장됩니다.
+        cls.unlinked = User.objects.create_user(email="u1@bordo.dev",
+                                                password="x" * 10, name="미연동1")
+        User.objects.create_user(email="u2@bordo.dev", password="x" * 10,
+                                 name="미연동2")
+        # 웹에서 만든 회의. discord_channel_id 가 비어 있습니다.
+        cls.web_meeting = Meeting.objects.create(
+            project=cls.project, project_name="Bordo", title="웹 회의",
+            scheduled_at=timezone.now(), created_by=cls.me,
+            status=MeetingStatus.ACTIVE)
+
+    def test_empty_discord_id_does_not_match_anyone(self):
+        """비워서 부르면 아무 미연동 사용자의 대리인이 답했습니다."""
+        for path in ("/delegate/on", "/delegate/off"):
+            self.assertEqual(self.post(path, {"discord_user_id": ""}).status_code,
+                             400, path)
+
+    def test_deputy_ask_rejects_empty_target(self):
+        r = self.post("/deputy/ask", {"target_discord_id": "", "question": "x"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_meeting_end_cannot_kill_a_web_meeting(self):
+        """빈 thread_id 로 다른 팀 회의가 강제 종료됐습니다."""
+        r = self.post("/meetings/end", {"thread_id": ""})
+        self.assertEqual(r.status_code, 400)
+        self.web_meeting.refresh_from_db()
+        self.assertEqual(self.web_meeting.status, MeetingStatus.ACTIVE)
+
+    def test_messages_cannot_leak_into_a_web_meeting(self):
+        """빈 thread_id 로 웹 회의 스레드에 발언이 새어 들어갔습니다."""
+        r = self.post("/discord/messages",
+                      {"thread_id": "", "content": "새어 들어간 발언",
+                       "author_discord_id": "dc-mate"})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(Utterance.objects.filter(meeting=self.web_meeting).count(), 0)
+
+    def test_meeting_start_skips_blank_participants(self):
+        """빈 id 를 그대로 조회해 미연동 사용자가 남의 회의에 등록됐습니다."""
+        self.post("/meetings/start", {
+            "guild_id": GUILD, "thread_id": "t-blank", "agenda": "x",
+            "participants": [{"discord_user_id": "", "status": "delegated"},
+                             {"discord_user_id": "dc-me", "status": "present"}],
+        })
+        m = Meeting.objects.get(discord_channel_id="t-blank")
+        self.assertEqual(list(m.participants.values_list("user_id", flat=True)),
+                         [self.me.id])
+
+    def test_teams_link_rejects_empty(self):
+        self.assertEqual(
+            self.post("/teams/link", {"guild_id": "g", "discord_user_id": ""}
+                      ).status_code, 400)
+
+
+@override_settings(BORDO=_SETTINGS)
+class PresenceStatusTest(Base):
+    """`idle`·`dnd` 는 자리에 있는 상태입니다."""
+
+    def setUp(self):
+        self.post("/meetings/start", {"guild_id": GUILD, "thread_id": THREAD,
+                                      "agenda": "x"})
+        MeetingParticipant.objects.create(meeting=Meeting.objects.get(), user=self.me,
+                                          user_name="서재민")
+
+    def _status(self, s):
+        self.post("/discord/presence", {"discord_user_id": "dc-me", "status": s})
+        return MeetingParticipant.objects.get(user=self.me).attendance
+
+    def test_present_states(self):
+        for s in ("online", "idle", "dnd"):
+            self.assertEqual(self._status(s), Attendance.PRESENT, s)
+
+    def test_absent_states(self):
+        for s in ("offline", "invisible"):
+            self.assertEqual(self._status(s), Attendance.ABSENT, s)
+
+
+class TokenDefaultTest(TestCase):
+    """
+    설정에 기본값이 살아 있으면, 배포에서 환경변수를 빠뜨렸을 때 저장소를 볼 수
+    있는 사람은 누구나 봇 전용 API 를 부를 수 있습니다.
+    """
+
+    @override_settings(BORDO={**settings.BORDO, "SERVICE_TOKEN": ""})
+    def test_empty_token_closes_everything(self):
+        r = self.client.post("/internal/v1/delegate/on", {}, content_type="application/json",
+                             HTTP_X_SERVICE_TOKEN="아무거나")
+        self.assertEqual(r.status_code, 401)
+
+    def test_no_hardcoded_default_in_settings(self):
+        import os
+        self.assertEqual(settings.BORDO["SERVICE_TOKEN"],
+                         os.environ.get("BORDO_SERVICE_TOKEN", ""))
