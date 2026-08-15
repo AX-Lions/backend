@@ -20,6 +20,9 @@
     AGENT   대리인. **서비스와 Discord 를 하나로 봅니다** — 출처는 surface 로 남깁니다
     SERVER  서버에 저장된 것(계획·태스크). "어디로 갔는가" 를 보여주기 위한 자리입니다
 
+노드 모양은 `seed_demo.py` 와 **글자 하나까지 같아야 합니다.** 프론트가 `id` 로
+노드를 합치기 때문에, 표기가 갈리면 같은 사람의 대리인이 화면에 두 개로 그려집니다.
+
 ## 기록이 실패해도 본 작업은 계속합니다
 
 화살표 하나를 못 그렸다고 대리인의 답변이 취소되면 안 됩니다. 화면이 덜 그려질 뿐입니다.
@@ -40,8 +43,9 @@ _LABEL_MAX = 60
 
 
 def user_node(user) -> dict:
-    return {"id": f"user:{user.id}", "kind": "USER",
-            "user_id": str(user.id), "name": user.name}
+    return {"id": str(user.id), "kind": "USER",
+            "user_id": str(user.id), "name": user.name,
+            "avatar_url": user.avatar_url or None}
 
 
 def agent_node(owner) -> dict:
@@ -51,13 +55,19 @@ def agent_node(owner) -> dict:
     서비스 대리인과 Discord 대리인을 **같은 노드**로 둡니다. 2차 회의에서
     "Flow 상에서 하나의 AI 대리인으로 통합 표현" 으로 정했습니다. 나눠 그리면
     사용자는 자기 대리인이 둘인 줄 압니다.
+
+    `id` 표기와 호칭은 `seed_demo.py` 를 그대로 따릅니다.
+    호칭이 `AI` 가 아니라 **`{이름}의 Bordo`** 인 이유는 `CLAUDE.md` 에 적혀
+    있습니다 — `AI 대리인` 은 화면 어디에도 없는 낱말입니다.
     """
-    return {"id": f"agent:{owner.id}", "kind": "AGENT",
-            "user_id": str(owner.id), "name": f"{owner.name}의 AI"}
+    return {"id": f"{owner.id}:agent", "kind": "AGENT",
+            "user_id": str(owner.id), "name": f"{owner.name}의 Bordo",
+            "avatar_url": owner.avatar_url or None}
 
 
 def server_node() -> dict:
-    return {"id": "server", "kind": "SERVER", "user_id": None, "name": "서버"}
+    return {"id": "server", "kind": "SERVER", "user_id": None, "name": "서버",
+            "avatar_url": None}
 
 
 def record(meeting, *, from_node: dict, to_nodes: list[dict], label: str,
@@ -131,7 +141,7 @@ def delegate_prompt_given(meeting, user, prompt: str):
         return None
     already = FlowEdge.objects.filter(
         meeting=meeting, label="사전 지시",
-        from_node__id=f"user:{user.id}").exists()
+        from_node__id=str(user.id)).exists()
     if already:
         return None
     return record(meeting,
