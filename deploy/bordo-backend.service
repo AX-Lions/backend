@@ -8,7 +8,7 @@
 # ExecStart)과 RequiresMountsFor 를 바꾸십시오.
 
 [Unit]
-Description=Bordo 백엔드 (gunicorn)
+Description=Bordo 백엔드 (gunicorn + uvicorn worker)
 Documentation=https://github.com/AX-Lions/backend
 
 # 코드와 DB 가 별도 볼륨에 있습니다. 마운트 전에 뜨면 빈 디렉터리를 보고
@@ -29,7 +29,7 @@ EnvironmentFile=/home/zanviq/bordo/backend/.env
 
 ExecStart=/home/zanviq/bordo/backend/.venv/bin/gunicorn \
     --config /home/zanviq/bordo/backend/deploy/gunicorn.conf.py \
-    config.wsgi:application
+    config.asgi:application
 
 ExecReload=/bin/kill -s HUP $MAINPID
 

@@ -45,7 +45,7 @@ else
 fi
 
 # ── 2. DB ────────────────────────────────────────────────────
-log "데이터베이스"
+log "데이터 계층 (PostgreSQL · Redis)"
 docker compose -f deploy/docker-compose.db.yml --env-file .env up -d
 
 # 마이그레이션을 DB 준비 전에 돌리면 실패합니다. healthcheck 를 기다립니다.
@@ -54,7 +54,16 @@ for i in $(seq 1 30); do
   [ "$i" = "30" ] && { echo "중단: DB 가 90초 안에 준비되지 않았습니다."; exit 1; }
   sleep 3
 done
-echo "  healthy"
+echo "  PostgreSQL healthy"
+
+# Redis 가 없으면 실시간이 인메모리로 떨어집니다. 오류는 안 나고 이벤트만
+# 사람마다 다르게 보이므로, 여기서 확인해 두지 않으면 나중에 못 찾습니다.
+for i in $(seq 1 20); do
+  [ "$(docker inspect -f '{{.State.Health.Status}}' bordo-redis 2>/dev/null || echo none)" = "healthy" ] && break
+  [ "$i" = "20" ] && { echo "중단: Redis 가 준비되지 않았습니다."; exit 1; }
+  sleep 3
+done
+echo "  Redis healthy"
 
 # ── 3. 마이그레이션 ──────────────────────────────────────────
 log "마이그레이션"
@@ -73,7 +82,19 @@ log "설정 점검"
 # ── 6. 재시작 ────────────────────────────────────────────────
 log "서비스 재시작"
 if systemctl is-enabled --quiet bordo-backend 2>/dev/null; then
-  sudo systemctl reload-or-restart bordo-backend
+  # reload 가 아니라 restart 입니다.
+  #
+  # reload-or-restart 는 유닛 파일이 바뀌어도 **ExecStart 를 다시 읽지 않습니다.**
+  # gunicorn 에 HUP 을 보낼 뿐이라 마스터는 옛 인자로 계속 돕니다. 실제로
+  # WSGI → ASGI 로 바꿨는데 WSGI 가 그대로 돌아 500 이 났습니다.
+  #
+  # 어차피 워커가 교체되면 WebSocket 은 끊깁니다. reload 로 얻는 것이 없습니다.
+  sudo systemctl restart bordo-backend
+  # 워커도 함께 갈아야 합니다. 웹만 재시작하면 옛 코드의 대리인이 계속 돕니다.
+  if systemctl is-enabled --quiet bordo-worker 2>/dev/null; then
+    sudo systemctl restart bordo-worker
+    echo "  워커 재시작"
+  fi
   sleep 3
   systemctl is-active --quiet bordo-backend \
     && echo "  실행 중" \
@@ -81,7 +102,9 @@ if systemctl is-enabled --quiet bordo-backend 2>/dev/null; then
 else
   echo "  유닛이 아직 등록되지 않았습니다. 아래를 한 번 실행하십시오."
   echo "    sudo cp $ROOT/deploy/bordo-backend.service /etc/systemd/system/"
-  echo "    sudo systemctl daemon-reload && sudo systemctl enable --now bordo-backend"
+  echo "    sudo cp $ROOT/deploy/bordo-worker.service /etc/systemd/system/"
+  echo "    sudo systemctl daemon-reload"
+  echo "    sudo systemctl enable --now bordo-backend bordo-worker"
   exit 0
 fi
 

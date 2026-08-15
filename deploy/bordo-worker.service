@@ -1,0 +1,62 @@
+# Bordo 대리인 워커 (Celery)
+#
+#   sudo cp deploy/bordo-worker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now bordo-worker
+#
+# ## 왜 별도 프로세스인가
+#
+# 대리인 한 번이 LLM 을 여러 번 부릅니다. 이걸 요청 스레드에서 돌리면 봇의
+# HTTP 요청이 수십 초 동안 열려 있고, 그 사이 다른 발언은 처리되지 않습니다.
+#
+# 웹 프로세스와 나누면 **회의가 밀려도 API 는 그대로 응답합니다.**
+
+[Unit]
+Description=Bordo 대리인 워커 (Celery)
+Documentation=https://github.com/AX-Lions/backend
+
+RequiresMountsFor=/home/zanviq/bordo
+After=network-online.target docker.service bordo-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zanviq
+Group=zanviq
+WorkingDirectory=/home/zanviq/bordo/backend
+EnvironmentFile=/home/zanviq/bordo/backend/.env
+
+# --concurrency 2 — 대리인은 대부분 LLM 응답을 기다립니다. CPU 를 쓰지 않으므로
+#   코어 수를 따라갈 이유가 없고, 늘리면 API 호출 한도에 먼저 부딪힙니다.
+# --max-tasks-per-child — 누수가 쌓이는 것을 막습니다. 워커 프로세스라
+#   재활용해도 끊길 연결이 없습니다(WebSocket 은 웹 프로세스 쪽입니다).
+ExecStart=/home/zanviq/bordo/backend/.venv/bin/celery -A config worker \
+    --loglevel=info \
+    --concurrency=2 \
+    --max-tasks-per-child=50 \
+    --without-gossip --without-mingle
+
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# 진행 중인 작업을 끝낼 시간. 대리인 한 번이 LLM 왕복 여러 번이라 넉넉히 둡니다.
+TimeoutStopSec=120
+KillSignal=SIGTERM
+
+MemoryMax=1G
+TasksMax=128
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/home/zanviq/bordo
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bordo-worker
+
+[Install]
+WantedBy=multi-user.target
