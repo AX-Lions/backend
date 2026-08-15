@@ -57,9 +57,9 @@ Discord 이벤트를 Backend로 전달하고, Backend가 결정한 내용만 화
 ## 알려진 공백 (작업 대상)
 
 - Outbox consumer(Backend 큐 폴링 → 실행 → ACK/FAIL) 미구현
-- 회의 요약·TODO 생성 로직이 함수만 정의되고 `/meeting-end`에 연결되지 않음
+- 회의 요약·TODO는 `/meeting-end`에서 생성돼 Discord에는 게시되지만, `/internal/v1/meetings/end`
+  호출 payload에는 포함되지 않아 Backend에는 저장되지 않음
 - 모든 상태가 인메모리 — 재시작하면 진행 중 회의와 대화 기록이 사라짐
-- 일부 Backend 경로 오타: `/international/v1/...`, `//internal/v1/deputy/ask`
 - 테스트·린터·빌드 단계 없음
 
 ## 역할 경계
