@@ -26,7 +26,7 @@ from django.conf import settings as dj_settings
 from django.utils import timezone
 
 from ..models import AgentRun
-from . import judge, policy, prompts
+from . import deferral, judge, policy, prompts
 from .llm import LLMClient, LLMResponse
 from .llm import client as default_client
 from .skills import SkillContext, SkillKind
@@ -48,6 +48,8 @@ class RunOutcome:
     evidence: list[dict] = field(default_factory=list)
     constraints: list[str] = field(default_factory=list)
     error: str = ""
+    #: 유보로 끝났다면 생성된 유보 질문. 회의가 없는 실행에서는 None 입니다.
+    pending_question: object = None
 
     def __bool__(self) -> bool:
         return self.answered
@@ -78,7 +80,7 @@ Intent_OTHER = policy.Intent.OTHER
 
 
 def run(*, principal, question: str, meeting=None, project_id=None,
-        actor_id=None, delegate_prompt: str = "", allow_private: bool = False,
+        actor_id=None, asker=None, delegate_prompt: str = "", allow_private: bool = False,
         trace_id=None, hop_count: int = 0,
         client: LLMClient | None = None, registry=None) -> RunOutcome:
     """
@@ -130,7 +132,8 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             # 무엇보다 만들어 두면 새어 나갈 자리가 생깁니다.
             run_obj.steps = steps
             return _finish(run_obj, answered=False, reason=gate.reason,
-                           text=prompts.build_defer_message(gate.message, []))
+                           text=prompts.build_defer_message(gate.message, []),
+                           deferred=(question, gate.message, [], asker))
 
         # ── 3. 도구 반복 호출 ─────────────────────────────
         _set(run_obj, AgentRun.Status.SEARCHING)
@@ -201,14 +204,17 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             return _finish(run_obj, answered=False, reason=verdict.reason,
                            text=prompts.build_defer_message(verdict.message,
                                                             verdict.evidence),
-                           evidence=verdict.evidence)
+                           evidence=verdict.evidence,
+                           deferred=(question, verdict.message,
+                                     verdict.evidence, asker))
 
         # 근거는 충분한데 모델이 문장을 못 만든 경우. 억지로 채우지 않습니다.
         if not answer_text:
+            msg = judge.MESSAGES[judge.Reason.NO_EVIDENCE]
             return _finish(run_obj, answered=False, reason=judge.Reason.NO_EVIDENCE,
-                           text=prompts.build_defer_message(
-                               judge.MESSAGES[judge.Reason.NO_EVIDENCE], evidence),
-                           evidence=evidence)
+                           text=prompts.build_defer_message(msg, evidence),
+                           evidence=evidence,
+                           deferred=(question, msg, evidence, asker))
 
         _set(run_obj, AgentRun.Status.GENERATING)
         return _finish(run_obj, answered=True, text=answer_text,
@@ -243,7 +249,8 @@ def _set(run_obj: AgentRun, status: str):
 
 def _finish(run_obj: AgentRun, *, answered: bool, text: str = "", reason: str = "",
             evidence: list[dict] | None = None,
-            constraints: list[str] | None = None) -> RunOutcome:
+            constraints: list[str] | None = None,
+            deferred: tuple | None = None) -> RunOutcome:
     """
     정상 종료.
 
@@ -255,8 +262,19 @@ def _finish(run_obj: AgentRun, *, answered: bool, text: str = "", reason: str = 
     if evidence is not None:
         run_obj.evidence = evidence
     run_obj.save()
+
+    # 유보는 남겨야 사용자가 돌아왔을 때 볼 수 있습니다. 남기지 않으면 대리인이
+    # 침묵한 사실 자체가 사라집니다.
+    question_obj = None
+    if deferred is not None:
+        q, message, ev, asker = deferred
+        question_obj = deferral.record(run=run_obj, question=q,
+                                       reason_message=message, evidence=ev,
+                                       asker=asker)
+
     return RunOutcome(run=run_obj, answered=answered, text=text, reason=reason,
-                      evidence=evidence or [], constraints=constraints or [])
+                      evidence=evidence or [], constraints=constraints or [],
+                      pending_question=question_obj)
 
 
 def _fail(run_obj: AgentRun, error: str) -> RunOutcome:
