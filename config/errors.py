@@ -24,6 +24,9 @@ ERROR_CODES = {
     "TEAM_ALREADY_MEMBER":           (409, "이미 팀에 속해 있습니다.", False),
     "PROJECT_ACCESS_DENIED":         (403, "해당 프로젝트의 참여자가 아닙니다.", False),
     "PROJECT_NOT_FOUND":             (404, "프로젝트를 찾을 수 없습니다.", False),
+    # Discord 연동 — 봇이 discord_user_id·guild_id 로 물어보는데 이어진 것이 없을 때
+    "USER_NOT_FOUND":                (404, "연결된 계정을 찾을 수 없습니다.", False),
+    "TEAM_NOT_FOUND":                (404, "연결된 팀을 찾을 수 없습니다.", False),
     # 문서 / 상태
     "DOCUMENT_NOT_FOUND":            (404, "문서를 찾을 수 없습니다.", False),
     "DOCUMENT_ACCESS_DENIED":        (403, "문서에 접근할 수 없습니다.", False),
