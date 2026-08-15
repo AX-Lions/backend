@@ -1,0 +1,69 @@
+# Bordo Discord 봇 상시 실행 유닛
+#
+#   sudo cp deploy/bordo-discord.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now bordo-discord
+#
+# 경로가 /home/zanviq/bordo/discord 가 아니면 WorkingDirectory·EnvironmentFile·
+# ExecStart·RequiresMountsFor 를 함께 바꾸십시오.
+
+[Unit]
+Description=Bordo Discord 봇
+Documentation=https://github.com/AX-Lions/discord
+
+# 코드가 별도 볼륨에 있습니다. 마운트 전에 뜨면 빈 디렉터리를 보고 죽습니다.
+RequiresMountsFor=/home/zanviq/bordo
+
+# 봇은 뜨자마자 /internal/v1/discord/presence 를 부릅니다. 백엔드가 아직
+# 안 떠 있으면 그 호출만 실패하고 봇은 계속 돕니다(BackendClient 가 재시도 후
+# None 반환). 그래도 순서를 맞춰 두면 재시작 직후 로그가 깨끗합니다.
+After=network-online.target bordo-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zanviq
+Group=zanviq
+WorkingDirectory=/home/zanviq/bordo/discord
+EnvironmentFile=/home/zanviq/bordo/discord/.env
+
+# -u 로 버퍼링을 끕니다.
+#
+# 봇은 log.info 를 discord.log 파일에 쓰고 print 와 트레이스백만 stdout 으로
+# 냅니다. 버퍼링을 켜 두면 그 stdout 마저 프로세스가 죽을 때까지 안 나와서,
+# 정작 죽은 이유를 journalctl 에서 못 봅니다.
+ExecStart=/home/zanviq/bordo/discord/.venv/bin/python -u main.py
+
+# 게이트웨이 연결이 끊기면 discord.py 가 스스로 재접속합니다. 여기서 잡는 건
+# 프로세스가 통째로 죽은 경우입니다.
+#
+# 토큰이 틀리면 즉시 죽습니다. 무한 재시작으로 Discord 에 로그인 시도를 퍼부으면
+# 토큰이 잠깁니다. 5분에 5회로 끊고 failed 로 남깁니다.
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# 게이트웨이를 정상 종료할 시간. 여기서 끊으면 Discord 쪽에 세션이 남아
+# 다음 기동에서 RESUME 이 꼬입니다.
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# 같은 서버에 다른 프로젝트가 돌고 있습니다. 봇이 폭주해도 나머지가 함께
+# 죽지 않도록 상한을 둡니다. 봇은 상태를 거의 안 들고 있어 512M 로 충분합니다.
+MemoryMax=512M
+TasksMax=128
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+# 프로젝트가 홈 아래에 있어 read-only 로 두면 discord.log 쓰기가 막힙니다.
+ProtectHome=false
+ReadWritePaths=/home/zanviq/bordo
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bordo-discord
+
+[Install]
+WantedBy=multi-user.target
