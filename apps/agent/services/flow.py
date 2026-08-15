@@ -110,15 +110,17 @@ def record(meeting, *, from_node: dict, to_nodes: list[dict], label: str,
             agenda=agenda,
             occurred_at=occurred_at or timezone.now(),
         )
+        # 진행 중인 회의에서는 아직 의미가 없습니다. `compute_opacity()` 의
+        # `newest` 가 `now` 라 방금 만든 엣지는 언제나 비율 1.0 이 나옵니다.
+        # 실제 값은 회의가 끝날 때 `recompute_for_meeting()` 이 다시 채웁니다.
         edge.opacity = edge.compute_opacity()
 
         # 저장을 세이브포인트로 감쌉니다.
         #
         # 이 함수는 트랜잭션 안에서도 불립니다(briefing.build_for_user 는
         # @transaction.atomic). 거기서 DB 오류가 나면 **예외를 잡아도 트랜잭션은
-        # 이미 오염됩니다** — PostgreSQL 이 트랜잭션을 abort 상태로 만들어 이후
-        # 쿼리를 전부 거부합니다. 잡아서 넘어간다는 이 함수의 약속이 그대로
-        # 깨지고, 브리핑이 통째로 날아갑니다.
+        # 이미 오염됩니다** — 이후 쿼리가 전부 TransactionManagementError 로
+        # 터집니다. 잡아서 넘어간다는 이 함수의 약속이 그대로 깨집니다.
         with transaction.atomic():
             edge.save()
         return edge
@@ -126,6 +128,35 @@ def record(meeting, *, from_node: dict, to_nodes: list[dict], label: str,
         # 화살표 하나를 못 그렸다고 대리인의 답변이 취소되면 안 됩니다.
         logger.exception("플로우 엣지 기록 실패 meeting=%s", getattr(meeting, "id", None))
         return None
+
+
+def recompute_for_meeting(meeting) -> int:
+    """
+    회의가 끝났을 때 진하기를 다시 계산합니다.
+
+    **이게 없으면 그라데이션이 사실상 동작하지 않습니다.**
+
+    엣지를 만드는 시점에는 회의가 진행 중이라 `ended_at` 이 없고,
+    `compute_opacity()` 는 `newest` 를 `now` 로 잡습니다. 방금 찍은
+    `occurred_at` 과 같은 순간이라 비율이 언제나 1.0 입니다. 회의 중 화살표가
+    거의 전부이므로, 다시 계산하지 않으면 화면이 통째로 균일합니다.
+
+    회의가 끝나면 구간이 고정되므로 이때 한 번만 계산하면 됩니다 — 이후로는
+    언제 열어도 같은 그림입니다. 조회 시각으로 계산하면 내일 열었을 때
+    그림이 달라집니다.
+    """
+    edges = list(FlowEdge.objects.filter(meeting=meeting))
+    if not edges:
+        return 0
+
+    # 구간을 한 번만 구해 넘깁니다. 엣지마다 회의를 다시 읽으면 N+1 입니다.
+    newest = meeting.ended_at or timezone.now()
+    oldest = meeting.started_at or meeting.scheduled_at
+
+    for e in edges:
+        e.opacity = e.compute_opacity(oldest=oldest, newest=newest)
+    FlowEdge.objects.bulk_update(edges, ["opacity"])
+    return len(edges)
 
 
 # ═══════════════════════════════════════════ 상황별 기록
