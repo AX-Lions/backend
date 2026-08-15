@@ -100,11 +100,15 @@ class OutboxTest(TestCase):
 
     # ── 봇의 폴링 쿼리 ─────────────────────────────────────
     def test_polling_query_skips_future_and_done(self):
-        now = timezone.now()
         ready = self._event(key="ready")
-        self._event(key="later", available_at=now + timezone.timedelta(minutes=5))
+        self._event(key="later",
+                    available_at=timezone.now() + timezone.timedelta(minutes=5))
         sent = self._event(key="sent")
         sent.mark_sent()
+
+        # 기준 시각은 행을 만든 **뒤에** 잡습니다. 먼저 잡으면 available_at 기본값이
+        # 그보다 뒤가 되어, 방금 넣은 행이 아직 안 온 것으로 걸러집니다.
+        now = timezone.now()
 
         rows = OutboxEvent.objects.filter(
             status=OutboxEvent.Status.PENDING, available_at__lte=now
