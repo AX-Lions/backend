@@ -172,17 +172,6 @@ CORS_ALLOW_HEADERS = list(__import__("corsheaders.defaults", fromlist=["default_
     "idempotency-key", "x-service-token",
 ]
 
-# ─────────────────────────────────────────── Celery
-# 개발에서는 브로커 없이 그 자리에서 실행합니다. 운영에서 켜 두면 요청 스레드가
-# LLM 호출을 통째로 기다려 응답이 수십 초씩 걸립니다.
-CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "1") == "1"
-CELERY_TASK_EAGER_PROPAGATES = False
-CELERY_BROKER_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
-CELERY_RESULT_BACKEND = None          # 결과를 쓰지 않습니다. 대리인은 AgentRun 에 남깁니다.
-CELERY_TASK_TIME_LIMIT = 300          # ReAct 루프가 무한히 도는 것을 막습니다
-CELERY_TASK_SOFT_TIME_LIMIT = 240
-CELERY_WORKER_MAX_TASKS_PER_CHILD = 100
-
 # ─────────────────────────────────────────── Bordo 고유 설정
 BORDO = {
     "SOFT_DELETE_GRACE_DAYS": 30,       # 소프트 삭제 복구 유예
