@@ -266,6 +266,8 @@ class AiBriefing(TimeStamped):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                              related_name="briefings")
     narrative = models.TextField(blank=True, default="")
+    #: 요약 아래 `정보 위치 칩`. 눌러도 상태가 남지 않아 스냅샷으로 충분합니다.
+    location_chips = models.JSONField(default=list, blank=True)
     used_answers = models.JSONField(default=list, blank=True)
     deferred_answers = models.JSONField(default=list, blank=True)
     settings_version = models.PositiveIntegerField(default=1)
@@ -277,6 +279,95 @@ class AiBriefing(TimeStamped):
             models.UniqueConstraint(fields=["meeting", "user"], name="uq_ai_briefing"),
         ]
         indexes = [models.Index(fields=["user", "read_at"])]
+
+
+class BriefingCard(TimeStamped):
+    """
+    브리핑 카드의 공통 뼈대.
+
+    ## 왜 JSON 이 아니라 테이블인가
+
+    `AiBriefing` 은 `update_or_create` 로 **통째로 덮어씁니다.** 회의가 다시 종료
+    처리되는 경우가 실제로 있어서인데(봇 재시도·중복 호출), 카드를 그 JSON 안에 두면
+    **사용자가 이미 눌러 둔 확인 표시가 재생성 때마다 리셋됩니다.** 확인해서 없앤
+    카드가 되살아납니다.
+
+    행으로 두면 `source_key` 로 upsert 하면서 사람이 남긴 흔적만 보존할 수 있습니다.
+
+    ## 왜 사람마다 행을 복제하는가
+
+    같은 변경을 세 사람이 봐야 하면 세 행이 생깁니다. 정규화하면 한 행으로 줄지만,
+    브리핑은 **그 시점의 스냅샷**입니다. 원문이 나중에 고쳐졌다고 내가 어제 받은
+    브리핑 문구까지 같이 바뀌면 "내가 그때 뭘 보고 확인했는지"가 사라집니다.
+    복제는 비용이 아니라 여기서는 성질입니다.
+    """
+    meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE,
+                                related_name="%(class)ss")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                             related_name="%(class)ss")
+    #: 재생성 때 같은 카드를 알아보는 열쇠. `edge:<id>` 처럼 출처를 그대로 씁니다.
+    #: 화살표에서 온 카드도 안건에서 온 카드도 같은 방식으로 다루려고 문자열입니다.
+    source_key = models.CharField(max_length=80)
+    title = models.CharField(max_length=200)
+    edge = models.ForeignKey("meetings.FlowEdge", on_delete=models.SET_NULL,
+                             null=True, blank=True)
+    occurred_at = models.DateTimeField()
+
+    class Meta:
+        abstract = True
+
+
+class BriefingConfirmation(UUIDModel, BriefingCard):
+    """
+    브리핑 `확인이 필요해요` 카드.
+
+    **`used_answers` / `deferred_answers` 와 다릅니다.** 그 둘은 *내 대리인이 무엇을
+    답했나* 이고, 이것은 *내가 없는 사이 무엇이 바뀌었나* 입니다. 자리를 비운 사람이
+    돌아와서 가장 먼저 봐야 하는 것이라 섹션을 따로 뺐습니다.
+
+    확인은 **사람마다**입니다. 한 사람이 눌렀다고 다른 사람 목록에서 사라지면,
+    아직 못 본 사람이 변경을 영영 모르고 지나갑니다.
+    """
+    body = models.TextField(blank=True, default="")
+    agenda = models.ForeignKey(Agenda, on_delete=models.SET_NULL, null=True, blank=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "briefing_confirmation"
+        ordering = ["occurred_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["meeting", "user", "source_key"],
+                                    name="uq_briefing_confirmation"),
+        ]
+        indexes = [models.Index(fields=["user", "confirmed_at"])]
+
+
+class BriefingRequest(UUIDModel, BriefingCard):
+    """
+    브리핑 `나에게 요청한 내용` 카드.
+
+    태스크와 닮았지만 **아직 태스크가 아닙니다.** 회의에서 나에게 넘어온 요청을
+    그대로 보여주는 자리이고, 사람이 받아들이면 그때 `task` 가 붙습니다.
+
+    곧바로 `PENDING_APPROVAL` 태스크로 찍지 않는 이유 — 승인 큐가 남의 회의 요청으로
+    가득 차면 승인이라는 행위 자체가 뜻을 잃습니다. 받아들일지는 사람이 정합니다.
+    """
+    requester_name = models.CharField(max_length=100)
+    #: 기한이 없을 때 대신 붙는 문구. 예: `다음 회의 전까지 확인이 필요해요.`
+    note = models.CharField(max_length=200, blank=True, default="")
+    due_at = models.DateTimeField(null=True, blank=True)
+    task = models.ForeignKey("tasks.Task", on_delete=models.SET_NULL,
+                             null=True, blank=True, related_name="briefing_requests")
+    accepted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "briefing_request"
+        ordering = ["occurred_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["meeting", "user", "source_key"],
+                                    name="uq_briefing_request"),
+        ]
+        indexes = [models.Index(fields=["user", "accepted_at"])]
 
 
 class FlowFilterPreset(UUIDModel, TimeStamped):

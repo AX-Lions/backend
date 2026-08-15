@@ -94,8 +94,12 @@ class BriefingTest(Base):
         self.assertEqual(b.narrative, "")
         self.assertEqual(len(b.used_answers), 1)
 
-    def test_no_runs_means_no_briefing(self):
-        """대리인이 아무 일도 안 했으면 빈 브리핑을 만들지 않습니다."""
+    def test_nothing_at_all_means_no_briefing(self):
+        """
+        정말 아무것도 없으면 만들지 않습니다.
+
+        빈 사이드바가 뜨면 사용자는 브리핑 생성이 실패한 줄 압니다.
+        """
         self.assertIsNone(briefing.build_for_user(self.meeting, self.me, FakeLLM()))
 
     def test_rebuild_overwrites(self):

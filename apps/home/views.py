@@ -12,6 +12,7 @@ from django.utils import timezone
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
+from apps.common.display import full_stamp, short_stamp, time_range, user_tz
 from apps.meetings.models import (AiBriefing, Attendance, Meeting, MeetingParticipant,
                                   MeetingStatus, MeetingSummary)
 from apps.orgs.models import Favorite, Project, ProjectMember, RecentProject, TeamMember
@@ -57,6 +58,10 @@ def _shortcuts(user):
 def home(request):
     user = request.user
     now = timezone.now()
+    # 표시용 문자열은 서버가 만듭니다. 팀원이 서로 다른 지역에 있는 것이 이
+    # 서비스의 전제라, 브라우저 시간대로 찍으면 같은 회의를 사람마다 다른
+    # 시각으로 보게 됩니다.
+    tz = user_tz(user)
     project_ids = _my_project_ids(user)
 
     # ── 브리핑 대기 여부
@@ -92,6 +97,7 @@ def home(request):
         # 디자인의 `불참한 회의` 뱃지
         "missed": my_attendance.get(m.id) in (Attendance.ABSENT, Attendance.DELEGATED),
         "scheduled_at": m.scheduled_at,
+        "displayed_at": full_stamp(m.scheduled_at, tz),
     } for m in meetings]
 
     # ── 오늘 일정 — 회의가 Discord 에서 열리므로 채널 정보를 같이 내려줍니다
@@ -104,9 +110,15 @@ def home(request):
     today_schedule = [{
         "at": m.scheduled_at,
         "ends_at": m.scheduled_at + timezone.timedelta(minutes=m.duration_min),
+        "time_range": time_range(m.scheduled_at,
+                                 m.scheduled_at + timezone.timedelta(minutes=m.duration_min),
+                                 tz),
         "project_id": str(m.project_id),
         "project_name": m.project_name,
         "title": m.title,
+        # 행에 `{project_name} · {location}` 으로 붙습니다. 채널 id 로 클라이언트가
+        # 판단하게 두면 연결이 끊긴 회의에도 `Discord` 가 뜹니다.
+        "location": "Discord" if m.discord_channel_id else "서비스",
         "meeting_id": str(m.id),
         "discord_channel_id": m.discord_channel_id or None,
         # 행마다 붙는 버튼. 회의가 Discord 에서 열리므로 뜻이 일정마다 달라
@@ -137,11 +149,20 @@ def home(request):
             "project_name": last_ended.project_name,
             "title": last_ended.title,
             "occurred_at": last_ended.ended_at,
+            # 최근 회의 카드와 이름은 같지만 **형태가 다릅니다** — 이쪽은 폭이
+            # 좁아 연도를 뺍니다. 상수 하나로 합치면 한쪽이 잘립니다.
+            "displayed_at": short_stamp(last_ended.ended_at, tz),
             # 이 카드가 있는 이유 자체가 "자리를 비운 사이 무슨 일이 있었나" 라,
             # 내가 그 자리에 있었는지가 카드의 성격을 바꿉니다.
             "missed": att in (Attendance.ABSENT, Attendance.DELEGATED),
+            # 뱃지에 그대로 찍히는 문구입니다. 불리언만 주면 클라이언트마다
+            # 다른 낱말을 쓰게 되고, 화면 라벨을 바꿀 때 배포가 두 번 필요합니다.
+            "status": "불참한 회의" if att in (Attendance.ABSENT,
+                                          Attendance.DELEGATED) else "참석한 회의",
             "main_decisions": (s.changes if s else []) + (s.next_plans if s else []),
-            "agent_summary": s.one_line if s else "",
+            # 화면 라벨이 `Zero 요약` 입니다. 대리인이 화자일 때의 호칭이 `Zero` 라
+            # 응답 필드도 그 이름을 씁니다.
+            "zero_summary": s.one_line if s else "",
         }
 
     # ── 사이드바
