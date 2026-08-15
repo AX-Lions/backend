@@ -16,6 +16,7 @@ from django.urls import path
 from apps.accounts import views as accounts
 from apps.agent import views as agent
 from apps.calendars import views as calendars
+from apps.discord import views as discord_internal
 from apps.chat import views as chat
 from apps.documents import views as documents
 from apps.home import views as home
@@ -25,6 +26,7 @@ from apps.states import views as states
 from apps.tasks import views as tasks
 
 API = "api/v1"
+INTERNAL = "internal/v1"
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -155,4 +157,24 @@ urlpatterns = [
     path(f"{API}/chat/messages/<uuid:message_id>/important/confirm",
          chat.message_important_confirm),
     path(f"{API}/chat/attachments/<uuid:attachment_id>", chat.attachment_detail),
+
+    # ── /internal/v1 — Discord Bot 전용 (Service Token)
+    #
+    # 사람이 아니라 봇이 부릅니다. JWT 를 타지 않으므로 /api/v1 구역과 섞지 않습니다.
+    # 이 구역은 파일 끝에 몰아 둡니다 — 다른 담당이 위쪽 구역을 고칠 때 부딪히지
+    # 않게 하기 위해서입니다.
+    path(f"{INTERNAL}/discord/connect/code", discord_internal.connect_code),
+    path(f"{INTERNAL}/teams/current", discord_internal.teams_current),
+    path(f"{INTERNAL}/teams/link", discord_internal.teams_link),
+    path(f"{INTERNAL}/delegate/on", discord_internal.delegate_on),
+    path(f"{INTERNAL}/delegate/off", discord_internal.delegate_off),
+    path(f"{INTERNAL}/deputy/ask", discord_internal.deputy_ask),
+    path(f"{INTERNAL}/meetings/start", discord_internal.meeting_start),
+    path(f"{INTERNAL}/meetings/end", discord_internal.meeting_end),
+    path(f"{INTERNAL}/discord/messages", discord_internal.discord_messages),
+    path(f"{INTERNAL}/discord/presence", discord_internal.discord_presence),
+
+    # 봇이 아직 쓰는 옛 경로. 명세는 /meetings/start 입니다.
+    # 봇이 옮겨 오면 지웁니다 — 지금 지우면 회의 시작이 통째로 막힙니다.
+    path(f"{INTERNAL}/meetings", discord_internal.meeting_start),
 ]

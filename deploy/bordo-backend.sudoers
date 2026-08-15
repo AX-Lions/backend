@@ -15,3 +15,10 @@ zanviq ALL=(root) NOPASSWD: /usr/bin/systemctl restart bordo-backend
 zanviq ALL=(root) NOPASSWD: /usr/bin/systemctl stop bordo-backend
 zanviq ALL=(root) NOPASSWD: /usr/bin/systemctl start bordo-backend
 zanviq ALL=(root) NOPASSWD: /usr/bin/systemctl status bordo-backend
+
+# 워커도 배포 때 함께 재시작합니다. 코드가 바뀌면 웹만 갈아서는 옛 대리인이 계속 돕니다.
+zanviq ALL=(root) NOPASSWD: /usr/bin/systemctl reload-or-restart bordo-worker
+zanviq ALL=(root) NOPASSWD: /usr/bin/systemctl restart bordo-worker
+zanviq ALL=(root) NOPASSWD: /usr/bin/systemctl stop bordo-worker
+zanviq ALL=(root) NOPASSWD: /usr/bin/systemctl start bordo-worker
+zanviq ALL=(root) NOPASSWD: /usr/bin/systemctl status bordo-worker
