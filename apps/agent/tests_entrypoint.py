@@ -28,6 +28,23 @@ class FakeLLM:
         return self._q.pop(0) if self._q else LLMResponse(text="끝")
 
 
+class Picker:
+    """
+    대상 판정 전용 가짜 LLM.
+
+    ReAct 쪽 큐와 섞으면 테스트가 읽히지 않습니다 — 앞에 `"1"` 을 한 칸씩 끼워 넣어야
+    하고, 그 한 칸이 무엇인지는 코드를 따라가야 알 수 있습니다. 판정은 따로 둡니다.
+    """
+
+    def __init__(self, choice: str = "1"):
+        self.choice = choice
+        self.calls = 0
+
+    def chat(self, messages, tools=None, system=""):
+        self.calls += 1
+        return LLMResponse(text=self.choice)
+
+
 class Base(TestCase):
 
     @classmethod
@@ -77,12 +94,27 @@ class TargetingTest(Base):
         rows = targeting.candidates(self._utterance())
         self.assertNotIn(self.speaker.id, [p.user_id for p in rows])
 
-    def test_single_candidate_skips_the_model(self):
-        """부를 이유가 없는 판단을 모델에게 맡기지 않습니다."""
-        llm = FakeLLM()
-        picked = targeting.pick(self._utterance(), client=llm)
+    def test_single_candidate_is_still_asked(self):
+        """
+        후보가 하나여도 물어봅니다.
+
+        후보를 좁히는 것과 '이게 질문이긴 한가' 는 다른 판단인데 이 호출이 둘을
+        겸합니다. 건너뛰면 질문 여부를 보는 자리가 사라집니다.
+        """
+        picker = Picker("1")
+        picked = targeting.pick(self._utterance(), client=picker)
         self.assertEqual(picked.user_id, self.absent.id)
-        self.assertEqual(len(llm._q), 0)
+        self.assertEqual(picker.calls, 1, "후보가 하나라고 판정을 건너뛰었습니다")
+
+    def test_single_candidate_non_question_wakes_nobody(self):
+        """
+        `아 넵 감사합니다` 에 대리인이 끼어들면 안 됩니다.
+
+        회의 발언 대부분은 질문이 아닙니다. 여기서 못 거르면 모든 발언마다
+        대리인이 깨어나 유보 문구를 회의에 뿌립니다.
+        """
+        self.assertIsNone(
+            targeting.pick(self._utterance("아 넵 감사합니다"), client=Picker("0")))
 
     def test_model_picks_among_many(self):
         MeetingParticipant.objects.filter(user=self.present).update(
@@ -111,12 +143,24 @@ class TargetingTest(Base):
 
 class EntrypointTest(Base):
 
-    def _run(self, llm, body="DB 스키마 어디까지 됐어요?"):
+    def _run(self, llm, body="DB 스키마 어디까지 됐어요?", picker=None):
         u = self._utterance(body)
         with patch("apps.agent.services.react.default_client", llm), \
-             patch("apps.agent.services.targeting.default_client", llm):
+             patch("apps.agent.services.targeting.default_client", picker or Picker()):
             run_agent_for_utterance(str(u.id))
         return u
+
+    def test_non_question_wakes_nobody(self):
+        """
+        대상 판정에서 걸러지면 AgentRun 자체가 생기지 않아야 합니다.
+
+        여기서 못 막으면 회의 내내 모든 발언마다 대리인이 깨어나 유보 문구를
+        뿌리고, 유보 질문 목록이 `ㅋㅋㅋ` 으로 가득 찹니다.
+        """
+        self._run(FakeLLM(), body="아 넵 감사합니다", picker=Picker("0"))
+        self.assertEqual(AgentRun.objects.count(), 0)
+        self.assertEqual(OutboxEvent.objects.count(), 0)
+        self.assertEqual(PendingQuestion.objects.count(), 0)
 
     def test_answer_goes_to_the_meeting(self):
         WorkItem.objects.create(project=self.project, owner=self.absent,
@@ -181,14 +225,16 @@ class EntrypointTest(Base):
 
     def test_exception_does_not_propagate(self):
         """여기서 터지면 다음 발언도 처리되지 않습니다."""
-        with patch("apps.agent.services.react.run", side_effect=RuntimeError("펑")):
+        with patch("apps.agent.services.targeting.default_client", Picker()), \
+             patch("apps.agent.services.react.run", side_effect=RuntimeError("펑")):
             u = self._utterance()
             run_agent_for_utterance(str(u.id))      # 예외가 밖으로 나오면 실패
 
     def test_speaks_once_per_run(self):
         u = self._utterance()
         llm = FakeLLM(LLMResponse(text="STATUS"), LLMResponse(text="x"))
-        with patch("apps.agent.services.react.default_client", llm):
+        with patch("apps.agent.services.react.default_client", llm), \
+             patch("apps.agent.services.targeting.default_client", Picker()):
             run_agent_for_utterance(str(u.id))
             run_agent_for_utterance(str(u.id))
         # 멱등은 **실행 단위**입니다. 두 번째 호출은 새 AgentRun 이라 발언도 새로
