@@ -4,9 +4,6 @@
 # Logs
 *.log
 
-# Excluded main file
-main3.py
-
 # Python
 __pycache__/
 *.pyc
