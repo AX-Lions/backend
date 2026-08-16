@@ -164,15 +164,24 @@ class MeetingCog(commands.Cog):
 
         error = get_error(result)
         if error:
-            # 이 엔드포인트에서 error는 사실상 MEETING_NOT_FOUND뿐이다 — thread_id는
-            # Discord 채널 id라 항상 값이 있어 검증 오류로는 안 걸린다. 즉 재시도해도
-            # 절대 성공하지 않는 영구적 오류라, active_meeting_threads를 되돌리면
-            # 이 회의는 영영 못 끝낸다. Backend가 없어도 봇은 계속 동작해야 한다는
-            # 원칙(CLAUDE.md)대로, Discord 쪽은 정리하고 동기화 실패만 알린다.
-            await interaction.channel.send("🔴 **회의가 종료되었습니다.**")
+            if error.get("code") == "MEETING_NOT_FOUND":
+                # thread_id는 Discord 채널 id라 항상 값이 있어 검증 오류로는 안 걸리고,
+                # 이 코드만큼은 재시도해도 절대 성공하지 않는 영구적 오류다. 되돌리면
+                # 이 회의는 영영 못 끝내므로, Backend가 없어도 봇은 계속 동작해야 한다는
+                # 원칙(CLAUDE.md)대로 Discord 쪽은 정리하고 동기화 실패만 알린다.
+                await interaction.channel.send("🔴 **회의가 종료되었습니다.**")
+                await interaction.followup.send(
+                    f"회의는 종료했지만 Backend와 동기화하지 못했습니다: "
+                    f"{error.get('message', '')}", ephemeral=True
+                )
+                return
+
+            # 그 외(예: 서비스 토큰 오류처럼 @internal 데코레이터가 뷰 실행 전에
+            # 먼저 던지는 4xx)는 원인만 고치면 재시도로 풀린다. None과 동일하게
+            # 되돌려서 다시 시도할 수 있게 한다.
+            self.active_meeting_threads[thread_id] = meeting
             await interaction.followup.send(
-                f"회의는 종료했지만 Backend와 동기화하지 못했습니다: "
-                f"{error.get('message', '')}", ephemeral=True
+                error.get("message", "회의 종료에 실패했습니다."), ephemeral=True
             )
             return
 
