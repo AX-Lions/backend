@@ -95,6 +95,9 @@ def record(meeting, *, from_node: dict, to_nodes: list[dict], label: str,
 
         edge = FlowEdge(
             meeting=meeting,
+            # 작업 플로우와 공통 스코프입니다. 회의 엣지도 채워 둬야
+            # 프로젝트 단위 조회에서 빠지지 않습니다.
+            project_id=meeting.project_id,
             category=category,
             content_type=content_type,
             surface=surface,
