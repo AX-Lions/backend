@@ -61,10 +61,14 @@ TasksMax=128
 
 NoNewPrivileges=true
 PrivateTmp=true
+# /usr · /boot · /etc 를 read-only 로 만듭니다. /home 은 여기 해당하지 않습니다.
 ProtectSystem=full
-# 프로젝트가 홈 아래에 있어 read-only 로 두면 discord.log 쓰기가 막힙니다.
+# 프로젝트가 홈 아래에 있어 true 로 두면 discord.log 쓰기가 막힙니다.
+#
+# ReadWritePaths 는 두지 않습니다 — ProtectHome=false 로 이미 /home 이 열려 있어
+# 실질적으로 아무 일도 하지 않으면서, 읽는 사람에게는 뭔가 좁혀 둔 것처럼 보입니다.
+# 안 하는 일을 하는 것처럼 적어 두면 다음에 진짜로 좁힐 때 판단을 그르칩니다.
 ProtectHome=false
-ReadWritePaths=/home/zanviq/bordo
 
 StandardOutput=journal
 StandardError=journal
