@@ -143,3 +143,99 @@ class ThroughLoopTest(Base):
         mine = PendingQuestion.objects.filter(target_user=self.me, answered_at=None)
         self.assertEqual(mine.count(), 1)
         self.assertEqual(mine.first().asker, self.asker)
+
+
+class AnswerRoomTest(Base):
+    """
+    답변 방 준비가 유보 기록을 막지 않아야 합니다.
+
+    `record()` 는 `@transaction.atomic` 이라, 방을 만들다 터지면 그 예외가
+    트랜잭션을 통째로 깨고 `PendingQuestion` 까지 사라집니다. 답변 창이 한 번 덜
+    열리는 것과 "그 질문이 있었다" 가 통째로 사라지는 것은 비교가 안 됩니다.
+    """
+
+    def test_room_is_prepared_up_front(self):
+        """
+        누른 뒤에 만들면 왕복이 한 번 더 생기고, 만들다 실패하면 사용자는
+        `답변하기가 안 눌린다` 만 보게 됩니다.
+        """
+        q = deferral.record(run=self._run_obj(), question="언제 끝나요?",
+                            reason_message="본인 확인이 필요합니다.", asker=self.asker)
+        self.assertIsNotNone(q.chat_room_id)
+
+    def test_both_sides_are_in_the_room(self):
+        """질문한 사람만 넣으면 정작 답할 사람의 목록에 방이 안 뜹니다."""
+        from apps.chat.models import RoomMember
+
+        q = deferral.record(run=self._run_obj(), question="언제 끝나요?",
+                            reason_message="본인 확인이 필요합니다.", asker=self.asker)
+        members = set(RoomMember.objects.filter(room_id=q.chat_room_id)
+                      .values_list("user_id", flat=True))
+        self.assertEqual(members, {self.me.id, self.asker.id})
+
+    def test_same_pair_reuses_the_room(self):
+        """유보할 때마다 방이 새로 생기면 대화가 조각납니다."""
+        first = deferral.record(run=self._run_obj(), question="언제 끝나요?",
+                                reason_message="확인이 필요합니다.", asker=self.asker)
+        second = deferral.record(run=self._run_obj(), question="다른 질문",
+                                 reason_message="확인이 필요합니다.", asker=self.asker)
+        self.assertEqual(first.chat_room_id, second.chat_room_id)
+
+    def test_room_collision_does_not_lose_the_question(self):
+        """
+        같은 두 사람 사이 유보 두 건이 동시에 처리되면 방 생성이 유니크 제약에
+        걸립니다. **그때 유보가 사라지면 안 됩니다.**
+
+        경합을 그대로 재현할 수 없어, 생성이 IntegrityError 를 내는 상황을 만들어
+        결과만 봅니다 — 다른 워커가 이미 만들어 둔 것과 같은 상황입니다.
+        """
+        from unittest.mock import patch
+
+        from django.db import IntegrityError
+
+        from apps.chat.models import ChatRoom, RoomType
+        from apps.chat.services import peer_agent_key
+
+        # 다른 워커가 먼저 만들어 둔 방.
+        key = peer_agent_key(self.asker.id, self.me.id)
+        winner = ChatRoom.objects.create(type=RoomType.PEER_AGENT, dedupe_key=key,
+                                         agent_owner=self.me, created_by=self.me)
+
+        real = ChatRoom.all_objects.filter
+        calls = {"n": 0}
+
+        def blind_first_lookup(*a, **kw):
+            # 첫 조회만 "없다" 로 속입니다 — 경합에서 진 쪽이 보는 화면입니다.
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ChatRoom.all_objects.none()
+            return real(*a, **kw)
+
+        with patch("apps.chat.models.ChatRoom.all_objects.filter",
+                   side_effect=blind_first_lookup), \
+             patch("apps.chat.models.ChatRoom.objects.create",
+                   side_effect=IntegrityError("uq_chat_room_dedupe")):
+            q = deferral.record(run=self._run_obj(), question="언제 끝나요?",
+                                reason_message="본인 확인이 필요합니다.",
+                                asker=self.asker)
+
+        self.assertIsNotNone(q, "충돌 때문에 유보가 통째로 사라졌습니다")
+        self.assertEqual(PendingQuestion.objects.count(), 1)
+        self.assertEqual(q.chat_room_id, winner.id, "먼저 만들어진 방을 되읽어야 합니다")
+
+    def test_question_survives_even_if_the_room_cannot_be_made(self):
+        """
+        방을 끝내 못 잡아도 유보는 남습니다. 화면은 방 없이 뜨고 사용자는
+        답변 창을 한 번 더 열면 됩니다.
+        """
+        from unittest.mock import patch
+
+        # 방 만들기 안쪽에서 터뜨립니다. `_answer_room_id` 자체를 모킹하면
+        # 정작 그 함수의 방어를 한 줄도 안 타서 테스트가 아무것도 안 봅니다.
+        with patch("apps.chat.models.RoomMember.objects.get_or_create",
+                   side_effect=RuntimeError("채팅 앱 장애")):
+            q = deferral.record(run=self._run_obj(), question="언제 끝나요?",
+                                reason_message="본인 확인이 필요합니다.",
+                                asker=self.asker)
+        self.assertIsNotNone(q, "채팅 쪽 장애로 유보가 사라졌습니다")
+        self.assertIsNone(q.chat_room_id)
