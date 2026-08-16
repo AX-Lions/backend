@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 
 from ..models import PendingQuestion
 
@@ -104,20 +104,46 @@ def _answer_room_id(owner, asker):
     질문한 사람이 있으면 그 사람과의 `PEER_AGENT` 방입니다 — 남이 내 대리인에게
     물은 것이라 대화의 상대가 정해져 있습니다. 질문자가 없으면(시스템 유보) 본인의
     AI 방으로 보냅니다.
+
+    **방을 못 잡아도 `None` 을 돌려주고 끝냅니다.** 유보 기록 자체는 남아야 합니다 —
+    답변 창이 한 번 덜 열리는 것과 "그 질문이 있었다"가 통째로 사라지는 것은
+    비교가 안 됩니다.
     """
     from apps.chat.models import ChatRoom, RoomMember, RoomType
     from apps.chat.services import ensure_ai_room, peer_agent_key
 
-    if asker is None or asker.id == owner.id:
-        return ensure_ai_room(owner).id
+    try:
+        if asker is None or asker.id == owner.id:
+            return ensure_ai_room(owner).id
 
-    key = peer_agent_key(asker.id, owner.id)
-    room = ChatRoom.all_objects.filter(type=RoomType.PEER_AGENT, dedupe_key=key).first()
-    if room is None:
-        room = ChatRoom.objects.create(type=RoomType.PEER_AGENT, dedupe_key=key,
-                                       agent_owner=owner, created_by=owner)
-    # 양쪽을 다 넣습니다. 질문한 사람만 넣으면 정작 답할 사람의 목록에 방이
-    # 안 뜹니다.
-    for u in (asker, owner):
-        RoomMember.objects.get_or_create(room=room, user=u)
-    return room.id
+        key = peer_agent_key(asker.id, owner.id)
+        room = (ChatRoom.all_objects
+                .filter(type=RoomType.PEER_AGENT, dedupe_key=key).first())
+        if room is None:
+            # 세이브포인트로 감싸고 충돌하면 되읽습니다.
+            #
+            # `(type, dedupe_key)` 가 유니크라, 같은 두 사람 사이 유보 두 건이
+            # 다른 워커에서 동시에 처리되면 둘 다 "없다" 를 보고 둘 다 만듭니다.
+            # 세이브포인트가 없으면 IntegrityError 가 바깥
+            # `deferral.record()` 트랜잭션을 통째로 깨서 **유보가 사라집니다.**
+            #
+            # `chat/services.py` 의 `ensure_ai_room()` 과 같은 모양입니다.
+            try:
+                with transaction.atomic():
+                    room = ChatRoom.objects.create(
+                        type=RoomType.PEER_AGENT, dedupe_key=key,
+                        agent_owner=owner, created_by=owner)
+            except IntegrityError:
+                room = ChatRoom.all_objects.get(type=RoomType.PEER_AGENT,
+                                                dedupe_key=key)
+
+        # 양쪽을 다 넣습니다. 질문한 사람만 넣으면 정작 답할 사람의 목록에 방이
+        # 안 뜹니다.
+        for u in (asker, owner):
+            RoomMember.objects.get_or_create(room=room, user=u)
+        return room.id
+    except Exception:                                          # noqa: BLE001
+        # 여기서 실패해도 유보는 남깁니다. 화면은 방 없이 뜨고, 사용자는
+        # 답변 창을 한 번 더 열어야 할 뿐입니다.
+        logger.exception("유보 답변 방 준비 실패 owner=%s", getattr(owner, "id", None))
+        return None
