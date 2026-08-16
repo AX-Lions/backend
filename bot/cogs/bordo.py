@@ -19,6 +19,41 @@ class BordoCog(commands.Cog):
         await interaction.followup.send("DM으로 연결 코드를 보냈습니다.", ephemeral=True)
 
     @app_commands.command(
+        name="bordo-team-connect",
+        description="이 Discord 서버를 Bordo 팀에 연결합니다. (서버 관리 권한 필요)"
+    )
+    @app_commands.describe(team_id="연결할 팀 ID. 소유·관리 중인 팀이 여럿일 때만 필요합니다.")
+    async def bordo_team_connect(self, interaction: discord.Interaction, team_id: str = ""):
+        # Backend는 Discord 서버 권한을 모른다. 여기서 안 막으면 아무나
+        # 이 서버를 남의 팀에 연결할 수 있다.
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                "서버 관리 권한이 있는 사람만 팀을 연결할 수 있습니다.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        payload = {
+            "guild_id": str(interaction.guild_id),
+            "discord_user_id": str(interaction.user.id),
+        }
+        if team_id:
+            payload["team_id"] = team_id
+
+        result = await self.backend.post("/internal/v1/teams/link", json=payload)
+        if result is None:
+            await interaction.followup.send(
+                "팀 연결에 실패했습니다. Bordo 계정 연결(/bordo-connect)이 돼 있는지, "
+                "그 팀의 소유자·관리자인지 확인해주세요.", ephemeral=True
+            )
+            return
+
+        await interaction.followup.send(
+            f"이 서버를 '{result.get('name', '팀')}'에 연결했습니다.", ephemeral=True
+        )
+
+    @app_commands.command(
         name="bordo-team",
         description="현재 연결된 팀은 확인하거나 선택 안내를 받습니다."
     )
