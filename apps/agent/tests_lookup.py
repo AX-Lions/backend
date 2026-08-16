@@ -239,3 +239,75 @@ class AskPeerSkillTest(Base):
         """프롬프트에는 있는데 실행이 안 되는 상황을 막습니다."""
         from apps.agent.services.skills import registry
         self.assertIn("ask_peer_agent", [s.name for s in registry.list()])
+
+
+class EndlessLookupTest(Base):
+    """
+    A 의 대리인이 B 에게 묻고, B 가 다시 A 에게 묻고… 를 **실제로** 돌립니다.
+
+    앞의 `test_hop_limit_stops_endless_lookups` 는 `hop_count=3` 을 손으로 만들어
+    가드 한 줄만 봅니다. 그러면 `ctx.run_id → hop_count → react.run` 으로 이어지는
+    배선이 끊겨도 통과합니다 — 정작 회귀가 숨을 자리가 그 배선입니다.
+    """
+
+    class AlwaysAsksBack:
+        """
+        누가 물어보든 상대에게 되묻는 대리인.
+
+        `names` 를 번갈아 쓰므로 A→B→A→B… 가 됩니다. 상한이 없으면 끝나지
+        않으므로 호출 수를 세어 **테스트 자체가 멈추도록** 합니다.
+        """
+
+        def __init__(self, names, limit=40):
+            self.names = names
+            self.calls = 0
+            self.limit = limit
+
+        def chat(self, messages, tools=None, system=""):
+            self.calls += 1
+            if self.calls > self.limit:
+                raise AssertionError("무한 조회가 끊기지 않았습니다")
+            # 홀수 번째는 의도 분류, 짝수 번째는 되묻기.
+            if self.calls % 2 == 1:
+                return LLMResponse(text="STATUS")
+            return LLMResponse(tool_calls=[ToolCall(
+                f"c{self.calls}", "ask_peer_agent",
+                {"target_name": self.names[self.calls % len(self.names)],
+                 "question": "그쪽은 어디까지 됐나요?"})])
+
+    def test_a_real_back_and_forth_chain_terminates(self):
+        llm = self.AlwaysAsksBack(["서재민", "강다은"])
+
+        with patch("apps.agent.services.react.default_client", llm):
+            lookup.ask_peer(
+                asker=self.me, target=self.mate,
+                topic="서로 되묻기", reason="r",
+                question="어디까지 됐나요?",
+                project_id=self.project.id, run=self._run())
+
+        # 끊기지 않으면 위 limit 에서 AssertionError 로 죽습니다.
+        # 여기까지 왔다면 상한이 실제로 걸렸다는 뜻입니다.
+        from django.conf import settings as dj_settings
+
+        max_hops = dj_settings.BORDO.get("MAX_HOPS", 3)
+        deepest = AgentRun.objects.order_by("-hop_count").first()
+        self.assertLessEqual(deepest.hop_count, max_hops,
+                             "상한을 넘은 실행이 있습니다")
+
+    def test_the_chain_records_every_hop_it_actually_made(self):
+        """
+        중간에 끊겼더라도 **거기까지 물어본 것은 남아야 합니다.**
+        안 남기면 사용자는 대리인이 알아보지도 않은 줄 압니다.
+        """
+        llm = self.AlwaysAsksBack(["서재민", "강다은"])
+        with patch("apps.agent.services.react.default_client", llm):
+            lookup.ask_peer(
+                asker=self.me, target=self.mate, topic="서로 되묻기",
+                reason="r", question="어디까지 됐나요?",
+                project_id=self.project.id, run=self._run())
+
+        self.assertGreaterEqual(AgentLookup.objects.count(), 1)
+        # 화살표도 조회 수만큼 그려집니다.
+        self.assertEqual(
+            FlowEdge.objects.filter(content_type=FlowContentType.AI_LOOKUP).count(),
+            AgentLookup.objects.count())

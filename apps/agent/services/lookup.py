@@ -110,20 +110,31 @@ def _draw(lookup: AgentLookup) -> None:
     try:
         src = flow.agent_node(lookup.asker)
         dst = flow.agent_node(lookup.target)
-        edge = FlowEdge.objects.create(
-            project_id=lookup.project_id,
-            meeting=None,                       # 작업 플로우는 회의가 없습니다
-            category=FlowCategory.WORK,
-            content_type=FlowContentType.AI_LOOKUP,
-            source=lookup.source,
-            from_node=src, to_nodes=[dst],
-            participant_ids=[str(lookup.asker_id), str(lookup.target_id)],
-            label=lookup.topic[:60],
-            direction_label=f"{src['name']} → {dst['name']}"[:200],
-            occurred_at=lookup.occurred_at,
-        )
-        # 화살표를 누르면 4단 상세로 갑니다.
-        AgentLookup.objects.filter(pk=lookup.pk).update(edge=edge)
+
+        # DB 쓰기를 세이브포인트로 감쌉니다.
+        #
+        # 이 함수는 `ask_peer()` 의 트랜잭션 안에서 불립니다. 세이브포인트 없이
+        # 여기서 진짜 DB 오류가 나면 **예외를 잡아도 트랜잭션은 이미 오염됩니다.**
+        # 바깥 블록이 예외 없이 끝나도 Django 가 `needs_rollback` 을 보고 통째로
+        # 되돌리므로, **방금 만든 AgentLookup 까지 조용히 사라집니다.**
+        # 그러면 `ask_peer()` 는 성공한 것처럼 객체를 돌려주는데 DB 에는 없습니다.
+        #
+        # `flow.record()` 에서 이미 한 번 겪은 것과 같은 자리입니다.
+        with transaction.atomic():
+            edge = FlowEdge.objects.create(
+                project_id=lookup.project_id,
+                meeting=None,                   # 작업 플로우는 회의가 없습니다
+                category=FlowCategory.WORK,
+                content_type=FlowContentType.AI_LOOKUP,
+                source=lookup.source,
+                from_node=src, to_nodes=[dst],
+                participant_ids=[str(lookup.asker_id), str(lookup.target_id)],
+                label=lookup.topic[:60],
+                direction_label=f"{src['name']} → {dst['name']}"[:200],
+                occurred_at=lookup.occurred_at,
+            )
+            # 화살표를 누르면 4단 상세로 갑니다.
+            AgentLookup.objects.filter(pk=lookup.pk).update(edge=edge)
         lookup.edge = edge
     except Exception:                                          # noqa: BLE001
         logger.exception("AI 조회 화살표 기록 실패 lookup=%s", lookup.pk)
