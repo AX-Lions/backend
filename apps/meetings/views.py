@@ -15,12 +15,13 @@ from rest_framework.response import Response
 from apps.agent.models import PendingQuestion
 from apps.common.display import day_label, user_tz
 from apps.common.events import publish
+from apps.common.parsing import parse_dt
 from apps.common.permissions import meeting_access, project_membership
 from apps.common.views import listing
 from config.errors import BordoError
 
 from .models import (Agenda, AiBriefing, Attendance, BriefingConfirmation,
-                     BriefingRequest, FlowCategory, FlowContentType, FlowEdge,
+                     BriefingRequest, FlowCategory, FlowContentType, FlowEdge, FlowSource,
                      FlowFilterPreset, Meeting, MeetingDocumentRef,
                      MeetingParticipant, MeetingStatus, MeetingSummary, Surface,
                      Utterance)
@@ -30,7 +31,16 @@ from .serializers import (AgendaSerializer, AiBriefingSerializer,
                           FlowFilterPresetSerializer, MeetingSerializer,
                           MeetingSummarySerializer, UtteranceSerializer)
 
-WORK_TYPES = {FlowContentType.DOCUMENT, FlowContentType.PLAN}
+# 작업 모드 필터 5칸과 1:1 입니다.
+#
+# DOCUMENT·PLAN 이 아닙니다 — 그 둘은 Figma 어디에도 없는 초기 설계 잔재입니다.
+WORK_TYPES = {FlowContentType.WORK, FlowContentType.REVISION,
+              FlowContentType.FEEDBACK, FlowContentType.SHARE,
+              FlowContentType.AI_LOOKUP}
+#: 작업 모드 필터에 그리는 순서.
+WORK_TYPE_ORDER = [FlowContentType.WORK, FlowContentType.REVISION,
+                   FlowContentType.FEEDBACK, FlowContentType.SHARE,
+                   FlowContentType.AI_LOOKUP]
 MEETING_TYPES = {FlowContentType.OPINION, FlowContentType.REQUEST,
                  FlowContentType.CHANGE, FlowContentType.SCHEDULE,
                  FlowContentType.CONCLUSION, FlowContentType.ETC}
@@ -132,7 +142,7 @@ def _resolve_category(raw):
     return cat
 
 
-def _filtered_edges(meeting, params):
+def _filtered_edges(scope, params):
     """
     필터는 전부 DB 에서 겁니다.
 
@@ -140,7 +150,7 @@ def _filtered_edges(meeting, params):
     화면이 느려집니다.
     """
     cat = _resolve_category(params.get("category"))
-    qs = FlowEdge.objects.filter(meeting=meeting, category=cat)
+    qs = FlowEdge.objects.filter(**scope, category=cat)
 
     types = params.get("content_types")
     if types:
@@ -157,6 +167,19 @@ def _filtered_edges(meeting, params):
     surfaces = params.get("surfaces")
     if surfaces:
         qs = qs.filter(surface__in=[s.strip().upper() for s in surfaces.split(",")])
+
+    # 작업 모드 `필터링 > 출처`. Github · Figma · Notion.
+    #
+    # surface(서비스/Discord)와 다른 축입니다 — surface 는 일이 일어난 곳,
+    # source 는 산출물이 있는 곳입니다.
+    sources = params.get("sources")
+    if sources:
+        wanted = [x.strip().upper() for x in sources.split(",") if x.strip()]
+        bad = [x for x in wanted if x not in FlowSource.values]
+        if bad:
+            raise BordoError("VALIDATION_ERROR", "알 수 없는 출처입니다.",
+                             details={"invalid": bad, "allowed": FlowSource.values})
+        qs = qs.filter(source__in=wanted)
 
     since = params.get("since_minutes")
     if since:
@@ -238,7 +261,7 @@ def _arrows(edges):
 @api_view(["GET"])
 def flow(request, meeting_id):
     meeting = meeting_access(request.user, meeting_id)
-    cat, edges = _filtered_edges(meeting, request.query_params)
+    cat, edges = _filtered_edges({"meeting": meeting}, request.query_params)
     edges = list(edges)
 
     nodes, seen = [], set()
@@ -267,6 +290,79 @@ def flow(request, meeting_id):
             "content_types": [t for t in MEETING_TYPE_ORDER if t in present]
                              or sorted(present),
             "surfaces": sorted({e.surface for e in edges}),
+        },
+    })
+
+
+@api_view(["GET"])
+def project_flow(request, project_id):
+    """
+    작업(Work) 플로우.
+
+    ## 왜 회의 조회와 따로 있는가
+
+    회의 플로우는 회의 하나가 스코프인데, **작업 플로우는 기간이 스코프입니다.**
+    화면 헤더가 `8.10 - 8.16 작업 흐름` 입니다. 붙일 회의가 없어 같은 경로를
+    쓸 수 없습니다.
+
+    ## 응답 모양은 회의와 같게 둡니다
+
+    `meeting_label` 이 `period_label` 로 바뀌는 것 말고는 동일합니다.
+    프론트가 차트 렌더러를 **하나만** 만들면 되도록 하기 위해서입니다.
+
+    ## 진하기를 저장값으로 쓰지 않습니다
+
+    회의는 끝나면 구간이 고정되지만, 작업 플로우의 구간은 **사용자가 고르는
+    기간**입니다. 같은 엣지도 `8.10-8.16` 으로 볼 때와 `8.1-8.31` 로 볼 때
+    진하기가 달라야 합니다. 그래서 조회할 때마다 계산합니다.
+    """
+    project, _ = project_membership(request.user, project_id)
+
+    to_at = parse_dt(request.query_params.get("to"), "to") or timezone.now()
+    from_at = (parse_dt(request.query_params.get("from"), "from")
+               or to_at - timedelta(days=7))
+    if from_at > to_at:
+        raise BordoError("VALIDATION_ERROR", "from 이 to 보다 뒤입니다.")
+
+    params = request.query_params.copy()
+    params.setdefault("category", FlowCategory.WORK)
+    cat, edges = _filtered_edges({"project": project}, params)
+    edges = [e for e in edges
+             if from_at <= e.occurred_at <= to_at]
+
+    # 구간을 한 번만 구해 넘깁니다. 엣지마다 다시 계산하면 N+1 입니다.
+    for e in edges:
+        e.opacity = e.compute_opacity(oldest=from_at, newest=to_at)
+
+    nodes, seen = [], set()
+    for e in edges:
+        for n in [e.from_node] + list(e.to_nodes or []):
+            if n and n.get("id") not in seen:
+                seen.add(n.get("id"))
+                nodes.append(n)
+
+    order = WORK_TYPE_ORDER if cat == FlowCategory.WORK else MEETING_TYPE_ORDER
+    present = {e.content_type for e in edges}
+    from apps.orgs.models import ProjectMember
+    members = ProjectMember.objects.filter(project=project).select_related("user")
+
+    return Response({
+        "project_id": str(project.id),
+        # 서버가 문자열까지 만듭니다. 클라이언트가 만들면 시간대·표기가 갈립니다.
+        "period_label": f"{from_at.month}.{from_at.day} - {to_at.month}.{to_at.day} "
+                        f"{'작업' if cat == FlowCategory.WORK else '회의'} 흐름",
+        "from": from_at, "to": to_at,
+        "category": cat,
+        "nodes": nodes,
+        "arrows": _arrows(edges),
+        "filter_options": {
+            "participants": [{"id": str(m.user_id), "label": m.user.name, "kind": "USER"}
+                             for m in members],
+            "content_types": [t for t in order if t in present] or sorted(present),
+            "surfaces": sorted({e.surface for e in edges}),
+            # 실제로 존재하는 출처만 내려줍니다. 전체를 주면 체크해도 안 걸리는
+            # 항목이 생겨 사용자가 헷갈립니다.
+            "sources": sorted({e.source for e in edges if e.source}),
         },
     })
 
