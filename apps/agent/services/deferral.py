@@ -77,20 +77,46 @@ def record(*, run, question: str, reason_message: str,
 
     # 같은 실행이 두 번 남기지 않습니다. 재시도나 중복 호출에서 목록이 불어나면
     # 사용자는 같은 질문을 여러 번 답해야 합니다.
-    existing = PendingQuestion.objects.filter(run=run).first()
-    if existing:
-        return existing
-
-    return PendingQuestion.objects.create(
-        meeting_id=run.meeting_id,
+    #
+    # 손으로 "있는지 보고 없으면 넣는" 방식은 동시에 불리면 뚫립니다. 둘 다
+    # "없다" 를 보고 둘 다 넣습니다. `get_or_create()` 는 **세이브포인트 안에서
+    # 만들고 IntegrityError 가 나면 다시 읽는** 동작이 이미 들어 있어, 모델의
+    # 유니크 제약(`uq_pending_question_run`)과 짝을 이루면 그 경합이 닫힙니다.
+    #
+    # 직접 짜지 않는 이유가 이것입니다 — 같은 패턴을 곳곳에 복붙하면 나중에
+    # 한 곳만 고쳐 놓고 다 고친 줄 압니다.
+    # `chat_room_id` 만 콜러블입니다.
+    #
+    # 파이썬은 `get_or_create()` 를 부르기 **전에** 인자를 다 계산합니다. 그냥
+    # 넣으면 이미 행이 있어 `get` 으로 끝나는 경우에도 방을 만들고 `RoomMember`
+    # 까지 넣은 뒤 그 결과를 버립니다. Django 는 `defaults` 의 콜러블을
+    # **만들 때만** 풀어 주므로(`resolve_callables`), 부수효과가 있는 값은
+    # 이렇게 미뤄야 합니다.
+    question_obj, created = PendingQuestion.objects.get_or_create(
         run=run,
-        asker=asker,
-        asker_name=getattr(asker, "name", "") or "",
-        target_user=run.user,
-        title=_title_of(question),
-        body=_body_of(question, reason_message, evidence or []),
-        chat_room_id=_answer_room_id(run.user, asker),
+        defaults=dict(
+            meeting_id=run.meeting_id,
+            asker=asker,
+            asker_name=getattr(asker, "name", "") or "",
+            target_user=run.user,
+            title=_title_of(question),
+            body=_body_of(question, reason_message, evidence or []),
+            chat_room_id=lambda: _answer_room_id(run.user, asker),
+        ),
     )
+
+    # 앞선 시도에서 방을 못 잡았으면 이번에 채웁니다.
+    #
+    # 방 준비는 실패해도 유보를 남기도록 돼 있어 `chat_room_id` 가 빈 채로
+    # 저장될 수 있습니다. 재시도에서 그냥 있는 행을 돌려주기만 하면 **답변 창이
+    # 영영 안 열립니다** — 채팅 쪽이 잠깐 흔들린 대가로 그 유보만 평생 못 답합니다.
+    if not created and question_obj.chat_room_id is None:
+        room_id = _answer_room_id(run.user, asker)
+        if room_id is not None:
+            question_obj.chat_room_id = room_id
+            question_obj.save(update_fields=["chat_room_id", "updated_at"])
+
+    return question_obj
 
 
 def _answer_room_id(owner, asker):
@@ -104,20 +130,43 @@ def _answer_room_id(owner, asker):
     질문한 사람이 있으면 그 사람과의 `PEER_AGENT` 방입니다 — 남이 내 대리인에게
     물은 것이라 대화의 상대가 정해져 있습니다. 질문자가 없으면(시스템 유보) 본인의
     AI 방으로 보냅니다.
+
+    **방을 못 잡아도 `None` 을 돌려주고 끝냅니다.** 유보 기록 자체는 남아야 합니다 —
+    답변 창이 한 번 덜 열리는 것과 "그 질문이 있었다"가 통째로 사라지는 것은
+    비교가 안 됩니다.
     """
     from apps.chat.models import ChatRoom, RoomMember, RoomType
     from apps.chat.services import ensure_ai_room, peer_agent_key
+    from apps.common.db import ensure_row
 
-    if asker is None or asker.id == owner.id:
-        return ensure_ai_room(owner).id
+    try:
+        if asker is None or asker.id == owner.id:
+            return ensure_ai_room(owner).id
 
-    key = peer_agent_key(asker.id, owner.id)
-    room = ChatRoom.all_objects.filter(type=RoomType.PEER_AGENT, dedupe_key=key).first()
-    if room is None:
-        room = ChatRoom.objects.create(type=RoomType.PEER_AGENT, dedupe_key=key,
-                                       agent_owner=owner, created_by=owner)
-    # 양쪽을 다 넣습니다. 질문한 사람만 넣으면 정작 답할 사람의 목록에 방이
-    # 안 뜹니다.
-    for u in (asker, owner):
-        RoomMember.objects.get_or_create(room=room, user=u)
-    return room.id
+        # `get_or_create()` 를 못 쓰는 자리입니다. 소프트 삭제된 방이 유니크
+        # 제약을 잡고 있으면 기본 매니저에는 안 보여서, 만들면 IntegrityError 가
+        # 나고 다시 읽어도 여전히 안 보입니다. 사유는 `common/db.py` 에 적었습니다.
+        room, _ = ensure_row(
+            ChatRoom,
+            type=RoomType.PEER_AGENT, dedupe_key=peer_agent_key(asker.id, owner.id),
+            defaults=dict(agent_owner=owner, created_by=owner),
+        )
+
+        # 양쪽을 다 넣습니다. 질문한 사람만 넣으면 정작 답할 사람의 목록에 방이
+        # 안 뜹니다.
+        for u in (asker, owner):
+            RoomMember.objects.get_or_create(room=room, user=u)
+        return room.id
+    except Exception:                                          # noqa: BLE001
+        # 이 except 가 넓은 것은 의도입니다.
+        #
+        # 여기서 잡는 것은 "방 만들다 난 경합" 만이 아니라 **채팅 쪽에서 나는
+        # 모든 실패**입니다. 무엇이 터지든 유보 기록보다 중요하지 않습니다 —
+        # 답변 창이 한 번 덜 열리는 것과 "그 질문이 있었다" 가 통째로 사라지는
+        # 것은 비교가 안 됩니다.
+        #
+        # 대신 조용히 넘어가지 않게 run 까지 실어 ERROR 로 남깁니다. 좁혀 두면
+        # 예상 못 한 예외가 유보를 데리고 사라집니다.
+        logger.exception("유보 답변 방 준비 실패 owner=%s asker=%s",
+                         getattr(owner, "id", None), getattr(asker, "id", None))
+        return None
