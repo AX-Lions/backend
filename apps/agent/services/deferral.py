@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-from django.db import IntegrityError, transaction
+from django.db import transaction
 
 from ..models import PendingQuestion
 
@@ -77,20 +77,27 @@ def record(*, run, question: str, reason_message: str,
 
     # 같은 실행이 두 번 남기지 않습니다. 재시도나 중복 호출에서 목록이 불어나면
     # 사용자는 같은 질문을 여러 번 답해야 합니다.
-    existing = PendingQuestion.objects.filter(run=run).first()
-    if existing:
-        return existing
-
-    return PendingQuestion.objects.create(
-        meeting_id=run.meeting_id,
+    #
+    # 손으로 "있는지 보고 없으면 넣는" 방식은 동시에 불리면 뚫립니다. 둘 다
+    # "없다" 를 보고 둘 다 넣습니다. `get_or_create()` 는 **세이브포인트 안에서
+    # 만들고 IntegrityError 가 나면 다시 읽는** 동작이 이미 들어 있어, 모델의
+    # 유니크 제약(`uq_pending_question_run`)과 짝을 이루면 그 경합이 닫힙니다.
+    #
+    # 직접 짜지 않는 이유가 이것입니다 — 같은 패턴을 곳곳에 복붙하면 나중에
+    # 한 곳만 고쳐 놓고 다 고친 줄 압니다.
+    question_obj, _ = PendingQuestion.objects.get_or_create(
         run=run,
-        asker=asker,
-        asker_name=getattr(asker, "name", "") or "",
-        target_user=run.user,
-        title=_title_of(question),
-        body=_body_of(question, reason_message, evidence or []),
-        chat_room_id=_answer_room_id(run.user, asker),
+        defaults=dict(
+            meeting_id=run.meeting_id,
+            asker=asker,
+            asker_name=getattr(asker, "name", "") or "",
+            target_user=run.user,
+            title=_title_of(question),
+            body=_body_of(question, reason_message, evidence or []),
+            chat_room_id=_answer_room_id(run.user, asker),
+        ),
     )
+    return question_obj
 
 
 def _answer_room_id(owner, asker):
@@ -111,31 +118,20 @@ def _answer_room_id(owner, asker):
     """
     from apps.chat.models import ChatRoom, RoomMember, RoomType
     from apps.chat.services import ensure_ai_room, peer_agent_key
+    from apps.common.db import ensure_row
 
     try:
         if asker is None or asker.id == owner.id:
             return ensure_ai_room(owner).id
 
-        key = peer_agent_key(asker.id, owner.id)
-        room = (ChatRoom.all_objects
-                .filter(type=RoomType.PEER_AGENT, dedupe_key=key).first())
-        if room is None:
-            # 세이브포인트로 감싸고 충돌하면 되읽습니다.
-            #
-            # `(type, dedupe_key)` 가 유니크라, 같은 두 사람 사이 유보 두 건이
-            # 다른 워커에서 동시에 처리되면 둘 다 "없다" 를 보고 둘 다 만듭니다.
-            # 세이브포인트가 없으면 IntegrityError 가 바깥
-            # `deferral.record()` 트랜잭션을 통째로 깨서 **유보가 사라집니다.**
-            #
-            # `chat/services.py` 의 `ensure_ai_room()` 과 같은 모양입니다.
-            try:
-                with transaction.atomic():
-                    room = ChatRoom.objects.create(
-                        type=RoomType.PEER_AGENT, dedupe_key=key,
-                        agent_owner=owner, created_by=owner)
-            except IntegrityError:
-                room = ChatRoom.all_objects.get(type=RoomType.PEER_AGENT,
-                                                dedupe_key=key)
+        # `get_or_create()` 를 못 쓰는 자리입니다. 소프트 삭제된 방이 유니크
+        # 제약을 잡고 있으면 기본 매니저에는 안 보여서, 만들면 IntegrityError 가
+        # 나고 다시 읽어도 여전히 안 보입니다. 사유는 `common/db.py` 에 적었습니다.
+        room, _ = ensure_row(
+            ChatRoom,
+            type=RoomType.PEER_AGENT, dedupe_key=peer_agent_key(asker.id, owner.id),
+            defaults=dict(agent_owner=owner, created_by=owner),
+        )
 
         # 양쪽을 다 넣습니다. 질문한 사람만 넣으면 정작 답할 사람의 목록에 방이
         # 안 뜹니다.
@@ -143,7 +139,15 @@ def _answer_room_id(owner, asker):
             RoomMember.objects.get_or_create(room=room, user=u)
         return room.id
     except Exception:                                          # noqa: BLE001
-        # 여기서 실패해도 유보는 남깁니다. 화면은 방 없이 뜨고, 사용자는
-        # 답변 창을 한 번 더 열어야 할 뿐입니다.
-        logger.exception("유보 답변 방 준비 실패 owner=%s", getattr(owner, "id", None))
+        # 이 except 가 넓은 것은 의도입니다.
+        #
+        # 여기서 잡는 것은 "방 만들다 난 경합" 만이 아니라 **채팅 쪽에서 나는
+        # 모든 실패**입니다. 무엇이 터지든 유보 기록보다 중요하지 않습니다 —
+        # 답변 창이 한 번 덜 열리는 것과 "그 질문이 있었다" 가 통째로 사라지는
+        # 것은 비교가 안 됩니다.
+        #
+        # 대신 조용히 넘어가지 않게 run 까지 실어 ERROR 로 남깁니다. 좁혀 두면
+        # 예상 못 한 예외가 유보를 데리고 사라집니다.
+        logger.exception("유보 답변 방 준비 실패 owner=%s asker=%s",
+                         getattr(owner, "id", None), getattr(asker, "id", None))
         return None
