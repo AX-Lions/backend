@@ -630,3 +630,23 @@ class AgendaLinkTest(Base):
         rows = [x for x in r.json()["results"] if x["id"] == str(a.id)]
         self.assertTrue(rows and rows[0]["related_edge_ids"],
                         "인덱스가 화살표로 못 갑니다")
+
+    def test_the_agenda_is_looked_up_once_per_utterance(self):
+        """
+        안건 목록을 읽고 제목을 전부 토큰으로 쪼갭니다. 질문 화살표와 답변
+        화살표가 각자 구하면 **같은 조회와 같은 계산이 발언마다 두 번** 돕니다.
+        회의가 길어질수록 그대로 쌓입니다.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._agenda("team_members 마이그레이션 설계")
+
+        with CaptureQueriesContext(connection) as ctx:
+            self._run(self._answering(), body="team_members 마이그레이션 어디까지 됐어요?")
+
+        agenda_reads = [q["sql"] for q in ctx.captured_queries
+                        if q["sql"].lstrip().upper().startswith("SELECT")
+                        and '"agenda"' in q["sql"]]
+        self.assertEqual(len(agenda_reads), 1,
+                         f"안건 조회가 {len(agenda_reads)}번 나갔습니다")

@@ -180,6 +180,19 @@ def agenda_for(meeting, text: str):
 
     두 안건이 같은 점수면 **아무것도 고르지 않습니다.** 틀린 안건에 붙으면
     사용자가 인덱스를 눌렀을 때 엉뚱한 곳으로 갑니다 — 비어 있는 것보다 나쁩니다.
+
+    ## 알려진 한계
+
+    낱말 두 개가 겹쳐야 하므로 **제목이 한 낱말인 안건은 영영 안 걸립니다**
+    (`로그인` 같은). 지금 시안의 안건은 `진행 상황 공유` · `백엔드 개발 논의`
+    처럼 두 낱말 이상이라 문제가 안 되지만, 짧은 제목이 흔해지면 다시 봐야
+    합니다. 문턱을 낮추는 것보다 이대로 두는 편이 나은 이유는 위와 같습니다.
+
+    ## 발언마다 한 번만 부르십시오
+
+    안건 목록을 읽고 제목을 전부 토큰으로 쪼갭니다. 질문 화살표와 답변 화살표에
+    각각 부르면 **같은 조회와 같은 계산이 두 번** 돕니다. 호출부에서 한 번 구해
+    양쪽에 넘기십시오.
     """
     from apps.agent.services.skills.search_records import _tokens
     from apps.meetings.models import Agenda
@@ -243,7 +256,7 @@ def delegate_prompt_given(meeting, user, prompt: str):
                       occurred_at=meeting.scheduled_at)
 
 
-def question_routed(meeting, *, asker, target, question="",
+def question_routed(meeting, *, asker, target, agenda=None,
                     surface=Surface.DISCORD):
     """회의 중 — 질문이 누구의 대리인에게 향했는지."""
     if asker is None:
@@ -251,10 +264,10 @@ def question_routed(meeting, *, asker, target, question="",
     return record(meeting,
                   from_node=user_node(asker), to_nodes=[agent_node(target)],
                   label="질문", content_type=FlowContentType.REQUEST,
-                  surface=surface, agenda=agenda_for(meeting, question))
+                  surface=surface, agenda=agenda)
 
 
-def answered(meeting, *, principal, audience: list, question="",
+def answered(meeting, *, principal, audience: list, agenda=None,
              surface=Surface.DISCORD):
     """
     회의 중 — 대리인이 답했습니다.
@@ -266,7 +279,7 @@ def answered(meeting, *, principal, audience: list, question="",
                   from_node=agent_node(principal),
                   to_nodes=[user_node(u) for u in audience],
                   label="대리인 답변", content_type=FlowContentType.OPINION,
-                  surface=surface, agenda=agenda_for(meeting, question))
+                  surface=surface, agenda=agenda)
 
 
 def deferred(meeting, *, principal, asker, surface=Surface.DISCORD):
