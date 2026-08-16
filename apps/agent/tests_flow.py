@@ -306,6 +306,16 @@ class OpacityTest(Base):
         그래서 회의가 끝날 때 다시 계산해야 합니다.** 이 사실을 눌러 두지 않으면
         아래 재계산이 왜 필요한지가 테스트만 읽어서는 안 드러납니다.
         """
+        # 회의 시작을 과거로 당깁니다.
+        #
+        # `setUpTestData` 의 회의는 방금 시작한 것이라 구간이 사실상 0 입니다.
+        # 그러면 엣지를 만드는 데 걸린 몇 밀리초가 비율을 눈에 띄게 끌어내려
+        # 0.999 같은 값이 나오고, **테스트가 장비가 느린 날에만 실패합니다.**
+        # 진행 중인 회의라는 조건(ended_at 없음)은 그대로입니다.
+        self.meeting.started_at = timezone.now() - timedelta(hours=2)
+        self.meeting.scheduled_at = self.meeting.started_at
+        self.meeting.save(update_fields=["started_at", "scheduled_at"])
+
         self._run(self._answering())
         # 사전 지시는 회의 시작 시각으로 찍히므로 예외입니다. 회의 중에 생긴
         # 것들만 봅니다 — 실제 회의에서는 이쪽이 거의 전부입니다.

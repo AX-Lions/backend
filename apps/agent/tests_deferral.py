@@ -284,3 +284,117 @@ class RunUniquenessTest(Base):
                 meeting=self.meeting, target_user=self.me,
                 asker_name="임수연", title="제목", body="본문")
         self.assertEqual(PendingQuestion.objects.filter(run=None).count(), 3)
+
+
+class NoSideEffectOnExistingTest(Base):
+    """
+    이미 행이 있으면 방을 건드리지 않아야 합니다.
+
+    `get_or_create(defaults=...)` 의 인자는 파이썬이 **호출 전에** 다 계산합니다.
+    방 준비처럼 부수효과가 있는 값을 그냥 넣으면, `get` 으로 끝나는 경우에도
+    방을 만들고 `RoomMember` 까지 넣은 뒤 그 결과를 버립니다.
+    """
+
+    def _record(self, run):
+        return deferral.record(run=run, question="언제 끝나요?",
+                               reason_message="확인이 필요합니다.", asker=self.asker)
+
+    def test_room_is_not_touched_when_the_question_already_exists(self):
+        from unittest.mock import patch
+
+        run = self._run_obj()
+        self._record(run)
+
+        with patch("apps.agent.services.deferral._answer_room_id") as m:
+            self._record(run)
+        m.assert_not_called()
+
+    def test_missing_room_is_filled_in_on_retry(self):
+        """
+        방 준비는 실패해도 유보를 남깁니다. 그때 `chat_room_id` 가 빈 채로 저장되는데,
+        재시도에서 있는 행만 돌려주면 **답변 창이 영영 안 열립니다.**
+        """
+        run = self._run_obj()
+        self._record(run)
+        PendingQuestion.objects.filter(run=run).update(chat_room_id=None)
+
+        again = self._record(run)
+        self.assertIsNotNone(again.chat_room_id, "재시도했는데 방이 안 채워졌습니다")
+        self.assertEqual(PendingQuestion.objects.count(), 1)
+
+    def test_retry_reuses_the_room_instead_of_making_another(self):
+        run = self._run_obj()
+        first = self._record(run)
+        PendingQuestion.objects.filter(run=run).update(chat_room_id=None)
+
+        from apps.chat.models import ChatRoom
+        before = ChatRoom.all_objects.count()
+        again = self._record(run)
+        self.assertEqual(ChatRoom.all_objects.count(), before, "방이 하나 더 생겼습니다")
+        self.assertEqual(again.chat_room_id, first.chat_room_id)
+
+
+class DuplicateCleanupMigrationTest(TestCase):
+    """
+    제약을 걸기 전에 이미 있던 중복을 푸는 절차.
+
+    중복이 하나라도 있으면 `AddConstraint` 가 IntegrityError 로 죽어 배포가
+    멈춥니다. 막으려는 그 경합이 실제로 일어났던 환경일수록 그렇습니다.
+
+    **DB 를 안 씁니다.** 테스트 DB 에는 이미 제약이 걸려 있어 중복을 만들 수가
+    없고, 스키마를 잠시 내리는 방법은 `TransactionTestCase` 가 필요해 테이블을
+    비우면서 다른 테스트를 흔듭니다. 여기서 볼 것은 **어느 행을 남기고 어느 행의
+    연결을 끊는가** 하나뿐이라, 그 선택 규칙만 봅니다.
+    """
+
+    def _run_cleanup(self, rows):
+        """`(id, run_id)` 목록을 주고 연결이 끊긴 id 를 돌려받습니다."""
+        import importlib
+
+        _0003 = importlib.import_module(
+            "apps.agent.migrations.0003_pending_question_unique_run")
+
+        unlinked = {}
+
+        class FakeQS:
+            def filter(self, **kw):
+                if "id__in" in kw:
+                    unlinked["ids"] = list(kw["id__in"])
+                return self
+
+            def order_by(self, *a):
+                return self
+
+            def values_list(self, *a):
+                return rows
+
+            def update(self, **kw):
+                unlinked["fields"] = kw
+
+        class FakeModel:
+            objects = FakeQS()
+
+        class FakeApps:
+            def get_model(self, *a):
+                return FakeModel
+
+        _0003.unlink_duplicates(FakeApps(), None)
+        return unlinked
+
+    def test_first_row_keeps_the_link_and_the_rest_are_unlinked(self):
+        # 같은 run 에 셋, 다른 run 에 하나. 정렬은 (run_id, created_at, id) 입니다.
+        out = self._run_cleanup([(1, "runA"), (2, "runA"), (3, "runA"), (4, "runB")])
+        self.assertEqual(out["ids"], [2, 3], "가장 먼저 만든 것이 연결을 유지해야 합니다")
+
+    def test_duplicates_are_unlinked_not_deleted(self):
+        """
+        중복이라 해도 사용자가 이미 답을 달아 뒀을 수 있습니다.
+        마이그레이션이 사람의 기록을 조용히 없애면 안 됩니다.
+        """
+        out = self._run_cleanup([(1, "runA"), (2, "runA")])
+        self.assertEqual(out["fields"], {"run": None}, "연결만 끊어야 합니다")
+
+    def test_nothing_happens_without_duplicates(self):
+        """지금 데이터가 이 경우입니다. 쓸데없는 UPDATE 가 나가면 안 됩니다."""
+        out = self._run_cleanup([(1, "runA"), (2, "runB")])
+        self.assertNotIn("ids", out)
