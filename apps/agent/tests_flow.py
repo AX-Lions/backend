@@ -558,3 +558,75 @@ class NodeShapeTest(TestCase):
         n = flow.server_node()
         self.assertEqual(set(n), {"id", "kind", "user_id", "name", "avatar_url"})
         self.assertIsNone(n["user_id"])
+
+
+class AgendaLinkTest(Base):
+    """
+    화살표를 안건에 잇습니다.
+
+    좌측 `인덱스` 에서 안건을 누르면 관련 화살표로 점프하는데, 그 연결이 비어
+    있어서 인덱스가 아무 데도 못 갔습니다.
+
+    **짐작입니다.** 발언과 안건을 잇는 명시적 신호가 없어(Discord 에서 "지금부터
+    2번 안건" 이라고 선언하지 않습니다) 낱말 겹침으로 고릅니다. 그래서
+    **애매하면 비우는 쪽**을 택했는지가 이 테스트의 핵심입니다.
+    """
+
+    def _agenda(self, title):
+        from apps.meetings.models import Agenda
+        return Agenda.objects.create(meeting=self.meeting, title=title)
+
+    def test_a_clear_match_is_linked(self):
+        a = self._agenda("team_members 마이그레이션 설계")
+        self._run(self._answering(), body="team_members 마이그레이션 어디까지 됐어요?")
+        self.assertEqual(FlowEdge.objects.get(label="질문").agenda_id, a.id)
+
+    def test_a_single_shared_word_is_not_enough(self):
+        """
+        겹치는 낱말이 하나뿐이면 우연일 가능성이 큽니다. 틀린 안건에 붙으면
+        인덱스를 눌렀을 때 엉뚱한 곳으로 갑니다 — 비어 있는 것보다 나쁩니다.
+        """
+        self._agenda("마이그레이션 일정 조율")
+        self._run(self._answering(), body="마이그레이션 어디까지 됐어요?")
+        self.assertIsNone(FlowEdge.objects.get(label="질문").agenda_id)
+
+    def test_a_tie_links_nothing(self):
+        """두 안건이 똑같이 맞으면 아무것도 고르지 않습니다."""
+        self._agenda("team_members 마이그레이션 설계")
+        self._agenda("team_members 마이그레이션 검토")
+        self._run(self._answering(), body="team_members 마이그레이션 어디까지 됐어요?")
+        self.assertIsNone(FlowEdge.objects.get(label="질문").agenda_id)
+
+    def test_no_agenda_is_fine(self):
+        """안건을 안 적은 회의도 있습니다. 그때도 화살표는 그려져야 합니다."""
+        self._run(self._answering())
+        self.assertIsNotNone(FlowEdge.objects.filter(label="질문").first())
+
+    def test_the_answer_lands_on_the_same_agenda(self):
+        """질문과 답이 다른 안건에 흩어지면 인덱스가 둘로 갈립니다."""
+        a = self._agenda("team_members 마이그레이션 설계")
+        self._run(self._answering(), body="team_members 마이그레이션 어디까지 됐어요?")
+        self.assertEqual(FlowEdge.objects.get(label="대리인 답변").agenda_id, a.id)
+
+    def test_the_index_can_now_jump(self):
+        """
+        이 연결이 있어야 `GET /meetings/{id}/indexes` 의 `related_edge_ids` 가
+        찹니다. 비어 있으면 인덱스를 눌러도 아무 일이 안 일어납니다.
+        """
+        from apps.orgs.models import ProjectMember, TeamMember, TeamRole
+        from rest_framework.test import APIClient
+
+        a = self._agenda("team_members 마이그레이션 설계")
+        self._run(self._answering(), body="team_members 마이그레이션 어디까지 됐어요?")
+
+        TeamMember.objects.get_or_create(team=self.team, user=self.speaker,
+                                         defaults={"team_role": TeamRole.MEMBER})
+        ProjectMember.objects.get_or_create(project=self.project, user=self.speaker)
+        api = APIClient()
+        api.force_authenticate(user=self.speaker)
+
+        r = api.get(f"/api/v1/meetings/{self.meeting.id}/indexes")
+        self.assertEqual(r.status_code, 200, r.content[:200])
+        rows = [x for x in r.json()["results"] if x["id"] == str(a.id)]
+        self.assertTrue(rows and rows[0]["related_edge_ids"],
+                        "인덱스가 화살표로 못 갑니다")
