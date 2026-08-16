@@ -6,6 +6,7 @@ import 시점에 전역 레지스트리에 등록합니다. 등록을 호출부�
 """
 from .act import (ProposeScheduleSkill, ProposeTaskSkill, SendMessageSkill,
                   SpeakInMeetingSkill)
+from .ask_peer import AskPeerAgentSkill
 from .base import SkillBase, SkillContext, SkillKind, SkillResult
 from .registry import SkillRegistry, registry
 from .search_meeting import SearchMeetingSkill
@@ -14,11 +15,12 @@ from .think import ThinkSkill
 
 for _skill in (ThinkSkill(), SearchRecordsSkill(), SearchMeetingSkill(),
                SendMessageSkill(), SpeakInMeetingSkill(),
-               ProposeTaskSkill(), ProposeScheduleSkill()):
+               ProposeTaskSkill(), ProposeScheduleSkill(),
+               AskPeerAgentSkill()):
     registry.register(_skill)
 
 __all__ = ["SkillBase", "SkillContext", "SkillKind", "SkillResult",
            "SkillRegistry", "registry",
            "ThinkSkill", "SearchRecordsSkill", "SearchMeetingSkill",
            "SendMessageSkill", "SpeakInMeetingSkill",
-           "ProposeTaskSkill", "ProposeScheduleSkill"]
+           "ProposeTaskSkill", "ProposeScheduleSkill", "AskPeerAgentSkill"]
