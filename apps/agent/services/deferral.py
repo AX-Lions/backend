@@ -85,7 +85,14 @@ def record(*, run, question: str, reason_message: str,
     #
     # 직접 짜지 않는 이유가 이것입니다 — 같은 패턴을 곳곳에 복붙하면 나중에
     # 한 곳만 고쳐 놓고 다 고친 줄 압니다.
-    question_obj, _ = PendingQuestion.objects.get_or_create(
+    # `chat_room_id` 만 콜러블입니다.
+    #
+    # 파이썬은 `get_or_create()` 를 부르기 **전에** 인자를 다 계산합니다. 그냥
+    # 넣으면 이미 행이 있어 `get` 으로 끝나는 경우에도 방을 만들고 `RoomMember`
+    # 까지 넣은 뒤 그 결과를 버립니다. Django 는 `defaults` 의 콜러블을
+    # **만들 때만** 풀어 주므로(`resolve_callables`), 부수효과가 있는 값은
+    # 이렇게 미뤄야 합니다.
+    question_obj, created = PendingQuestion.objects.get_or_create(
         run=run,
         defaults=dict(
             meeting_id=run.meeting_id,
@@ -94,9 +101,21 @@ def record(*, run, question: str, reason_message: str,
             target_user=run.user,
             title=_title_of(question),
             body=_body_of(question, reason_message, evidence or []),
-            chat_room_id=_answer_room_id(run.user, asker),
+            chat_room_id=lambda: _answer_room_id(run.user, asker),
         ),
     )
+
+    # 앞선 시도에서 방을 못 잡았으면 이번에 채웁니다.
+    #
+    # 방 준비는 실패해도 유보를 남기도록 돼 있어 `chat_room_id` 가 빈 채로
+    # 저장될 수 있습니다. 재시도에서 그냥 있는 행을 돌려주기만 하면 **답변 창이
+    # 영영 안 열립니다** — 채팅 쪽이 잠깐 흔들린 대가로 그 유보만 평생 못 답합니다.
+    if not created and question_obj.chat_room_id is None:
+        room_id = _answer_room_id(run.user, asker)
+        if room_id is not None:
+            question_obj.chat_room_id = room_id
+            question_obj.save(update_fields=["chat_room_id", "updated_at"])
+
     return question_obj
 
 
