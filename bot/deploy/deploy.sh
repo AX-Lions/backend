@@ -27,12 +27,20 @@ done
 
 # ── 1. 의존성 ────────────────────────────────────────────────
 log "의존성"
-# venv 안의 실행 스크립트는 shebang 에 절대 경로를 박아 둡니다. 프로젝트 폴더를
+# venv 안의 **스크립트**는 shebang 에 절대 경로를 박아 둡니다. 프로젝트 폴더를
 # 옮기면 그 경로가 사라져 systemd 가 203/EXEC 로 죽습니다 — 파일은 있는데
 # 인터프리터가 없어서라, 로그만 보면 원인이 헷갈립니다.
-# 백엔드에서 실제로 겪었고, 대회 측 서버로 옮길 때 또 겪을 일입니다.
-if [ -d .venv ] && ! .venv/bin/python -c 'import sys' >/dev/null 2>&1; then
-  echo "  venv 가 현재 경로와 어긋납니다 — 다시 만듭니다"
+#
+# 확인 대상이 `python` 이 아니라 `pip` 인 이유가 여기 있습니다.
+# `.venv/bin/python` 은 `python3` 로 가는 **상대 심볼릭 링크**라 폴더를 옮겨도
+# 그대로 삽니다. 실제로 옮겨 보면 이렇습니다.
+#
+#     .venv/bin/python  통과      ← 이걸 보면 문제를 못 잡습니다
+#     .venv/bin/pip     실패      ← shebang: #!/옛/경로/.venv/bin/python3
+#
+# 그래서 shebang 이 박힌 스크립트를 눌러야 합니다.
+if [ -d .venv ] && ! .venv/bin/pip --version >/dev/null 2>&1; then
+  echo "  venv 스크립트의 경로가 어긋납니다 — 다시 만듭니다"
   rm -rf .venv
 fi
 [ -d .venv ] || python3 -m venv .venv
@@ -50,12 +58,17 @@ else
 fi
 
 # ── 2. 임포트 점검 ───────────────────────────────────────────
-# 봇을 실제로 띄우기 전에 코드가 임포트되는지만 봅니다. 오타 하나로 죽는 것을
-# 여기서 잡으면, 게이트웨이에 붙었다 끊었다 하며 재시작을 반복하지 않습니다.
+# 봇을 띄우기 전에 코드가 실제로 임포트되는지 봅니다.
 #
-# main.py 를 직접 실행하면 봇이 뜨므로 컴파일만 합니다.
+# compileall 로는 부족합니다 — 문법만 보고 import 를 실행하지 않아서,
+# requirements.txt 에 없는 패키지를 import 해도 그대로 통과합니다. 정작 봇은
+# 기동하자마자 ModuleNotFoundError 로 죽고, 그건 배포가 끝난 뒤에 압니다.
+#
+# main.py 를 임포트하면 봇 객체까지 만들어지지만 `bot.run()` 은
+# `if __name__ == "__main__"` 아래라 실행되지 않습니다. 의존성과 cogs·services
+# 임포트가 전부 이 한 줄에 걸립니다.
 log "임포트 점검"
-.venv/bin/python -m compileall -q main.py cogs services utils >/dev/null
+.venv/bin/python -c "import main" >/dev/null
 echo "  통과"
 
 # ── 3. 재시작 ────────────────────────────────────────────────
