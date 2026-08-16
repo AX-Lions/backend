@@ -2,6 +2,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from services.backend import get_error
+
 class BordoCog(commands.Cog):
     def __init__(self, bot, backend):
         self.bot = bot
@@ -44,7 +46,7 @@ class BordoCog(commands.Cog):
 
         result = await self.backend.post("/internal/v1/teams/link", json=payload)
 
-        error = (result or {}).get("error")
+        error = get_error(result)
         if error:
             if error.get("code") == "TEAM_AMBIGUOUS":
                 teams = error.get("details", {}).get("teams", [])
@@ -60,7 +62,8 @@ class BordoCog(commands.Cog):
             )
             return
 
-        if result is None:
+        if not isinstance(result, dict):
+            # None(완전 실패)이거나, 2xx인데 JSON이 아닌 응답(비정상 상황) 둘 다 여기로 온다.
             await interaction.followup.send(
                 "팀 연결에 실패했습니다. 잠시 후 다시 시도해주세요.", ephemeral=True
             )
@@ -77,6 +80,16 @@ class BordoCog(commands.Cog):
     async def bordo_team(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         result = await self.backend.get("/internal/v1/teams/current", params={"discord_user_id": str(interaction.user.id)})
+
+        if result is None:
+            await interaction.followup.send("팀 조회에 실패했습니다. 잠시 후 다시 시도해주세요.", ephemeral=True)
+            return
+
+        error = get_error(result)
+        if error:
+            await interaction.followup.send(error.get("message", "팀 조회에 실패했습니다."), ephemeral=True)
+            return
+
         await interaction.followup.send(str(result), ephemeral=True)
 
     @app_commands.command(
