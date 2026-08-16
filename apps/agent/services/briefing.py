@@ -86,6 +86,92 @@ def _narrative(used: list[dict], deferred: list[dict], client=None) -> str:
     return (r.text or "").strip()
 
 
+def _node_user(node) -> str:
+    return str((node or {}).get("user_id") or "")
+
+
+def _addressed_to(edge, uid: str) -> bool:
+    """이 화살표가 나를 향하는가. `to_nodes` 가 비어 있으면 참여자 목록으로 봅니다."""
+    if any(_node_user(n) == uid for n in (edge.to_nodes or [])):
+        return True
+    return uid in [str(x) for x in (edge.participant_ids or [])]
+
+
+def _sync_cards(meeting, user):
+    """
+    `확인이 필요해요` · `나에게 요청한 내용` 카드를 맞춥니다.
+
+    `update_or_create` 로 갱신하되 `confirmed_at` · `accepted_at` 은 `defaults` 에
+    넣지 않습니다. **사람이 남긴 흔적만 살아남습니다** — 회의가 다시 종료 처리돼도
+    이미 확인한 카드가 되살아나지 않습니다.
+
+    내가 만든 화살표는 건너뜁니다. 내가 한 변경을 나에게 "확인하세요" 로 되돌려
+    주면 목록이 자기 발언으로 찹니다.
+
+    만들거나 갱신한 카드 수를 돌려줍니다 — 호출부가 "정말 아무것도 없는 회의"를
+    가려내는 데 씁니다.
+    """
+    from apps.meetings.models import (BriefingConfirmation, BriefingRequest,
+                                      FlowContentType, FlowEdge)
+
+    uid = str(user.id)
+    edges = list(FlowEdge.objects.filter(meeting=meeting).select_related("agenda"))
+    changed = {FlowContentType.CHANGE, FlowContentType.SCHEDULE}
+    made = 0
+
+    for e in edges:
+        if _node_user(e.from_node) == uid:
+            continue
+
+        if e.content_type in changed:
+            made += 1
+            BriefingConfirmation.objects.update_or_create(
+                meeting=meeting, user=user, source_key=f"edge:{e.id}",
+                defaults=dict(
+                    title=e.label[:200],
+                    # 화살표는 한 줄짜리 label 만 들고 있어, 본문은 안건 내용으로
+                    # 채웁니다. 플로우 엣지 생성기가 붙으면 더 나은 본문이 옵니다.
+                    body=(e.agenda.content if e.agenda_id else "") or "",
+                    edge=e, agenda=e.agenda, occurred_at=e.occurred_at),
+            )
+        elif e.content_type == FlowContentType.REQUEST and _addressed_to(e, uid):
+            made += 1
+            BriefingRequest.objects.update_or_create(
+                meeting=meeting, user=user, source_key=f"edge:{e.id}",
+                defaults=dict(
+                    title=e.label[:200],
+                    requester_name=(e.from_node or {}).get("name", ""),
+                    edge=e, occurred_at=e.occurred_at),
+            )
+
+    return made
+
+
+def _location_chips(meeting) -> list[dict]:
+    """
+    요약 아래 `정보 위치 칩`.
+
+    요약문을 읽고 곧바로 "그게 회의 어디였지" 로 건너뛰는 통로라, 개수만이 아니라
+    **눌렀을 때 포커싱할 화살표 id** 를 같이 실어 보냅니다. 없으면 클라이언트가
+    같은 조건으로 플로우를 한 번 더 불러야 합니다.
+
+    라벨은 `FlowContentType` 의 것을 그대로 씁니다 — 화면이 한국어를 하드코딩하면
+    종류가 늘어날 때 화면만 옛 이름으로 남습니다.
+    """
+    from apps.meetings.models import FlowContentType, FlowEdge
+
+    chips: dict[str, dict] = {}
+    for e in FlowEdge.objects.filter(meeting=meeting).only("id", "content_type"):
+        chip = chips.setdefault(e.content_type, {
+            "content_type": e.content_type,
+            "label": FlowContentType(e.content_type).label,
+            "count": 0, "edge_ids": [],
+        })
+        chip["count"] += 1
+        chip["edge_ids"].append(str(e.id))
+    return list(chips.values())
+
+
 @transaction.atomic
 def build_for_user(meeting, user, client=None):
     """
@@ -93,25 +179,43 @@ def build_for_user(meeting, user, client=None):
 
     이미 있으면 덮어씁니다 — 회의가 다시 종료 처리되는 경우가 있고, 그때 두 개가
     쌓이면 화면에 같은 브리핑이 두 번 뜹니다.
+
+    다만 **카드는 별도 테이블**이라 덮어쓰기에 휩쓸리지 않습니다. 카드까지 이
+    JSON 안에 뒀다면 재생성마다 사용자가 눌러 둔 확인이 리셋됐을 겁니다.
     """
     from apps.agent.models import AgentRun, AgentSettings
     from apps.meetings.models import AiBriefing
 
     runs = list(AgentRun.objects.filter(meeting=meeting, user=user)
                 .order_by("created_at"))
-    if not runs:
+    used, deferred = _answers_of(runs)
+
+    # 대리인이 한 번도 안 돌았어도 브리핑을 만듭니다. 자리를 비운 사람에게
+    # **"무엇이 바뀌었나" 는 "내 대리인이 뭐라 했나" 와 별개**입니다 — 아무도
+    # 질문을 안 던진 회의에서도 일정은 바뀝니다.
+    cards, chips = _sync_cards(meeting, user), _location_chips(meeting)
+
+    # 다만 정말 아무것도 없으면 만들지 않습니다. 빈 사이드바가 뜨면 사용자는
+    # 브리핑이 생성에 실패한 줄 압니다.
+    if not runs and not cards and not chips:
         return None
 
-    used, deferred = _answers_of(runs)
     version = (AgentSettings.objects.filter(user=user)
                .values_list("active_version", flat=True).first() or 1)
 
     briefing, _ = AiBriefing.objects.update_or_create(
         meeting=meeting, user=user,
         defaults=dict(narrative=_narrative(used, deferred, client),
+                      location_chips=chips,
                       used_answers=used, deferred_answers=deferred,
                       settings_version=version),
     )
+
+    # 회의가 끝난 뒤 무엇이 본인에게 전달됐는지 화면에 남깁니다. 이게 없으면
+    # "내가 없는 동안 무슨 일이 있었지" 의 마지막 칸이 비어 있습니다.
+    from . import flow
+    flow.briefing_delivered(meeting, principal=user)
+
     return briefing
 
 
