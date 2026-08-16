@@ -174,6 +174,11 @@ urlpatterns = [
     path(f"{INTERNAL}/discord/messages", discord_internal.discord_messages),
     path(f"{INTERNAL}/discord/presence", discord_internal.discord_presence),
 
+    # 발송함 — 서버가 쓰고 봇이 가져갑니다 (이슈 #52)
+    path(f"{INTERNAL}/outbox-events", discord_internal.outbox_events),
+    path(f"{INTERNAL}/outbox-events/<uuid:event_id>/ack", discord_internal.outbox_ack),
+    path(f"{INTERNAL}/outbox-events/<uuid:event_id>/fail", discord_internal.outbox_fail),
+
     # 봇이 아직 쓰는 옛 경로. 명세는 /meetings/start 입니다.
     # 봇이 옮겨 오면 지웁니다 — 지금 지우면 회의 시작이 통째로 막힙니다.
     path(f"{INTERNAL}/meetings", discord_internal.meeting_start),
