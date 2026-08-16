@@ -161,6 +161,21 @@ class PendingQuestion(UUIDModel, TimeStamped):
 
     class Meta:
         db_table = "pending_question"
+        constraints = [
+            # 한 실행은 유보 질문을 하나만 남깁니다.
+            #
+            # `deferral.record()` 가 "있는지 보고 없으면 넣는" 방식이라, 같은 run 에
+            # 대해 동시에 두 번 불리면 둘 다 "없다" 를 보고 둘 다 넣습니다.
+            # 그러면 사용자는 같은 질문에 두 번 답해야 합니다.
+            #
+            # 코드에서 막는 것과 DB 에서 막는 것은 다릅니다 — 앞의 것은 순서가
+            # 어긋나면 뚫리고, 뒤의 것은 안 뚫립니다.
+            #
+            # run 이 없는 행도 있습니다(시드, 삭제된 실행은 SET_NULL). 그쪽까지
+            # 하나로 묶으면 안 되므로 조건부 제약입니다.
+            models.UniqueConstraint(fields=["run"], condition=~models.Q(run=None),
+                                    name="uq_pending_question_run"),
+        ]
         indexes = [models.Index(fields=["target_user", "answered_at"]),
                    models.Index(fields=["meeting"])]
 
