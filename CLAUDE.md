@@ -454,7 +454,8 @@ main                 배포 기준
 | `REVISION` | 수정사항 | `CHANGE` 변동사항 | 화면 라벨과 중앙 요약표 헤더가 모두 `변동 사항` |
 | 브리핑 | narrative + used/deferred + needs_answer | **4섹션** + 정보 위치 칩 + 검색 | `확인이 필요해요` · `나에게 요청한 내용` 이 계약에 아예 없었습니다. **구현은 B 담당** — 명세만 고쳐 뒀습니다 |
 | 홈 인사 | 문구를 교체 | 문구는 두고 **버튼을 추가** | 이름으로 맞이하는 인사가 사라지면 첫 화면 인상이 바뀝니다 |
-| 최근 회의 카드 | `main_agendas` · `main_opinions` | `main_decisions` · `agent_summary` · `missed` | 화면이 묻는 건 "무엇을 다뤘나"가 아니라 "무엇이 정해졌나" |
+| 최근 회의 카드 | `main_agendas` · `main_opinions` | `main_decisions` · `zero_summary` · `missed` | 화면이 묻는 건 "무엇을 다뤘나"가 아니라 "무엇이 정해졌나" |
+| 화면에 찍히는 문자열 | 클라이언트가 ISO 를 포맷 | 서버가 완성해 내려줌 (`displayed_at` · `time_range` · `status` · `location` · `meta`) | 브라우저 시간대로 찍으면 같은 회의를 사람마다 다른 시각으로 봅니다 |
 | 대리인 호칭 | `AI 대리인` | **`{이름}의 Bordo`**, 화자일 때 **`Zero`** | `AI 대리인` 은 화면 어디에도 없는 낱말입니다 |
 
 `used_answers` / `deferred_answers` 는 화면에서 빠졌지만 **응답에는 남깁니다** —
@@ -501,16 +502,17 @@ A 가 발송함을 붙이면 그 이벤트를 받아 큐에 넣습니다. 페이
 ## 현재 상태
 
 명세는 오퍼레이션 **172개**(`bordo-openapi.yaml` `0.0.4`), `config/urls.py` 에 라우트
-**89개**가 등록돼 있습니다.
+**102개**가 등록돼 있습니다.
 
 | 상태 | 영역 |
 |---|---|
-| 동작함 | 인증 · 팀 · 프로젝트 · 홈 · 회의 CRUD · 플로우 조회 · 대리인 설정 · 채팅 · 현재 상태 · 태스크 · 캘린더 · 문서 |
-| **껍데기** | `ai-briefing` · `pending-questions` · 플로우 엣지 — **시드가 넣은 하드코딩. 생성 코드 없음**(B 담당) |
-| 미구현 | Discord 13 · WebSocket · MCP 1 · 동기화 4 |
+| 동작함 | 인증 · 팀 · 프로젝트 · 홈 · 회의 CRUD · 플로우(조회 **+ 생성**) · 대리인 설정 · 채팅 · 현재 상태 · 태스크 · 캘린더 · 문서 · Discord `/internal/v1` · WebSocket · 대리인 코어(ReAct · POLICY · 유보 · 브리핑) |
+| 미구현 | MCP(`/mcp`) · 동기화 4 · `Idempotency-Key` · 문서 임베딩 검색 · `DailyChatSummary` 생성기 |
 
-> 껍데기 3종은 API 가 응답하므로 동작하는 것처럼 보입니다. 특히 **플로우 엣지는 핵심
-> 화면 2개 중 하나의 데이터원**입니다.
+> **껍데기 3종은 없어졌습니다.** `ai-briefing` · `pending-questions` · 플로우 엣지 모두
+> 생성 코드가 붙었습니다 — 시드 없이 새 회의를 열어도 화면이 채워집니다.
+> 플로우 진하기는 **회의가 끝날 때** 채워진다는 점만 기억하십시오
+> (`flow.recompute_for_meeting()`). 진행 중에는 전부 1.0 입니다.
 
 ---
 
@@ -531,10 +533,14 @@ A 가 발송함을 붙이면 그 이벤트를 받아 큐에 넣습니다. 페이
 
 ## 다음 작업 (우선순위)
 
-1. 회의 시작·종료 `/internal/v1/meetings/start|end` — Discord Bot 이 호출
-2. Discord 자연어 제어 `/internal/v1/discord/commands` + 스킬 실행
-3. WebSocket `/ws/projects/{project_id}` — Channels. `publish()` 호출부는 안 바뀝니다
-4. AI 대리인 코어 — `services/llm.py` · `react.py` · `policy.py` · `briefing.py` · `tasks.py`
-5. Celery + Redis
-6. `meetings/0002` 후속 — 플로우 내용 종류가 6종이 됐으므로 `FlowEdge` 생성 코드가
-   새 종류(`일정` · `결론` · `기타`)를 따라와야 합니다 (B 담당)
+**1차 범위는 끝났습니다.** 아래는 남은 구멍과 2차 범위입니다.
+
+1. `masked_secrets` 가 제목만 PATCH 해도 초기화됩니다 (이슈 #7, D 담당)
+2. 유보가 `기타`(`ETC`) 로 들어갑니다. 화면 필터 6종에 `유보` 칸이 없어서인데,
+   디자인에 칸이 생기면 종류를 나누는 게 맞습니다
+3. `FlowEdge` 의 `agenda` · `document` 연결이 비어 있습니다. 안건 자동 매칭이 붙으면
+   좌측 인덱스에서 화살표로 점프할 수 있습니다
+4. `DailyChatSummary` 생성기 (B 담당)
+5. `Idempotency-Key` — 지금은 도메인 멱등 키로만 막고 있습니다 (아래 「알려진 미구현」)
+6. MCP(`/mcp`) · 동기화 4 — **2차 범위**
+7. 문서 임베딩 검색 — 2차. 지금은 `icontains` 입니다
