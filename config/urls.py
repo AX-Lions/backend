@@ -82,6 +82,8 @@ urlpatterns = [
     path(f"{API}/meetings/<uuid:meeting_id>/agendas/<uuid:agenda_id>",
          meetings.agenda_detail),
     path(f"{API}/flow-edges/<uuid:edge_id>", meetings.flow_edge_detail),
+    # AI 조회 4단 상세 (이슈 #56)
+    path(f"{API}/agent-lookups/<uuid:lookup_id>", agent.agent_lookup_detail),
     path(f"{API}/me/flow-filters", meetings.flow_filters),
     path(f"{API}/me/flow-filters/<uuid:preset_id>", meetings.flow_filter_detail),
 

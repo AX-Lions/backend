@@ -162,3 +162,40 @@ def answer_question(request, question_id):
     q.answered_at = timezone.now()
     q.save(update_fields=["answer_body", "answered_at", "updated_at"])
     return Response({"question_id": str(q.id), "answered_at": q.answered_at})
+
+
+@api_view(["GET"])
+def agent_lookup_detail(request, lookup_id):
+    """
+    `AI 조회` 화살표를 눌렀을 때 뜨는 4단 상세.
+
+    조회 이유 → 질문 → 확인된 내용 → 출처·시각.
+
+    프로젝트 참여자만 봅니다. 조회한 쪽·받은 쪽만으로 좁히지 않는 이유는,
+    작업 플로우가 **팀 관점 화면**이라 남의 조회 화살표도 눌러 볼 수 있어야
+    하기 때문입니다.
+    """
+    from apps.common.permissions import project_membership
+
+    from .models import AgentLookup
+
+    row = (AgentLookup.objects.filter(pk=lookup_id)
+           .select_related("asker", "target").first())
+    if row is None:
+        raise BordoError("STATE_NOT_FOUND", "조회 기록을 찾을 수 없습니다.")
+    project_membership(request.user, row.project_id)
+
+    return Response({
+        "id": str(row.id),
+        "topic": row.topic,
+        "asker": {"user_id": str(row.asker_id), "name": f"{row.asker.name}의 Bordo"},
+        "target": {"user_id": str(row.target_id), "name": f"{row.target.name}의 Bordo"},
+        "reason": row.reason,
+        "question": row.question,
+        # 유보하면 빕니다. 화면은 "확인된 내용" 자리를 비워 두고 안내를 띄웁니다.
+        "answer": row.answer,
+        "answered": bool(row.answer),
+        "source": row.source or None,
+        "edge_id": str(row.edge_id) if row.edge_id else None,
+        "occurred_at": row.occurred_at,
+    })
