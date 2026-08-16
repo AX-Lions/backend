@@ -24,6 +24,13 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64, bordo-discord]
     timeout-minutes: 15
 
+    # workflow_dispatch 에는 브랜치 제한이 없습니다.
+    #
+    # 재배포하려고 눌렀는데 실행 화면에서 브랜치를 잘못 고르면, develop 이나
+    # 작업 중 브랜치가 **리뷰도 머지도 없이 그대로 서버에 올라갑니다.**
+    # 배포 기준은 main 하나뿐이므로 여기서 못을 박습니다.
+    if: github.ref == 'refs/heads/main'
+
     steps:
       # actions/checkout 을 쓰지 않습니다. 러너 작업공간에 받아서 옮기는 대신
       # 봇이 실제로 도는 디렉터리를 직접 갱신합니다. 사본이 둘이면
