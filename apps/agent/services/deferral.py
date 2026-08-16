@@ -89,4 +89,35 @@ def record(*, run, question: str, reason_message: str,
         target_user=run.user,
         title=_title_of(question),
         body=_body_of(question, reason_message, evidence or []),
+        chat_room_id=_answer_room_id(run.user, asker),
     )
+
+
+def _answer_room_id(owner, asker):
+    """
+    답변을 쓸 방을 미리 잡아 둡니다.
+
+    화면에서 유보 질문을 누르면 **그 자리에서 답변 창이 열립니다.** 방 id 가 없으면
+    클릭한 뒤에야 방을 만들게 되고, 그 사이 왕복 한 번이 더 생깁니다. 무엇보다
+    만들다 실패하면 사용자는 "답변하기가 안 눌린다"만 보게 됩니다.
+
+    질문한 사람이 있으면 그 사람과의 `PEER_AGENT` 방입니다 — 남이 내 대리인에게
+    물은 것이라 대화의 상대가 정해져 있습니다. 질문자가 없으면(시스템 유보) 본인의
+    AI 방으로 보냅니다.
+    """
+    from apps.chat.models import ChatRoom, RoomMember, RoomType
+    from apps.chat.services import ensure_ai_room, peer_agent_key
+
+    if asker is None or asker.id == owner.id:
+        return ensure_ai_room(owner).id
+
+    key = peer_agent_key(asker.id, owner.id)
+    room = ChatRoom.all_objects.filter(type=RoomType.PEER_AGENT, dedupe_key=key).first()
+    if room is None:
+        room = ChatRoom.objects.create(type=RoomType.PEER_AGENT, dedupe_key=key,
+                                       agent_owner=owner, created_by=owner)
+    # 양쪽을 다 넣습니다. 질문한 사람만 넣으면 정작 답할 사람의 목록에 방이
+    # 안 뜹니다.
+    for u in (asker, owner):
+        RoomMember.objects.get_or_create(room=room, user=u)
+    return room.id

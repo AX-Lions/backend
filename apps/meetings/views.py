@@ -13,17 +13,22 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from apps.agent.models import PendingQuestion
+from apps.common.display import day_label, user_tz
+from apps.common.events import publish
 from apps.common.permissions import meeting_access, project_membership
 from apps.common.views import listing
 from config.errors import BordoError
 
-from .models import (Agenda, AiBriefing, Attendance, FlowCategory, FlowContentType,
-                     FlowEdge, FlowFilterPreset, Meeting, MeetingDocumentRef,
+from .models import (Agenda, AiBriefing, Attendance, BriefingConfirmation,
+                     BriefingRequest, FlowCategory, FlowContentType, FlowEdge,
+                     FlowFilterPreset, Meeting, MeetingDocumentRef,
                      MeetingParticipant, MeetingStatus, MeetingSummary, Surface,
                      Utterance)
-from .serializers import (AgendaSerializer, AiBriefingSerializer, DocumentRefSerializer,
-                          FlowEdgeSerializer, FlowFilterPresetSerializer,
-                          MeetingSerializer, MeetingSummarySerializer, UtteranceSerializer)
+from .serializers import (AgendaSerializer, AiBriefingSerializer,
+                          BriefingConfirmationSerializer, BriefingRequestSerializer,
+                          DocumentRefSerializer, FlowEdgeSerializer,
+                          FlowFilterPresetSerializer, MeetingSerializer,
+                          MeetingSummarySerializer, UtteranceSerializer)
 
 WORK_TYPES = {FlowContentType.DOCUMENT, FlowContentType.PLAN}
 MEETING_TYPES = {FlowContentType.OPINION, FlowContentType.REQUEST,
@@ -247,10 +252,10 @@ def flow(request, meeting_id):
     present = {e.content_type for e in edges}
     return Response({
         "meeting_id": str(meeting.id),
-        # `%-m` 은 glibc 확장이라 Windows 에서 ValueError 로 터집니다. 배포 서버는
-        # 리눅스지만 프론트 담당이 로컬에서 이 화면을 열면 500 을 받습니다.
-        "meeting_label": (f"{meeting.scheduled_at.month}/{meeting.scheduled_at.day} "
-                          f"{meeting.title}"),
+        # `%-m` 은 glibc 확장이라 Windows 개발 환경에서 ValueError 로 죽습니다.
+        # 서버에서는 돌고 개발자 PC 에서만 500 이 나 원인을 찾기 어렵습니다.
+        "meeting_label": f"{day_label(meeting.scheduled_at, user_tz(request.user))} "
+                         f"{meeting.title}",
         "category": cat,
         "nodes": nodes,
         "arrows": _arrows(edges),
@@ -379,15 +384,90 @@ def ai_briefing(request, meeting_id):
         raise BordoError("STATE_NOT_FOUND", "아직 브리핑이 준비되지 않았습니다.")
     questions = PendingQuestion.objects.filter(meeting=meeting, target_user=request.user,
                                                answered_at__isnull=True)
+    tz = user_tz(request.user)
     needs = [{"question_id": str(q.id), "asker_name": q.asker_name, "title": q.title,
               "body": q.body, "asked_at": q.created_at,
+              # 화면은 `임수연 · 14:32` 한 줄입니다. 시각 환산을 클라이언트에
+              # 맡기면 시간대가 다른 팀원끼리 같은 질문을 다른 시각으로 봅니다.
+              "meta": f"{q.asker_name} · {q.created_at.astimezone(tz):%H:%M}",
               "chat_room_id": str(q.chat_room_id) if q.chat_room_id else None}
              for q in questions]
+
+    confirmations = BriefingConfirmation.objects.filter(meeting=meeting,
+                                                        user=request.user,
+                                                        confirmed_at__isnull=True)
+    requests_to_me = BriefingRequest.objects.filter(meeting=meeting, user=request.user,
+                                                    accepted_at__isnull=True)
+
     if briefing.read_at is None:
         briefing.read_at = timezone.now()
         briefing.save(update_fields=["read_at"])
-    return Response(AiBriefingSerializer(
-        briefing, context={"needs_answer": needs}).data)
+    return Response(AiBriefingSerializer(briefing, context={
+        "needs_answer": needs,
+        "needs_confirmation": BriefingConfirmationSerializer(confirmations, many=True).data,
+        "requests_to_me": BriefingRequestSerializer(requests_to_me, many=True).data,
+    }).data)
+
+
+@api_view(["POST"])
+def briefing_confirmation_confirm(request, confirmation_id):
+    """
+    `확인이 필요해요` 카드를 확인 처리합니다. 목록에서 빠집니다.
+
+    **본인 것만 처리합니다.** 같은 변경을 여러 사람이 봐야 하는데 한 사람이
+    눌렀다고 전부 사라지면, 아직 못 본 사람은 그 변경을 영영 모르고 지나갑니다.
+    남의 카드를 지목하면 403 이 아니라 404 입니다 — 403 은 "그런 게 있긴 하다"를
+    흘립니다.
+    """
+    card = BriefingConfirmation.objects.filter(pk=confirmation_id,
+                                               user=request.user).first()
+    if card is None:
+        raise BordoError("STATE_NOT_FOUND", "확인할 항목을 찾을 수 없습니다.")
+
+    if card.confirmed_at is None:
+        card.confirmed_at = timezone.now()
+        card.save(update_fields=["confirmed_at", "updated_at"])
+    return Response({"confirmation_id": str(card.id), "confirmed_at": card.confirmed_at})
+
+
+@api_view(["POST"])
+def briefing_request_accept(request, request_id):
+    """
+    `나에게 요청한 내용` 을 태스크로 받습니다.
+
+    **`TODO` 로 시작합니다.** 사람이 직접 눌러서 받은 것이라 승인 단계가 필요
+    없습니다. 여기서 `PENDING_APPROVAL` 을 만들면 승인 큐가 남의 회의 요청으로
+    가득 차 승인이라는 행위가 뜻을 잃습니다.
+    """
+    from apps.tasks.models import Task, TaskStatus
+
+    card = BriefingRequest.objects.filter(pk=request_id, user=request.user).first()
+    if card is None:
+        raise BordoError("STATE_NOT_FOUND", "요청을 찾을 수 없습니다.")
+
+    # 두 번 눌러도 태스크가 둘 생기지 않습니다. 목록에서 사라지기 전에 연타하는
+    # 경우가 실제로 있습니다.
+    if card.task_id:
+        return Response({"request_id": str(card.id),
+                         "task": {"id": str(card.task_id), "status": card.task.status}})
+
+    with transaction.atomic():
+        task = Task.objects.create(
+            project_id=card.meeting.project_id,
+            title=card.title[:200],
+            description=card.note,
+            status=TaskStatus.TODO,
+            assignee=request.user,
+            created_by=request.user,
+            source_meeting_id=card.meeting_id,
+        )
+        card.task = task
+        card.accepted_at = timezone.now()
+        card.save(update_fields=["task", "accepted_at", "updated_at"])
+
+    publish(card.meeting.project_id, "task.created", {"task_id": str(task.id)})
+    return Response({"request_id": str(card.id),
+                     "task": {"id": str(task.id), "status": task.status}})
 
 
 @api_view(["GET"])
