@@ -74,6 +74,19 @@ fi
 # 유닛 파일이 바뀌어도 ExecStart 를 다시 읽지 않습니다 — 백엔드에서 이것 때문에
 # WSGI 가 계속 돌아 500 이 났습니다.
 SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+
+# restart 전에 reset-failed 를 먼저 부릅니다.
+#
+# 유닛에 StartLimitBurst=5 / StartLimitIntervalSec=300 이 걸려 있습니다. 나쁜
+# 배포가 5분에 5번 넘게 죽으면 유닛이 `failed (start-limit-hit)` 로 굳고,
+# **그 상태에서는 restart 가 아예 안 먹습니다.**
+#
+# 하필 그때가 롤백해야 할 때입니다. 롤백도 이 스크립트를 다시 부르므로,
+# reset-failed 가 없으면 롤백까지 같이 실패하고 사람이 서버에 들어가야 합니다.
+# 재시작 상한을 실제로 걸어 둔 것이 롤백을 막는 셈이 됩니다.
+#
+# 정상 상태에서 불러도 아무 일도 하지 않아 항상 부릅니다.
+sudo systemctl reset-failed bordo-discord 2>/dev/null || true
 sudo systemctl restart bordo-discord
 
 # ── 4. 실제로 Discord 에 붙었는지 ────────────────────────────
