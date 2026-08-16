@@ -164,22 +164,43 @@ class AnswerFlowTest(Base):
 
 
 class DeferFlowTest(Base):
+    """
+    유보는 **플로우에 그리지 않습니다.**
 
-    def test_defer_is_not_the_same_kind_as_an_answer(self):
-        """
-        화면에서 "답했다" 와 "확인이 필요하다" 가 같은 색으로 보이면,
-        유보를 보여 주는 의미가 사라집니다.
-        """
-        self._run(FakeLLM(LLMResponse(text="STATUS"),
-                          LLMResponse(text="아마 곧 끝날 겁니다")))
-        e = FlowEdge.objects.get(label="본인 확인 필요")
-        self.assertEqual(e.content_type, FlowContentType.ETC)
-        self.assertNotEqual(e.content_type, FlowContentType.OPINION)
+    필터로 걸러 보는 것이 아니라 사용자가 반드시 답해야 하는 일이라, 필터 축이
+    아니라 알림 축에 있습니다(2026-08-17 디자인 확인). `PendingQuestion` 과
+    브리핑의 `답변이 필요해요` 로 이미 사용자에게 갑니다.
+    """
 
-    def test_defer_still_draws_the_question(self):
-        self._run(FakeLLM(LLMResponse(text="STATUS"),
-                          LLMResponse(text="아마 곧 끝날 겁니다")))
-        self.assertEqual(self._labels(), ["사전 지시", "질문", "본인 확인 필요"])
+    def _defer(self):
+        return self._run(FakeLLM(LLMResponse(text="STATUS"),
+                                 LLMResponse(text="아마 곧 끝날 겁니다")))
+
+    def test_defer_draws_no_arrow(self):
+        """
+        한동안 `기타`(ETC) 로 그렸는데 잘못이었습니다. `기타` 체크를 끈 사람에게는
+        안 보이고, 켠 사람에게도 다른 화살표와 같은 무게로 섞입니다.
+        """
+        self._defer()
+        self.assertEqual(
+            FlowEdge.objects.filter(label="본인 확인 필요").count(), 0)
+        self.assertEqual(
+            FlowEdge.objects.filter(content_type=FlowContentType.ETC).count(), 0)
+
+    def test_the_question_arrow_still_remains(self):
+        """
+        답을 못 했더라도 **질문이 저 사람에게 갔다는 사실은 남아야 합니다.**
+        답이 없는 것과 질문이 닿지도 않은 것은 전혀 다른 이야기입니다.
+        """
+        self._defer()
+        self.assertEqual(self._labels(), ["사전 지시", "질문"])
+
+    def test_the_deferral_itself_is_still_recorded(self):
+        """화살표를 안 그릴 뿐, 유보가 사라지면 안 됩니다."""
+        from apps.agent.models import PendingQuestion
+
+        self._defer()
+        self.assertEqual(PendingQuestion.objects.count(), 1)
 
 
 class NoiseTest(Base):

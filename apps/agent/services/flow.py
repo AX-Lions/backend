@@ -231,14 +231,26 @@ def deferred(meeting, *, principal, asker, surface=Surface.DISCORD):
     """
     회의 중 — 유보했습니다.
 
-    **답변과 다른 content_type 을 씁니다.** 화면에서 "답했다" 와 "확인이 필요하다" 가
-    같은 색으로 보이면, 유보를 보여주는 의미가 사라집니다.
+    ## 화살표를 그리지 않습니다
+
+    한동안 `기타`(ETC) 로 그렸는데 **잘못이었습니다.**
+
+    유보는 필터로 걸러 보는 것이 아니라 **사용자가 반드시 답해야 하는 일**입니다.
+    필터 축에 넣으면 `기타` 체크를 끈 사람에게는 안 보이고, 켠 사람에게도
+    다른 화살표들과 같은 무게로 섞입니다. 둘 다 "답해야 한다" 와 어긋납니다.
+
+        필터 축   의견 · 요청사항 · 변동사항 · 일정 · 결론 · 기타
+        알림 축   유보 질문 ← 여기
+
+    (2026-08-17 디자인 확인. 필터 6칸에 `유보` 가 없는 것은 누락이 아니라 의도입니다.)
+
+    유보 자체는 `PendingQuestion` 으로 이미 남고, 브리핑의 `답변이 필요해요`
+    섹션과 알림으로 사용자에게 갑니다. **플로우에 한 번 더 그릴 이유가 없습니다.**
+
+    함수를 지우지 않고 남겨 둔 이유는, 유보가 났다는 사실을 플로우에서도 보여줄
+    자리가 생기면(디자인 논의 중) 여기만 고치면 되기 때문입니다.
     """
-    return record(meeting,
-                  from_node=agent_node(principal),
-                  to_nodes=[user_node(asker)] if asker else [server_node()],
-                  label="본인 확인 필요", content_type=FlowContentType.ETC,
-                  surface=surface)
+    return None
 
 
 def artifact_proposed(meeting, *, principal, kind: str, title: str):
