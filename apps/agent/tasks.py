@@ -56,7 +56,7 @@ def run_agent_for_utterance(utterance_id: str) -> None:
     flow.delegate_prompt_given(utterance.meeting, target.user,
                                target.delegate_prompt or "")
     flow.question_routed(utterance.meeting, asker=utterance.participant,
-                         target=target.user)
+                         target=target.user, question=utterance.body)
 
     try:
         outcome = react.run(
@@ -120,7 +120,8 @@ def _record_flow(outcome, utterance, principal) -> None:
         if not audience and utterance.participant:
             # 참석 상태가 아직 안 들어온 회의도 있습니다. 최소한 질문자에게는 그립니다.
             audience = [utterance.participant]
-        flow.answered(utterance.meeting, principal=principal, audience=audience)
+        flow.answered(utterance.meeting, principal=principal, audience=audience,
+                      question=utterance.body)
     except Exception:                                          # noqa: BLE001
         logger.exception("플로우 기록 실패 run=%s", getattr(outcome.run, "id", None))
 
