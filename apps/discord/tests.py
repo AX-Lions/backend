@@ -503,3 +503,162 @@ class TokenDefaultTest(TestCase):
         import os
         self.assertEqual(settings.BORDO["SERVICE_TOKEN"],
                          os.environ.get("BORDO_SERVICE_TOKEN", ""))
+
+
+class OutboxTest(Base):
+    """
+    발송함 — 서버가 쓰고 봇이 가져갑니다.
+
+    이 세 엔드포인트가 없어서 대리인 답변이 Discord 에 한 글자도 안 나갔습니다(#52).
+    여기서 보는 것은 **같은 것을 두 번 내보내지 않는가** 하나입니다. 회의에 같은
+    말이 두 번 올라가면 대리인을 믿을 수 없게 됩니다.
+    """
+
+    def _event(self, key="k1", **kw):
+        from apps.agent.models import OutboxEvent
+        return OutboxEvent.objects.create(
+            team=self.team, idempotency_key=key,
+            kind=OutboxEvent.Kind.MESSAGE, channel_id="ch-1",
+            payload={"body": "진행 중입니다.", "is_agent": True}, **kw)
+
+    def test_pending_events_are_handed_out(self):
+        self._event()
+        r = self.get("/outbox-events")
+        self.assertEqual(r.status_code, 200)
+        rows = r.json()["results"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["channel_id"], "ch-1")
+        self.assertEqual(rows[0]["payload"]["body"], "진행 중입니다.")
+
+    def test_the_next_poll_does_not_see_what_was_just_handed_out(self):
+        """
+        가져간 것은 잠시 안 보여야 합니다. 봇이 게시하는 동안(ACK 전) 다음 폴링이
+        같은 행을 또 집어 가면 회의에 같은 말이 두 번 올라갑니다.
+
+        **여기서 보는 것은 가시성 타임아웃뿐입니다.** 같은 순간 겹치는 요청을
+        막는 `select_for_update` 는 SQLite 에서 조용히 무시되고 테스트 클라이언트도
+        순차 실행이라, 이 테스트로는 증명되지 않습니다.
+        """
+        self._event()
+        first = self.get("/outbox-events").json()["results"]
+        second = self.get("/outbox-events").json()["results"]
+        self.assertEqual(len(first), 1)
+        self.assertEqual(second, [], "같은 이벤트가 두 번 나갔습니다")
+
+    def test_it_comes_back_if_the_bot_dies(self):
+        """
+        가시성 타임아웃이 지나면 다시 보여야 합니다. 봇이 게시 도중 죽었을 때
+        영영 안 나가면 사용자는 대리인이 말한 줄 알고 기다립니다.
+        """
+        from datetime import timedelta
+
+        from apps.agent.models import OutboxEvent
+        from apps.discord.views import VISIBILITY_TIMEOUT_SEC
+
+        e = self._event()
+        self.get("/outbox-events")
+
+        # 타임아웃이 지난 상황을 만듭니다.
+        OutboxEvent.objects.filter(pk=e.pk).update(
+            available_at=timezone.now() - timedelta(seconds=VISIBILITY_TIMEOUT_SEC + 1))
+        self.assertEqual(len(self.get("/outbox-events").json()["results"]), 1)
+
+    def test_ack_marks_it_sent(self):
+        e = self._event()
+        r = self.post(f"/outbox-events/{e.id}/ack")
+        self.assertEqual(r.status_code, 200)
+        e.refresh_from_db()
+        self.assertEqual(e.status, e.Status.SENT)
+        self.assertIsNotNone(e.sent_at)
+
+    def test_ack_twice_is_safe(self):
+        """
+        봇이 게시하고 ACK 에서 네트워크가 끊기면 다시 시도합니다. 그때 오류를
+        돌려주면 봇은 실패로 알고 **또 게시합니다.**
+        """
+        e = self._event()
+        self.post(f"/outbox-events/{e.id}/ack")
+        sent_at = e.__class__.objects.get(pk=e.pk).sent_at
+        r = self.post(f"/outbox-events/{e.id}/ack")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(e.__class__.objects.get(pk=e.pk).sent_at, sent_at)
+
+    def test_fail_backs_off_and_returns_to_pending(self):
+        e = self._event()
+        self.get("/outbox-events")          # 봇이 가져감 = 시도 1회
+        r = self.post(f"/outbox-events/{e.id}/fail", {"error": "채널 없음"})
+        self.assertEqual(r.status_code, 200)
+        e.refresh_from_db()
+        self.assertEqual(e.status, e.Status.PENDING)
+        self.assertEqual(e.attempts, 1)
+        self.assertGreater(e.available_at, timezone.now())
+        self.assertIn("채널 없음", e.last_error)
+
+    def _drain_once(self, e):
+        """봇 한 바퀴: 가져가고 → 실패 보고 → 백오프를 지난 것으로 만든다."""
+        from apps.agent.models import OutboxEvent
+        self.get("/outbox-events")
+        self.post(f"/outbox-events/{e.id}/fail", {"error": "x"})
+        OutboxEvent.objects.filter(pk=e.pk).update(available_at=timezone.now())
+
+    def test_repeated_failure_ends_in_dead(self):
+        """
+        무한 재시도는 같은 오류를 반복하고, 그냥 버리면 사용자는 대리인이 말한
+        줄 알고 있습니다. 상한을 넘기면 사람이 보도록 DEAD 로 둡니다.
+        """
+        e = self._event(max_attempts=2)
+        self._drain_once(e)
+        self._drain_once(e)
+        e.refresh_from_db()
+        self.assertEqual(e.status, e.Status.DEAD)
+
+    def test_a_bot_that_keeps_crashing_still_reaches_dead(self):
+        """
+        가져가기만 하고 아무 보고도 없이 죽는 봇이 가장 위험합니다.
+
+        실패했을 때만 횟수를 세면 이 경우를 영영 못 셉니다 — 타임아웃이 지나
+        다시 보이고, 또 가져가고, 또 죽고를 **무한히 반복하면서 DEAD 에는 절대
+        도달하지 않습니다.** 하필 그 상황이 사람이 봐야 하는 상황입니다.
+        """
+        from apps.agent.models import OutboxEvent
+
+        e = self._event(max_attempts=2)
+        for _ in range(4):
+            self.get("/outbox-events")      # 가져가고 아무 보고 없이 죽음
+            OutboxEvent.objects.filter(pk=e.pk).update(available_at=timezone.now())
+
+        e.refresh_from_db()
+        self.assertEqual(e.status, e.Status.DEAD, "영원히 재시도되고 있습니다")
+        self.assertEqual(self.get("/outbox-events").json()["results"], [])
+
+    def test_dead_events_are_not_handed_out(self):
+        from apps.agent.models import OutboxEvent
+        self._event(status=OutboxEvent.Status.DEAD)
+        self.assertEqual(self.get("/outbox-events").json()["results"], [])
+
+    def test_fail_after_ack_does_not_resurrect(self):
+        """
+        봇이 ACK 한 뒤 늦게 도착한 fail 이 발송된 것을 되살리면, 이미 회의에
+        올라간 말을 한 번 더 올립니다.
+        """
+        e = self._event()
+        self.post(f"/outbox-events/{e.id}/ack")
+        self.post(f"/outbox-events/{e.id}/fail", {"error": "늦게 온 실패"})
+        e.refresh_from_db()
+        self.assertEqual(e.status, e.Status.SENT)
+
+    def test_limit_is_bounded(self):
+        for i in range(5):
+            self._event(key=f"k{i}")
+        self.assertEqual(len(self.get("/outbox-events", {"limit": 2}).json()["results"]), 2)
+
+    def test_service_token_is_required(self):
+        self._event()
+        r = self.get("/outbox-events", token=None)
+        self.assertEqual(r.status_code, 401)
+
+    def test_unknown_event_is_404_shaped(self):
+        import uuid
+        r = self.post(f"/outbox-events/{uuid.uuid4()}/ack")
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(r.json()["error"]["code"], "STATE_NOT_FOUND")

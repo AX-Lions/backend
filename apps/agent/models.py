@@ -265,14 +265,36 @@ class OutboxEvent(UUIDModel, TimeStamped):
         self.last_error = ""
         self.save(update_fields=["status", "sent_at", "last_error", "updated_at"])
 
+    def mark_handed_out(self) -> bool:
+        """
+        봇이 가져갔습니다. **가져간 것 자체가 한 번의 시도입니다.**
+
+        시도 횟수를 `mark_failed()` 에서만 세면, 봇이 게시하다 그냥 죽는 경우를
+        영영 못 셉니다. 가시성 타임아웃이 지나 다시 보이고, 또 가져가고, 또
+        죽고를 **무한히 반복하면서 `DEAD` 에는 절대 도달하지 않습니다.**
+        하필 그 상황이 사람이 봐야 하는 상황입니다.
+
+        상한을 넘겼으면 `DEAD` 로 두고 `False` 를 돌려줍니다 — 내보내지 마십시오.
+        """
+        self.attempts += 1
+        if self.attempts > self.max_attempts:
+            self.status = self.Status.DEAD
+            self.save(update_fields=["attempts", "status", "updated_at"])
+            return False
+        self.save(update_fields=["attempts", "updated_at"])
+        return True
+
     def mark_failed(self, error: str = ""):
         """
         재시도 간격을 지수로 늘립니다.
 
         같은 간격으로 반복하면 Discord 가 잠시 불안정할 때 재시도가 몰려
         상황을 더 나쁘게 만듭니다.
+
+        **횟수는 여기서 세지 않습니다.** 가져갈 때(`mark_handed_out`) 이미 셌고,
+        실패는 그 시도의 결과일 뿐입니다. 여기서 또 세면 한 번의 시도가 두 번으로
+        기록돼 상한이 절반으로 줄어듭니다.
         """
-        self.attempts += 1
         self.last_error = (error or "")[:2000]
         if self.attempts >= self.max_attempts:
             self.status = self.Status.DEAD

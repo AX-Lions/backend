@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from datetime import timedelta
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -31,12 +32,19 @@ from rest_framework.decorators import api_view, authentication_classes, permissi
 from rest_framework.response import Response
 
 from apps.common.parsing import parse_dt
+from apps.common.views import listing
 from config.errors import BordoError
 
 from .auth import service_token_required
 from .models import GuildLink, LinkCode
 
 logger = logging.getLogger("bordo.discord")
+
+#: 봇이 가져간 뒤 이 시간 동안은 다시 안 보입니다.
+#:
+#: 게시에 걸리는 시간보다 넉넉해야 같은 것이 두 번 나가지 않고, 봇이 죽었을 때
+#: 다시 잡히는 시간보다는 짧아야 합니다. Discord 게시는 보통 1초 안입니다.
+VISIBILITY_TIMEOUT_SEC = 60
 
 def internal(methods):
     """`@api_view` + 인증 해제 + 서비스 토큰 검사를 한 번에."""
@@ -481,3 +489,129 @@ def deputy_ask(request):
         "reason": outcome.reason,
         "body": outcome.text,
     }, status=200 if outcome.answered else 202)
+
+
+# ═══════════════════════════════════════════ 발송함 (Outbox)
+#
+# 서버가 쓰고 봇이 가져갑니다.
+#
+# 대리인은 Discord 를 직접 부르지 않습니다. `OutboxEvent` 에 행 하나만 남기고
+# 여기서 봇이 꺼내 갑니다 — 요청 트랜잭션 안에서 외부를 부르면 롤백돼도
+# 메시지는 이미 나가 있기 때문입니다.
+#
+# 이 세 엔드포인트가 없어서 큐가 쌓이기만 하고 Discord 에는 한 글자도
+# 나가지 않았습니다(이슈 #52).
+
+
+@internal(["GET"])
+def outbox_events(request):
+    """
+    보낼 것을 가져갑니다.
+
+    ## 같은 것을 두 번 내보내지 않는다
+
+    두 겹으로 막습니다.
+
+    `select_for_update(skip_locked=True)` 는 **같은 순간** 두 요청이 겹치는 것을
+    막습니다. 잠긴 행은 기다리지 않고 건너뜁니다.
+
+    다만 이 잠금은 **PostgreSQL 에서만 실제로 걸립니다.** SQLite 는
+    `has_select_for_update = False` 라 Django 가 오류 없이 조용히 무시합니다.
+    개발용 SQLite 에서는 이 겹이 없는 셈이니, 동시성 문제를 여기서 재현하려
+    하지 마십시오. 운영은 PostgreSQL 전제입니다.
+
+    그것만으로는 부족합니다. 잠금은 트랜잭션이 끝나면 풀리므로, 봇이 게시하는
+    동안(ACK 전) 다음 폴링이 들어오면 같은 행을 또 집어 갑니다. 그래서 가져간
+    것의 `available_at` 을 **잠시 앞으로 밀어 둡니다.**
+
+        가져감 → available_at 을 60초 뒤로 → 그 사이에는 조회에 안 걸림
+        ACK    → SENT
+        실패    → mark_failed() 가 자기 백오프로 다시 잡음
+        봇이 죽음 → 60초 뒤 다시 보임 (잃어버리지 않음)
+
+    상태를 하나 더 만들지 않은 이유가 이것입니다. `SENDING` 을 두면 봇이 그 상태로
+    죽었을 때 **아무도 되돌리지 못해 영원히 멈춥니다.** 시각을 미는 방식은 저절로
+    풀립니다.
+
+    ## `DEAD` 는 여기서 안 나갑니다
+
+    상한을 넘긴 것은 사람이 봐야 하는 상태입니다. 계속 내보내면 같은 실패를
+    무한히 반복하고, 그냥 버리면 사용자는 대리인이 말한 줄 알고 있습니다.
+    """
+    from apps.agent.models import OutboxEvent
+
+    try:
+        limit = min(max(int(request.query_params.get("limit", 20)), 1), 100)
+    except (TypeError, ValueError):
+        raise BordoError("VALIDATION_ERROR", "limit 은 숫자여야 합니다.")
+
+    now = timezone.now()
+    with transaction.atomic():
+        rows = list(OutboxEvent.objects
+                    .select_for_update(skip_locked=True)
+                    .filter(status=OutboxEvent.Status.PENDING, available_at__lte=now)
+                    .order_by("available_at")[:limit])
+
+        # 가져가는 것 자체를 한 번의 시도로 셉니다.
+        #
+        # 실패했을 때만 세면 봇이 게시하다 그냥 죽는 경우를 영영 못 셉니다.
+        # 타임아웃이 지나 다시 보이고, 또 가져가고, 또 죽고를 **무한히 반복하면서
+        # DEAD 에는 절대 도달하지 않습니다.** 하필 그 상황이 사람이 봐야 하는
+        # 상황입니다.
+        handed = [e for e in rows if e.mark_handed_out()]
+
+        if handed:
+            (OutboxEvent.objects
+             .filter(id__in=[r.id for r in handed])
+             .update(available_at=now + timedelta(seconds=VISIBILITY_TIMEOUT_SEC)))
+
+    return Response(listing([{
+        "id": str(e.id),
+        "kind": e.kind,
+        "channel_id": e.channel_id,
+        "payload": e.payload,
+        "attempts": e.attempts,
+        "run_id": str(e.run_id) if e.run_id else None,
+    } for e in handed]))
+
+
+def _outbox_event(event_id):
+    from apps.agent.models import OutboxEvent
+
+    event = OutboxEvent.objects.filter(pk=event_id).first()
+    if event is None:
+        raise BordoError("STATE_NOT_FOUND", "발송 항목을 찾을 수 없습니다.")
+    return event
+
+
+@internal(["POST"])
+def outbox_ack(request, event_id):
+    """
+    게시에 성공했습니다.
+
+    두 번 불려도 안전합니다. 봇이 게시까지 하고 ACK 에서 네트워크가 끊기면
+    다음 폴링에서 다시 시도하는데, 그때 이미 `SENT` 인 것을 오류로 돌려주면
+    봇은 실패로 알고 또 게시합니다.
+    """
+    event = _outbox_event(event_id)
+    if event.status != event.Status.SENT:
+        event.mark_sent()
+    return Response({"id": str(event.id), "status": event.status,
+                     "sent_at": event.sent_at})
+
+
+@internal(["POST"])
+def outbox_fail(request, event_id):
+    """
+    게시에 실패했습니다.
+
+    `mark_failed()` 가 지수 백오프로 `available_at` 을 밀고, 상한을 넘기면
+    `DEAD` 로 둡니다. 같은 간격으로 반복하면 Discord 가 잠시 불안정할 때
+    재시도가 몰려 상황을 더 나쁘게 만듭니다.
+    """
+    event = _outbox_event(event_id)
+    if event.status != event.Status.SENT:
+        event.mark_failed(str(request.data.get("error") or ""))
+    return Response({"id": str(event.id), "status": event.status,
+                     "attempts": event.attempts,
+                     "available_at": event.available_at})

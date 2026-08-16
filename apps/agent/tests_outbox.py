@@ -59,6 +59,7 @@ class OutboxTest(TestCase):
     def test_mark_sent_clears_previous_error(self):
         """한 번 실패했다가 성공하면 옛 오류가 화면에 남으면 안 됩니다."""
         e = self._event()
+        e.mark_handed_out()
         e.mark_failed("일시 오류")
         e.mark_sent()
         e.refresh_from_db()
@@ -69,6 +70,7 @@ class OutboxTest(TestCase):
         """같은 간격으로 재시도하면 Discord 가 불안정할 때 몰려서 더 나빠집니다."""
         e = self._event()
         before = timezone.now()
+        e.mark_handed_out()
         e.mark_failed("500")
         e.refresh_from_db()
         self.assertEqual(e.status, OutboxEvent.Status.PENDING)
@@ -77,16 +79,20 @@ class OutboxTest(TestCase):
 
     def test_backoff_grows(self):
         e = self._event()
+        e.mark_handed_out()
         e.mark_failed("1")
         first = e.available_at
+        e.mark_handed_out()
         e.mark_failed("2")
         self.assertGreater(e.available_at - first, timezone.timedelta(seconds=0))
 
     def test_dead_after_max_attempts(self):
         """무한 재시도는 같은 오류를 반복하고, 그냥 버리면 아무도 모릅니다."""
         e = self._event(max_attempts=2)
+        e.mark_handed_out()
         e.mark_failed("1")
         self.assertEqual(e.status, OutboxEvent.Status.PENDING)
+        e.mark_handed_out()
         e.mark_failed("2")
         e.refresh_from_db()
         self.assertEqual(e.status, OutboxEvent.Status.DEAD)
