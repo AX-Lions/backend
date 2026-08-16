@@ -239,3 +239,48 @@ class AnswerRoomTest(Base):
                                 asker=self.asker)
         self.assertIsNotNone(q, "채팅 쪽 장애로 유보가 사라졌습니다")
         self.assertIsNone(q.chat_room_id)
+
+
+class RunUniquenessTest(Base):
+    """
+    한 실행은 유보 질문을 하나만 남깁니다.
+
+    "있는지 보고 없으면 넣는" 코드만으로는 동시에 불릴 때 뚫립니다. 둘 다 "없다" 를
+    보고 둘 다 넣으면, 사용자는 같은 질문에 두 번 답해야 합니다. **코드가 아니라
+    DB 가 막는지**를 봅니다 — 코드로 막는 것은 순서가 어긋나면 뚫립니다.
+    """
+
+    def _fields(self, run):
+        return dict(meeting_id=run.meeting_id, target_user=run.user,
+                    asker_name="임수연", title="제목", body="본문")
+
+    def test_db_rejects_a_second_question_for_the_same_run(self):
+        from django.db import IntegrityError, transaction
+
+        run = self._run_obj()
+        PendingQuestion.objects.create(run=run, **self._fields(run))
+
+        # 앞선 조회를 건너뛰고 곧장 넣습니다 = 경합에서 진 쪽이 하는 일.
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            PendingQuestion.objects.create(run=run, **self._fields(run))
+
+    def test_record_returns_the_existing_one_instead_of_raising(self):
+        """제약에 걸렸다고 예외가 나가면 유보가 사라집니다. 있던 것을 돌려줘야 합니다."""
+        run = self._run_obj()
+        first = deferral.record(run=run, question="언제 끝나요?",
+                                reason_message="확인이 필요합니다.", asker=self.asker)
+        second = deferral.record(run=run, question="언제 끝나요?",
+                                 reason_message="확인이 필요합니다.", asker=self.asker)
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(PendingQuestion.objects.count(), 1)
+
+    def test_rows_without_a_run_are_not_lumped_together(self):
+        """
+        시드와 실행이 삭제된 행은 `run` 이 비어 있습니다(SET_NULL).
+        그쪽까지 하나로 묶으면 두 번째부터 저장이 막힙니다.
+        """
+        for _ in range(3):
+            PendingQuestion.objects.create(
+                meeting=self.meeting, target_user=self.me,
+                asker_name="임수연", title="제목", body="본문")
+        self.assertEqual(PendingQuestion.objects.filter(run=None).count(), 3)
