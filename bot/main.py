@@ -42,8 +42,7 @@ async def setup_hook():
     meeting_cog = MeetingCog(
         bot,
         backend,
-        _delegate_on_users,
-        openai_service
+        _delegate_on_users
     )
 
     delegate_cog = DelegateCog(
@@ -61,7 +60,6 @@ async def setup_hook():
     general_cog = GeneralCog(
         bot,
         backend,
-        meeting_cog,
         openai_service
     )
 
@@ -122,6 +120,6 @@ if __name__ == "__main__":
         raise RuntimeError("DISCORD_TOKEN / BORDO_SERVICE_TOKEN 환경변수가 필요합니다.")
 
     if not OPENAI_API_KEY:
-        log.warning("OPENAI_API_KEY가 없습니다. [TEMP] 채팅/요약/TODO 기능은 동작하지 않습니다.")
+        log.warning("OPENAI_API_KEY가 없습니다. [TEMP] 멘션 시 일반 채팅 응답 기능은 동작하지 않습니다.")
 
     bot.run(DISCORD_TOKEN, log_handler=None)

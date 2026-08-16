@@ -20,7 +20,7 @@ pip install -r requirements.txt
 | `BORDO_SERVICE_TOKEN` | ✅ | Backend 호출용 인증 시크릿(`DISCORD_TOKEN`과 별개). Backend가 생기기 전까지는 임의 문자열이어도 됩니다 |
 | `BORDO_BACKEND_URL` |  | Backend 주소. 기본값 `http://localhost:8000` |
 | `BORDO_OUTBOX_INTERVAL` |  | Outbox 폴링 주기(초). 정의만 돼 있고 현재는 사용되지 않습니다 |
-| `OPENAI_API_KEY` |  | 채팅/회의 요약 기능(임시 구현)을 켭니다. 없으면 안내 문구로 대체됩니다 |
+| `OPENAI_API_KEY` |  | 멘션 시 일반 채팅 응답 기능(임시 구현)을 켭니다. 없으면 안내 문구로 대체됩니다 |
 | `OPENAI_MODEL` |  | 기본값 `gpt-5.5` |
 
 ## 실행
@@ -49,12 +49,10 @@ python main.py
 
 ## 아키텍처 원칙
 
-봇은 판단하지 않고 릴레이·표시만 합니다. Discord 이벤트를 Backend로 전달하고, Backend가 결정한 내용만 화면에 표시하는 것이 목표입니다. 현재 `llm_chat_reply`, `generate_meeting_wrapup` 등 OpenAI를 직접 호출하는 부분은 Backend가 없는 동안의 임시 대체물입니다.
+봇은 판단하지 않고 릴레이·표시만 합니다. Discord 이벤트를 Backend로 전달하고, Backend가 결정한 내용만 화면에 표시하는 것이 목표입니다. 회의 요약은 `/meeting-end`가 Backend를 호출한 응답을 그대로 게시할 뿐, 봇이 직접 만들지 않습니다. 현재 남은 `llm_chat_reply`(멘션 시 일반 채팅 응답)만 Backend가 없는 동안의 임시 대체물입니다.
 
 ## 알려진 공백
 
 - Outbox consumer(Backend 큐 폴링 → 실행 → ACK/FAIL) 미구현
-- 회의 요약/TODO는 `/meeting-end`에서 생성돼 Discord에는 게시되지만, `/internal/v1/meetings/end`
-  호출 payload에는 포함되지 않아 Backend에는 저장되지 않음
-- 모든 상태가 인메모리라 재시작하면 진행 중인 회의와 대화 기록이 사라짐
+- 모든 상태가 인메모리라 재시작하면 진행 중인 회의 정보가 사라짐
 - 테스트, 린터, 빌드 단계 없음
