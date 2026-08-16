@@ -144,3 +144,72 @@ class ProjectFlowTest(TestCase):
         r = self._get(**{"from": now.isoformat(),
                          "to": (now - timedelta(days=3)).isoformat()})
         self.assertEqual(r.status_code, 400)
+
+
+class ReviewFindingsTest(ProjectFlowTest):
+    """PR #55 리뷰에서 나온 세 건. 고친 것이 실제로 고쳐졌는지 봅니다."""
+
+    def test_period_is_cut_in_the_database(self):
+        """
+        파이썬으로 거르면 프로젝트의 **모든** 엣지를 메모리에 올린 뒤 버립니다.
+        프로젝트가 오래될수록 "이번 주" 를 봐도 느려집니다.
+
+        쿼리 수가 아니라 **가져온 행 수**를 봐야 이걸 잡습니다.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        for i in range(1, 40):
+            self._edge(FlowContentType.WORK, days_ago=i)     # 대부분 기간 밖
+
+        with CaptureQueriesContext(connection) as ctx:
+            r = self._get()
+        self.assertEqual(r.status_code, 200)
+
+        # `occurred_at` 은 SELECT 컬럼 목록에도, ORDER BY 에도(Meta.ordering)
+        # 항상 들어 있습니다. **WHERE 와 ORDER BY 사이만** 잘라야 진짜로
+        # 잘랐는지 알 수 있습니다.
+        wheres = []
+        for q in ctx.captured_queries:
+            sql = q["sql"]
+            if "flow_edge" not in sql or " WHERE " not in sql:
+                continue
+            wheres.append(sql.split(" WHERE ", 1)[1].split("ORDER BY")[0])
+
+        self.assertTrue(wheres, "flow_edge 조회가 없습니다")
+        self.assertTrue(any("occurred_at" in w for w in wheres),
+                        f"기간이 WHERE 에 안 들어갔습니다: {wheres}")
+
+    def test_work_arrow_badges_follow_the_work_order(self):
+        """
+        뱃지 순서는 카테고리마다 다릅니다. 작업 모드에서 회의 순서를 쓰면 다섯
+        종류가 전부 기본 순위로 밀려 DB 인출 순서대로 붙습니다.
+
+        만든 순서를 디자인 순서와 **거꾸로** 두어야 이걸 잡습니다.
+        """
+        for t in reversed([FlowContentType.WORK, FlowContentType.REVISION,
+                           FlowContentType.FEEDBACK, FlowContentType.SHARE,
+                           FlowContentType.AI_LOOKUP]):
+            self._edge(t)
+
+        counts = self._get().json()["arrows"][0]["counts"]
+        self.assertEqual([c["content_type"] for c in counts],
+                         ["WORK", "REVISION", "FEEDBACK", "SHARE", "AI_LOOKUP"])
+
+    def test_work_edge_detail_opens_for_a_project_member(self):
+        """
+        작업 엣지에는 회의가 없습니다. 회의로만 권한을 보면 **정당한 참여자가
+        404 를 받아** 화살표를 눌러도 안 열립니다.
+        """
+        e = self._edge(FlowContentType.WORK)
+        r = self.api.get(f"/api/v1/flow-edges/{e.id}")
+        self.assertEqual(r.status_code, 200, r.content[:200])
+        self.assertEqual(r.json()["edge"]["label"], "로그인 API 구현")
+
+    def test_work_edge_detail_is_still_closed_to_outsiders(self):
+        e = self._edge(FlowContentType.WORK)
+        stranger = User.objects.create_user(email="s2@bordo.dev", password="x" * 10,
+                                            name="남")
+        api = APIClient()
+        api.force_authenticate(user=stranger)
+        self.assertIn(api.get(f"/api/v1/flow-edges/{e.id}").status_code, (403, 404))

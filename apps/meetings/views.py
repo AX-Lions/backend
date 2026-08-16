@@ -142,7 +142,7 @@ def _resolve_category(raw):
     return cat
 
 
-def _filtered_edges(scope, params):
+def _filtered_edges(scope, params, period=None):
     """
     필터는 전부 DB 에서 겁니다.
 
@@ -185,15 +185,24 @@ def _filtered_edges(scope, params):
     if since:
         qs = qs.filter(occurred_at__gte=timezone.now() - timedelta(minutes=int(since)))
 
+    # 기간은 반드시 DB 에서 자릅니다.
+    #
+    # 파이썬으로 거르면 프로젝트의 **모든** 엣지를 메모리에 올린 뒤 버리게 되고,
+    # 프로젝트가 오래될수록 "이번 주" 를 봐도 느려집니다. `(project, category,
+    # occurred_at)` 인덱스를 붙여 둔 이유가 이 필터입니다.
+    if period:
+        qs = qs.filter(occurred_at__range=period)
+
     people = params.get("participant_ids")
     if people:
         wanted = {p.strip() for p in people.split(",") if p.strip()}
-        # participant_ids 가 JSON 배열이라 DB 마다 연산자가 달라, 여기서만 파이썬으로 거릅니다.
+        # participant_ids 가 JSON 배열이라 DB 마다 연산자가 달라, **여기서만**
+        # 파이썬으로 거릅니다. 위에서 기간·종류로 이미 좁혀 둔 뒤라야 합니다.
         qs = [e for e in qs if wanted & set(e.participant_ids or [])]
     return cat, qs
 
 
-def _arrows(edges):
+def _arrows(edges, type_order=None):
     """
     낱개 전달을 화면의 화살표로 묶습니다.
 
@@ -238,7 +247,9 @@ def _arrows(edges):
             if url and url not in b["avatars"]:
                 b["avatars"].append(url)
 
-    order = {t: i for i, t in enumerate(MEETING_TYPE_ORDER)}
+    # 뱃지 순서는 카테고리마다 다릅니다. 작업 모드에서 회의 순서를 쓰면
+    # 다섯 종류가 전부 기본 순위로 밀려 DB 인출 순서대로 붙습니다.
+    order = {t: i for i, t in enumerate(type_order or MEETING_TYPE_ORDER)}
     out = []
     for b in buckets.values():
         counts = sorted(b["counts"].values(),
@@ -281,7 +292,7 @@ def flow(request, meeting_id):
                          f"{meeting.title}",
         "category": cat,
         "nodes": nodes,
-        "arrows": _arrows(edges),
+        "arrows": _arrows(edges, MEETING_TYPE_ORDER),
         "filter_options": {
             # 실제로 존재하는 값만 내려줍니다. 전체 목록을 주면 체크해도 안 걸리는
             # 항목이 생겨 사용자가 헷갈립니다.
@@ -326,9 +337,8 @@ def project_flow(request, project_id):
 
     params = request.query_params.copy()
     params.setdefault("category", FlowCategory.WORK)
-    cat, edges = _filtered_edges({"project": project}, params)
-    edges = [e for e in edges
-             if from_at <= e.occurred_at <= to_at]
+    cat, edges = _filtered_edges({"project": project}, params, period=(from_at, to_at))
+    edges = list(edges)
 
     # 구간을 한 번만 구해 넘깁니다. 엣지마다 다시 계산하면 N+1 입니다.
     for e in edges:
@@ -354,7 +364,7 @@ def project_flow(request, project_id):
         "from": from_at, "to": to_at,
         "category": cat,
         "nodes": nodes,
-        "arrows": _arrows(edges),
+        "arrows": _arrows(edges, order),
         "filter_options": {
             "participants": [{"id": str(m.user_id), "label": m.user.name, "kind": "USER"}
                              for m in members],
@@ -458,7 +468,13 @@ def flow_edge_detail(request, edge_id):
             .select_related("meeting", "agenda", "document").first())
     if not edge:
         raise BordoError("STATE_NOT_FOUND", "화살표를 찾을 수 없습니다.")
-    meeting_access(request.user, edge.meeting_id)
+
+    # 작업 플로우 엣지에는 회의가 없습니다. 회의로만 권한을 보면
+    # **정당한 프로젝트 참여자가 404 를 받습니다** — 화살표를 눌러도 안 열립니다.
+    if edge.meeting_id:
+        meeting_access(request.user, edge.meeting_id)
+    else:
+        project_membership(request.user, edge.project_id)
 
     body = {"edge": FlowEdgeSerializer(edge).data,
             "delivery_context": [], "document": None, "agenda": None}
