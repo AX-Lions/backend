@@ -64,3 +64,16 @@ class BackendClient:
 
     def post(self, path, **kw):
         return self.request("POST", path, **kw)
+
+
+def get_error(result) -> dict | None:
+    """result가 4xx 오류 응답(error.code 포함)이면 그 error 딕셔너리를,
+    아니면 None을 돌려준다.
+
+    result가 dict가 아닌 경우(2xx인데 JSON이 아닌 응답이 오면 request()가
+    문자열을 그대로 돌려준다)도 안전하게 처리한다 — 그런 문자열에
+    .get()을 부르면 AttributeError로 죽는다.
+    """
+    if isinstance(result, dict):
+        return result.get("error")
+    return None
