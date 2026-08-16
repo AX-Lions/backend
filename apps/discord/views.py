@@ -515,6 +515,11 @@ def outbox_events(request):
     `select_for_update(skip_locked=True)` 는 **같은 순간** 두 요청이 겹치는 것을
     막습니다. 잠긴 행은 기다리지 않고 건너뜁니다.
 
+    다만 이 잠금은 **PostgreSQL 에서만 실제로 걸립니다.** SQLite 는
+    `has_select_for_update = False` 라 Django 가 오류 없이 조용히 무시합니다.
+    개발용 SQLite 에서는 이 겹이 없는 셈이니, 동시성 문제를 여기서 재현하려
+    하지 마십시오. 운영은 PostgreSQL 전제입니다.
+
     그것만으로는 부족합니다. 잠금은 트랜잭션이 끝나면 풀리므로, 봇이 게시하는
     동안(ACK 전) 다음 폴링이 들어오면 같은 행을 또 집어 갑니다. 그래서 가져간
     것의 `available_at` 을 **잠시 앞으로 밀어 둡니다.**
@@ -546,9 +551,18 @@ def outbox_events(request):
                     .select_for_update(skip_locked=True)
                     .filter(status=OutboxEvent.Status.PENDING, available_at__lte=now)
                     .order_by("available_at")[:limit])
-        if rows:
+
+        # 가져가는 것 자체를 한 번의 시도로 셉니다.
+        #
+        # 실패했을 때만 세면 봇이 게시하다 그냥 죽는 경우를 영영 못 셉니다.
+        # 타임아웃이 지나 다시 보이고, 또 가져가고, 또 죽고를 **무한히 반복하면서
+        # DEAD 에는 절대 도달하지 않습니다.** 하필 그 상황이 사람이 봐야 하는
+        # 상황입니다.
+        handed = [e for e in rows if e.mark_handed_out()]
+
+        if handed:
             (OutboxEvent.objects
-             .filter(id__in=[r.id for r in rows])
+             .filter(id__in=[r.id for r in handed])
              .update(available_at=now + timedelta(seconds=VISIBILITY_TIMEOUT_SEC)))
 
     return Response(listing([{
@@ -558,7 +572,7 @@ def outbox_events(request):
         "payload": e.payload,
         "attempts": e.attempts,
         "run_id": str(e.run_id) if e.run_id else None,
-    } for e in rows]))
+    } for e in handed]))
 
 
 def _outbox_event(event_id):

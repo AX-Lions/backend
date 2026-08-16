@@ -530,10 +530,14 @@ class OutboxTest(Base):
         self.assertEqual(rows[0]["channel_id"], "ch-1")
         self.assertEqual(rows[0]["payload"]["body"], "진행 중입니다.")
 
-    def test_the_same_event_is_not_handed_out_twice(self):
+    def test_the_next_poll_does_not_see_what_was_just_handed_out(self):
         """
         가져간 것은 잠시 안 보여야 합니다. 봇이 게시하는 동안(ACK 전) 다음 폴링이
         같은 행을 또 집어 가면 회의에 같은 말이 두 번 올라갑니다.
+
+        **여기서 보는 것은 가시성 타임아웃뿐입니다.** 같은 순간 겹치는 요청을
+        막는 `select_for_update` 는 SQLite 에서 조용히 무시되고 테스트 클라이언트도
+        순차 실행이라, 이 테스트로는 증명되지 않습니다.
         """
         self._event()
         first = self.get("/outbox-events").json()["results"]
@@ -581,6 +585,7 @@ class OutboxTest(Base):
 
     def test_fail_backs_off_and_returns_to_pending(self):
         e = self._event()
+        self.get("/outbox-events")          # 봇이 가져감 = 시도 1회
         r = self.post(f"/outbox-events/{e.id}/fail", {"error": "채널 없음"})
         self.assertEqual(r.status_code, 200)
         e.refresh_from_db()
@@ -589,16 +594,42 @@ class OutboxTest(Base):
         self.assertGreater(e.available_at, timezone.now())
         self.assertIn("채널 없음", e.last_error)
 
+    def _drain_once(self, e):
+        """봇 한 바퀴: 가져가고 → 실패 보고 → 백오프를 지난 것으로 만든다."""
+        from apps.agent.models import OutboxEvent
+        self.get("/outbox-events")
+        self.post(f"/outbox-events/{e.id}/fail", {"error": "x"})
+        OutboxEvent.objects.filter(pk=e.pk).update(available_at=timezone.now())
+
     def test_repeated_failure_ends_in_dead(self):
         """
         무한 재시도는 같은 오류를 반복하고, 그냥 버리면 사용자는 대리인이 말한
         줄 알고 있습니다. 상한을 넘기면 사람이 보도록 DEAD 로 둡니다.
         """
         e = self._event(max_attempts=2)
-        self.post(f"/outbox-events/{e.id}/fail", {"error": "x"})
-        self.post(f"/outbox-events/{e.id}/fail", {"error": "x"})
+        self._drain_once(e)
+        self._drain_once(e)
         e.refresh_from_db()
         self.assertEqual(e.status, e.Status.DEAD)
+
+    def test_a_bot_that_keeps_crashing_still_reaches_dead(self):
+        """
+        가져가기만 하고 아무 보고도 없이 죽는 봇이 가장 위험합니다.
+
+        실패했을 때만 횟수를 세면 이 경우를 영영 못 셉니다 — 타임아웃이 지나
+        다시 보이고, 또 가져가고, 또 죽고를 **무한히 반복하면서 DEAD 에는 절대
+        도달하지 않습니다.** 하필 그 상황이 사람이 봐야 하는 상황입니다.
+        """
+        from apps.agent.models import OutboxEvent
+
+        e = self._event(max_attempts=2)
+        for _ in range(4):
+            self.get("/outbox-events")      # 가져가고 아무 보고 없이 죽음
+            OutboxEvent.objects.filter(pk=e.pk).update(available_at=timezone.now())
+
+        e.refresh_from_db()
+        self.assertEqual(e.status, e.Status.DEAD, "영원히 재시도되고 있습니다")
+        self.assertEqual(self.get("/outbox-events").json()["results"], [])
 
     def test_dead_events_are_not_handed_out(self):
         from apps.agent.models import OutboxEvent
@@ -629,4 +660,5 @@ class OutboxTest(Base):
     def test_unknown_event_is_404_shaped(self):
         import uuid
         r = self.post(f"/outbox-events/{uuid.uuid4()}/ack")
+        self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json()["error"]["code"], "STATE_NOT_FOUND")
