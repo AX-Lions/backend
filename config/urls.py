@@ -73,6 +73,8 @@ urlpatterns = [
     path(f"{API}/meetings/<uuid:meeting_id>", meetings.meeting_detail),
     path(f"{API}/meetings/<uuid:meeting_id>/delegate", meetings.delegate),
     path(f"{API}/meetings/<uuid:meeting_id>/flow", meetings.flow),
+    # 작업 플로우는 기간이 스코프라 회의 경로를 쓸 수 없습니다 (이슈 #54)
+    path(f"{API}/projects/<uuid:project_id>/flow", meetings.project_flow),
     path(f"{API}/meetings/<uuid:meeting_id>/indexes", meetings.indexes),
     path(f"{API}/meetings/<uuid:meeting_id>/summary-table", meetings.summary_table),
     path(f"{API}/meetings/<uuid:meeting_id>/context", meetings.context),

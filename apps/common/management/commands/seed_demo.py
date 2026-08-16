@@ -227,7 +227,8 @@ class Command(BaseCommand):
         ]
         for cat, ctype, label, src, dsts, agenda, document, surface, mins_ago in edges:
             e = FlowEdge.objects.create(
-                meeting=meeting, category=cat, content_type=ctype, surface=surface,
+                meeting=meeting, project=meeting.project,
+                category=cat, content_type=ctype, surface=surface,
                 from_node=src, to_nodes=dsts, label=label,
                 direction_label=f"{src['name']} → {', '.join(d['name'] for d in dsts)}",
                 participant_ids=[src["user_id"]] + [d["user_id"] for d in dsts],
