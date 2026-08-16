@@ -178,3 +178,91 @@ class ChatFeedbackEdgeTest(Base):
         """대리인 발언은 회의 플로우가 이미 그립니다."""
         self._msg(is_important=True, is_agent=True)
         self.assertEqual(self._edges(), [])
+
+
+class ReviewFindingsTest(Base):
+    """PR #59 리뷰에서 나온 네 건."""
+
+    def _room(self, room_type, **kw):
+        from apps.chat.models import ChatRoom
+        return ChatRoom.objects.create(type=room_type, project=self.project,
+                                       created_by=self.me, **kw)
+
+    def _msg(self, room, **kw):
+        from apps.chat.models import ChatMessage
+        return ChatMessage.objects.create(
+            room=room, sender=self.me, sender_name="서재민",
+            body=kw.pop("body", "우리끼리만 아는 이야기"), **kw)
+
+    def test_a_private_dm_never_reaches_the_team_screen(self):
+        """
+        `DIRECT` · `PEER_AGENT` 방에도 project 가 붙습니다 — 사이드바에서
+        프로젝트별로 묶어 보여주려는 용도입니다.
+
+        `project_id` 만 보고 그리면 **1:1 로 나눈 말의 본문이 label 에 실려**
+        팀 전원에게 보입니다.
+        """
+        from apps.chat.models import RoomType
+
+        for t in (RoomType.DIRECT, RoomType.PEER_AGENT, RoomType.AI):
+            self._msg(self._room(t, dedupe_key=f"k-{t}"), is_important=True)
+
+        self.assertEqual(self._edges(), [], "개인 대화가 팀 화면에 샜습니다")
+
+    def test_marking_an_existing_message_important_draws_feedback(self):
+        """
+        화면에서 중요 표시는 **나중에 켭니다**(`PATCH .../important`).
+        만들 때만 보면 실제 사용 경로에서 화살표가 한 번도 안 그려집니다.
+        """
+        from apps.chat.models import RoomType
+
+        msg = self._msg(self._room(RoomType.PROJECT))
+        self.assertEqual(self._edges(), [])
+
+        msg.is_important = True
+        msg.save(update_fields=["is_important"])
+        self.assertEqual(len(self._edges(FlowContentType.FEEDBACK)), 1)
+
+    def test_toggling_important_again_does_not_redraw(self):
+        """이미 켜진 것을 다시 저장해도 화살표가 늘면 안 됩니다."""
+        from apps.chat.models import RoomType
+
+        msg = self._msg(self._room(RoomType.PROJECT), is_important=True)
+        msg.body = "고침"
+        msg.save()
+        self.assertEqual(len(self._edges(FlowContentType.FEEDBACK)), 1)
+
+    def test_editing_a_shared_document_is_a_revision_not_another_share(self):
+        """
+        현재 상태만 보면 한 번 전달한 문서는 제목만 고쳐도 계속 SHARE 가
+        나갑니다. 같은 문서를 몇 번이고 "전달했다" 고 그리면 언제 전달했는지가
+        묻힙니다.
+        """
+        from apps.documents.models import Document
+
+        doc = Document.objects.create(
+            project=self.project, owner=self.me, title="API 명세서",
+            delivery_context=[{"to": "최비성"}])
+        self.assertEqual(len(self._edges(FlowContentType.SHARE)), 1)
+
+        doc.title = "API 명세서 v2"
+        doc.save()
+        self.assertEqual(len(self._edges(FlowContentType.SHARE)), 1,
+                         "전달을 두 번 그렸습니다")
+        self.assertEqual(len(self._edges(FlowContentType.REVISION)), 1)
+
+    def test_creating_work_does_not_query_for_a_previous_status(self):
+        """
+        UUIDModel 은 객체를 만들 때 이미 id 를 넣어 둡니다. `instance.pk` 로
+        신규 여부를 보면 **새 행에서도 헛조회가 나갑니다.**
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as ctx:
+            self._work()
+
+        selects = [q["sql"] for q in ctx.captured_queries
+                   if q["sql"].lstrip().upper().startswith("SELECT")
+                   and "work_item" in q["sql"]]
+        self.assertEqual(selects, [], f"헛조회가 있습니다: {selects}")

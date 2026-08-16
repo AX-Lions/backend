@@ -31,7 +31,11 @@ def connect():
                      dispatch_uid="bordo.work_flow.remember_work_status")
     post_save.connect(work_flow.on_work_item_saved, sender=WorkItem,
                       dispatch_uid="bordo.work_flow.work_item")
+    pre_save.connect(work_flow.remember_document_delivery, sender=Document,
+                     dispatch_uid="bordo.work_flow.remember_document_delivery")
     post_save.connect(work_flow.on_document_saved, sender=Document,
                       dispatch_uid="bordo.work_flow.document")
+    pre_save.connect(work_flow.remember_message_importance, sender=ChatMessage,
+                     dispatch_uid="bordo.work_flow.remember_message_importance")
     post_save.connect(work_flow.on_chat_message_saved, sender=ChatMessage,
                       dispatch_uid="bordo.work_flow.chat_message")

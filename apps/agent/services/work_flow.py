@@ -161,7 +161,10 @@ def remember_work_status(sender, instance, **kwargs):
     DB 를 한 번 더 읽는 비용이 있지만, 상태가 안 바뀐 저장까지 화살표로
     그리는 것보다 낫습니다.
     """
-    if not instance.pk:
+    # `instance.pk` 를 보면 안 됩니다. UUIDModel 은 객체를 만들 때 이미 id 를
+    # 넣어 두므로, 새 행에서도 pk 가 있어 **저장할 때마다 헛조회가 나갑니다.**
+    if instance._state.adding:
+        instance._prev_status = None
         return
     try:
         instance._prev_status = (sender.objects
@@ -169,6 +172,21 @@ def remember_work_status(sender, instance, **kwargs):
                                  .values_list("status", flat=True).first())
     except Exception:                                          # noqa: BLE001
         instance._prev_status = None
+
+
+def remember_document_delivery(sender, instance, **kwargs):
+    """저장 전에 이미 전달된 문서였는지 기억해 둡니다."""
+    if instance._state.adding:
+        instance._prev_delivered = False
+        return
+    try:
+        prev = (sender.all_objects.filter(pk=instance.pk)
+                .values_list("delivery_context", flat=True).first())
+        instance._prev_delivered = bool(prev)
+    except Exception:                                          # noqa: BLE001
+        # 모르면 이미 전달된 것으로 봅니다. 중복 SHARE 를 그리는 것보다
+        # 한 번 빠뜨리는 쪽이 낫습니다.
+        instance._prev_delivered = True
 
 
 def on_document_saved(sender, instance, created, **kwargs):
@@ -183,7 +201,15 @@ def on_document_saved(sender, instance, created, **kwargs):
     if _is_private(instance) or _deleted(instance):
         return
 
-    ctype = FlowContentType.SHARE if instance.delivery_context else (
+    # 전달은 **이번 저장에서 생겼을 때만** SHARE 입니다.
+    #
+    # 현재 상태만 보면, 한 번 전달한 문서는 이후 제목만 고쳐도 계속 SHARE 가
+    # 나갑니다. 같은 문서를 몇 번이고 "전달했다" 고 그리면 화살표에 묻혀
+    # 정작 언제 전달했는지가 안 보입니다.
+    newly_shared = bool(instance.delivery_context) and not getattr(
+        instance, "_prev_delivered", False)
+
+    ctype = FlowContentType.SHARE if newly_shared else (
         FlowContentType.WORK if created else FlowContentType.REVISION)
 
     record(project_id=instance.project_id, actor=instance.owner,
@@ -218,22 +244,63 @@ def _url_of(document) -> str:
     return ""
 
 
+def remember_message_importance(sender, instance, **kwargs):
+    """
+    저장 전에 이전 중요 표시를 기억해 둡니다.
+
+    화면에서 중요 표시는 **나중에 켭니다**(`PATCH /messages/{id}/important`).
+    그건 UPDATE 라 `created=False` 이므로, 만들 때만 보면 **실제 사용 경로에서
+    피드백 화살표가 한 번도 안 그려집니다.**
+    """
+    if instance._state.adding:
+        instance._prev_important = False
+        return
+    try:
+        instance._prev_important = bool(
+            sender.objects.filter(pk=instance.pk)
+            .values_list("is_important", flat=True).first())
+    except Exception:                                          # noqa: BLE001
+        instance._prev_important = None
+
+
 def on_chat_message_saved(sender, instance, created, **kwargs):
     """
     채팅에 남긴 의견을 `피드백` 으로 남깁니다.
 
-    **중요 표시된 것만** 그립니다. 모든 메시지를 그리면 플로우가 대화 로그가
-    됩니다 — 회의 플로우에서 검색 호출을 안 그린 것과 같은 이유입니다.
+    ## 방 종류를 반드시 봅니다
 
-    대리인이 보낸 것도 제외합니다. 그건 회의 플로우가 이미 그립니다.
+    `project_id` 만 보면 **개인 대화가 팀 전체에 샙니다.** `DIRECT` 와
+    `PEER_AGENT` 방에도 `project` 가 붙습니다 — 사이드바에서 프로젝트별로
+    묶어 보여주려는 용도입니다(`chat/models.py`).
+
+    그 방의 메시지로 화살표를 그리면 `label` 에 **본문이 그대로 실려** 플로우
+    화면에서 팀 전원에게 보입니다. 1:1 로 나눈 말이 팀에 공개되는 셈입니다.
+
+    ## 중요 표시된 것만 그립니다
+
+    모든 메시지를 그리면 플로우가 대화 로그가 됩니다 — 회의 플로우에서 검색
+    호출을 안 그린 것과 같은 이유입니다.
+
+    **켜지는 순간에만** 그립니다. 껐다 켜도 한 번, 이미 켜진 것을 다시 저장해도
+    안 그립니다.
+
+    대리인이 보낸 것은 제외합니다. 그건 회의 플로우가 이미 그립니다.
     """
+    from apps.chat.models import RoomType
     from apps.meetings.models import FlowContentType
 
-    if not created or instance.is_agent or not instance.is_important:
+    if instance.is_agent or not instance.is_important:
         return
 
     room = instance.room
     if not room or not room.project_id:
+        return
+    if room.type != RoomType.PROJECT:
+        # 개인 대화(DIRECT · PEER_AGENT · AI)는 팀 화면에 그리지 않습니다.
+        return
+
+    # 이번 저장에서 켜진 것만. 이미 켜져 있던 것을 다시 저장하면 안 그립니다.
+    if not created and getattr(instance, "_prev_important", None):
         return
 
     record(project_id=room.project_id, actor=instance.sender,
