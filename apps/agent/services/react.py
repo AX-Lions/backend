@@ -155,6 +155,7 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             project_id=str(project_id or getattr(meeting, "project_id", "") or "") or None,
             run_id=str(run_obj.id), settings_snapshot=snapshot,
             allow_private=allow_private,
+            allowed_sources=_sources_for(meeting, principal),
         )
         # 읽기와 쓰기를 모두 넘깁니다.
         #
@@ -295,6 +296,30 @@ def _snapshot_of(principal) -> dict:
 def _set(run_obj: AgentRun, status: str):
     run_obj.status = status
     run_obj.save(update_fields=["status", "updated_at"])
+
+
+def _sources_for(meeting, principal) -> list[str] | None:
+    """
+    이 회의에서 근거로 쓸 자료 범위.
+
+    회의가 없는 실행(본인이 자기 대리인과 나누는 대화)에는 제한이 없습니다.
+    범위는 **회의마다 본인이 고르는 것**이라 회의가 없으면 고를 자리도 없습니다.
+
+    참석자 행을 못 찾아도 제한을 걸지 않습니다. 여기서 조용히 빈 목록을 주면
+    대리인이 아무 근거도 못 찾아 전부 유보하는데, 사용자는 왜 그런지 알 방법이
+    없습니다. 좁히는 것은 **본인이 고른 경우에만** 합니다.
+    """
+    if meeting is None:
+        return None
+
+    from apps.meetings.models import MeetingParticipant
+
+    row = (MeetingParticipant.objects
+           .filter(meeting_id=meeting.id, user_id=principal.id)
+           .only("allowed_sources").first())
+    if row is None or row.allowed_sources is None:
+        return None
+    return row.source_scope
 
 
 def _may_write(skill_name: str, snapshot: dict | None) -> str:

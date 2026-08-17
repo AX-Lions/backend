@@ -107,6 +107,16 @@ def home(request):
              .filter(project_id__in=project_ids, scheduled_at__range=(start, end))
              .exclude(status=MeetingStatus.ENDED)
              .order_by("scheduled_at")[:20])
+    # 오늘 일정 행의 버튼이 `회의에 참여하지 않아요` / `대리 참석 중` 으로
+    # 갈리므로, 내 참석 상태를 함께 내려줍니다. 회의마다 따로 부르면 세 줄짜리
+    # 목록에 요청이 세 번 더 나갑니다.
+    my_part = {
+        str(p.meeting_id): p
+        for p in MeetingParticipant.objects.filter(
+            meeting__in=today, user=user).only(
+                "meeting_id", "delegated", "delegate_prompt", "allowed_sources")
+    }
+
     today_schedule = [{
         "at": m.scheduled_at,
         "ends_at": m.scheduled_at + timezone.timedelta(minutes=m.duration_min),
@@ -128,6 +138,14 @@ def home(request):
                     "url": f"https://discord.com/channels/{m.discord_channel_id}"}
                    if m.discord_channel_id
                    else {"kind": "OPEN_MEETING", "label": "보러가기", "url": None}),
+        # 내 대리 참석 상태. 참석자가 아닌 회의(팀 공개 일정)면 `None` 입니다 —
+        # `False` 로 두면 참석자가 아닌 사람에게도 불참 등록 버튼이 뜹니다.
+        "delegation": (
+            {"delegated": my_part[str(m.id)].delegated,
+             "prompt": my_part[str(m.id)].delegate_prompt,
+             # `null` 이면 고른 적 없음(제한 없음), `[]` 면 아무것도 안 씀.
+             "sources": my_part[str(m.id)].allowed_sources}
+            if str(m.id) in my_part else None),
     } for m in today]
 
     # ── 최근 회의 요약 카드

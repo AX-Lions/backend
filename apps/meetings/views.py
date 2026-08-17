@@ -128,10 +128,55 @@ def delegate(request, meeting_id):
     p.delegated = enabled
     p.delegate_prompt = request.data.get("prompt", "") or ""
     p.attendance = Attendance.DELEGATED if enabled else Attendance.PENDING
-    p.save(update_fields=["delegated", "delegate_prompt", "attendance", "updated_at"])
+
+    if "sources" in request.data:
+        p.allowed_sources = _clean_sources(request.data["sources"])
+
+    p.save(update_fields=["delegated", "delegate_prompt", "attendance",
+                          "allowed_sources", "updated_at"])
     return Response({"meeting_id": str(meeting.id), "user_id": str(request.user.id),
                      "delegated": p.delegated, "attendance": p.attendance,
-                     "prompt": p.delegate_prompt})
+                     "prompt": p.delegate_prompt,
+                     "sources": p.allowed_sources})
+
+
+def _clean_sources(raw):
+    """
+    이 회의에서 대리인이 근거로 쓸 자료 종류.
+
+    ## 빈 목록과 안 보낸 것을 가릅니다
+
+        키가 없음   지금 값을 그대로 둔다
+        null        고른 적 없음으로 되돌린다 (제한 없음)
+        []          **아무 자료도 쓰지 않는다**
+        ["work"]    작업 현황만
+
+    빈 목록을 "제한 없음" 으로 읽으면 전부 끈 사람의 대리인이 **모든 자료를
+    보게 됩니다.** 정반대로 동작하는 셈이라 빈 목록을 그대로 존중합니다.
+
+    모르는 값은 400 입니다. 조용히 버리면 사용자는 골랐다고 생각하는데
+    대리인은 그 자료를 안 봅니다.
+    """
+    if raw is None:
+        return None
+
+    if not isinstance(raw, list):
+        raise BordoError("VALIDATION_ERROR", "sources 는 배열이어야 합니다.")
+
+    allowed = MeetingParticipant.SOURCE_CHOICES
+    picked, bad = [], []
+    for item in raw:
+        value = str(item or "").strip().lower()
+        if value in allowed:
+            if value not in picked:
+                picked.append(value)
+        else:
+            bad.append(item)
+
+    if bad:
+        raise BordoError("VALIDATION_ERROR", "고를 수 없는 자료 종류입니다.",
+                         details={"sources": bad, "allowed": list(allowed)})
+    return picked
 
 
 # ─────────────────────────────────────────── 플로우
