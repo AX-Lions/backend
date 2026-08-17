@@ -8,7 +8,7 @@ class AgentSettingsSerializer(serializers.ModelSerializer):
         model = AgentSettings
         fields = ("mention_feasibility", "allow_schedule_change",
                   "allow_midmeeting_question", "disclose_work_plan_thought",
-                  "active_version", "updated_at")
+                  "tone", "active_version", "updated_at")
         read_only_fields = ("active_version", "updated_at")
 
 

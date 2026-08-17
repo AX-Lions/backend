@@ -144,6 +144,10 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             project_name=getattr(meeting, "project_name", ""),
             delegate_prompt=delegate_prompt,
             constraints=gate.constraints,
+            # 설정 스냅샷에서 꺼냅니다. 설정 행을 다시 읽지 않는 이유는 실행
+            # 도중에 사용자가 바꿔도 **이 실행은 시작할 때의 설정으로 끝나야**
+            # 하기 때문입니다 — `active_version` 이 가리키는 것도 그것입니다.
+            tone=(snapshot or {}).get("tone", ""),
         )
         ctx = SkillContext(
             principal_id=str(principal.id), actor_id=str(actor_id or principal.id),

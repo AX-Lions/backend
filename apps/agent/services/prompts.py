@@ -26,10 +26,27 @@ _BASE = """\
 
 ## 답변 방식
 
-- 한국어로, 회의에서 사람이 말하듯 간결하게.
+- 한국어로, 회의에서 사람이 말하듯.
 - 근거가 된 작업·문서 이름을 함께 밝히십시오.
 - 진행률·상태·막힌 이유가 있으면 그대로 전하십시오.
 """
+
+#: 말투. **어떻게 말할지만** 바꿉니다.
+#
+# 무엇을 말할지는 건드리지 않습니다. "간결하게" 를 골랐다는 이유로 유보 사유나
+# 근거 출처가 잘려 나가면, 말투 설정이 판정을 바꾸는 셈이 됩니다. 그래서 각
+# 항목에 **무엇은 줄이지 말라**를 함께 적습니다.
+_BY_TONE = {
+    "FORMAL":
+        "정중한 존댓말로 말하십시오(…합니다 / …드립니다). 격식을 지키되 "
+        "장황해지지 않게 하십시오.",
+    "FRIENDLY":
+        "부드러운 구어체로 말하십시오(…해요 / …할게요). 친근하게 말하되 "
+        "사실을 흐리거나 확답처럼 들리게 하지 마십시오.",
+    "CONCISE":
+        "군더더기 없이 핵심만 말하십시오. 다만 **근거와 유보 사유는 줄이지 "
+        "마십시오** — 짧게 만들려고 그것을 빼면 왜 그렇게 답했는지가 사라집니다.",
+}
 
 _CONTEXT = """\
 ## 지금 상황
@@ -60,8 +77,15 @@ _BY_INTENT = {
 
 def build_system(principal_name: str, *, intent: str = "",
                  meeting_title: str = "", project_name: str = "",
-                 delegate_prompt: str = "", constraints: list[str] | None = None) -> str:
+                 delegate_prompt: str = "", constraints: list[str] | None = None,
+                 tone: str = "") -> str:
     parts = [_BASE.format(principal=principal_name)]
+
+    # 말투는 규칙 바로 뒤, 상황·의도보다 앞에 둡니다. 뒤에 붙이면 의도별 주의와
+    # 섞여 "일정은 확정하지 마십시오" 같은 문장이 말투 지시로 읽힙니다.
+    style = _BY_TONE.get(tone)
+    if style:
+        parts.append(f"## 말투\n\n{style}\n")
 
     lines = []
     if project_name:

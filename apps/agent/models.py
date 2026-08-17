@@ -13,13 +13,34 @@ from apps.common.models import TimeStamped, UUIDModel
 from apps.meetings.models import FlowSource
 
 
+class AgentTone(models.TextChoices):
+    """
+    대리인이 회의에서 말하는 투.
+
+    **무엇을 말할지가 아니라 어떻게 말할지만 정합니다.** 근거 판정과 유보는
+    `judge.py` 가 코드로 하고, 이 값은 프롬프트의 말투 안내에만 들어갑니다.
+    말투로 판정을 바꿀 수 있게 두면 "간결하게" 를 골랐다는 이유로 유보 사유가
+    잘려 나갑니다.
+
+    셋으로 둔 이유는 회의에서 대리인이 대신 말한다는 점 때문입니다. 사람마다
+    평소 회의에서 쓰는 어투가 다른데, 대리인이 전혀 다른 투로 말하면 **본인이
+    말한 것으로 읽히지 않습니다.**
+    """
+    FORMAL = "FORMAL", "정중하게"      # …합니다 / …드립니다
+    FRIENDLY = "FRIENDLY", "친근하게"  # …해요 / …할게요
+    CONCISE = "CONCISE", "간결하게"    # 군더더기 없이 핵심만
+
+
 class AgentSettings(TimeStamped):
     """
-    세부 설정 4종.
+    세부 설정 4종과 말투.
 
     와이어프레임의 O / X 두 개짜리 선택을 그대로 boolean 으로 옮겼습니다.
     `active_version` 은 저장할 때마다 오르며, 대리인의 모든 발언이
     '그때 그 버전으로 판정했다'를 가리킵니다.
+
+    **말투도 같은 버전에 실립니다.** 나중에 "왜 저렇게 말했지" 를 되짚을 때
+    그때 어떤 투로 설정돼 있었는지가 함께 있어야 답이 됩니다.
     """
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
                                 primary_key=True, related_name="agent_settings")
@@ -27,6 +48,8 @@ class AgentSettings(TimeStamped):
     allow_schedule_change = models.BooleanField(default=True)        # 일정 수정 여부
     allow_midmeeting_question = models.BooleanField(default=False)   # 회의 중간 질문
     disclose_work_plan_thought = models.BooleanField(default=True)   # 작업/계획/생각 공개
+    tone = models.CharField(max_length=10, choices=AgentTone.choices,
+                            default=AgentTone.FORMAL)
     active_version = models.PositiveIntegerField(default=1)
 
     class Meta:
@@ -38,6 +61,7 @@ class AgentSettings(TimeStamped):
             "allow_schedule_change": self.allow_schedule_change,
             "allow_midmeeting_question": self.allow_midmeeting_question,
             "disclose_work_plan_thought": self.disclose_work_plan_thought,
+            "tone": self.tone,
             "active_version": self.active_version,
         }
 

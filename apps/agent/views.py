@@ -8,6 +8,7 @@ from apps.common.views import listing
 from config.errors import BordoError
 
 from .models import (AgentConversation, AgentMessage, AgentPrompt, AgentSettings,
+                     AgentTone,
                      AgentSettingsVersion, PendingQuestion)
 from .serializers import (AgentConversationSerializer, AgentPromptSerializer,
                           AgentSettingsSerializer)
@@ -35,6 +36,17 @@ def settings_view(request):
             if new != old:
                 changed[f] = {"from": old, "to": new}
                 setattr(obj, f, new)
+
+    if "tone" in request.data:
+        # 없는 값을 넣으면 400 입니다. 조용히 기본값으로 되돌리면 사용자는
+        # 골랐다고 생각하는데 대리인은 다른 투로 말합니다.
+        new = str(request.data["tone"] or "").upper()
+        if new not in AgentTone.values:
+            raise BordoError("VALIDATION_ERROR", "고를 수 없는 말투입니다.",
+                             details={"tone": sorted(AgentTone.values)})
+        if new != obj.tone:
+            changed["tone"] = {"from": obj.tone, "to": new}
+            obj.tone = new
     if not changed:
         # 바뀐 게 없으면 버전을 올리지 않습니다. 판정 이력이 의미 없이 불어납니다.
         return Response({"settings": AgentSettingsSerializer(obj).data,
