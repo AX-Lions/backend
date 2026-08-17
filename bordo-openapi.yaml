@@ -9167,6 +9167,18 @@ paths:
                     anyOf:
                     - $ref: '#/components/schemas/AgendaDetail'
                     - type: 'null'
+                  lookup_id:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    description: |-
+                      `AI 조회` 화살표의 4단 상세로 가는 열쇠.
+                      `GET /agent-lookups/{lookup_id}` 로 이어집니다.
+
+                      `document` · `agenda` 는 내용을 통째로 싣는데 여기만 id 인 이유는,
+                      조회 기록이 대리인 쪽 모델이라 여기서 합치면 모듈이 순환하기 때문입니다.
+
+                      `content_type` 이 `AI_LOOKUP` 이 아니면 `null` 입니다.
               example:
                 edge:
                   id: edg_2
@@ -13786,6 +13798,29 @@ components:
           - SERVICE
           - DISCORD
           description: 이 전달이 어디서 일어났는지. 노드는 합치지만 **엣지에는 출처를 남겨** 필요하면 걸러 볼 수 있습니다.
+        source:
+          type: string
+          enum:
+          - GITHUB
+          - FIGMA
+          - NOTION
+          - ''
+          description: |-
+            산출물이 **어디에 있는지**. 작업 모드 `필터링 > 출처` 입니다.
+
+            `surface` 와 헷갈리기 쉬운데 다른 축입니다.
+
+                surface   일이 일어난 곳      서비스 / Discord
+                source    산출물이 있는 곳    Github / Figma / Notion
+
+            회의 모드 엣지에서는 빈 문자열입니다. 맞는 출처가 없어도 빈 문자열입니다 —
+            억지로 채우면 필터가 거짓말을 합니다.
+        source_url:
+          type: string
+          description: |-
+            산출물 주소. 뱃지를 누르면 여기로 갑니다.
+
+            `source` 만 주고 이걸 빼면 뱃지가 눌리지 않는 장식이 됩니다.
       required:
       - id
       - from_node_id

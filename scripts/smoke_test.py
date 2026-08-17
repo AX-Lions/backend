@@ -1,4 +1,5 @@
-import json, urllib.request, urllib.error
+import datetime as dt
+import json, urllib.parse, urllib.request, urllib.error
 
 import os
 BASE = os.environ.get("BORDO_SMOKE_BASE", "http://127.0.0.1:8000") + "/api/v1"
@@ -70,8 +71,24 @@ fl = call("GET", f"/meetings/{mid}/flow?category=MEETING")
 # 화살표는 사람 쌍마다 하나이고 종류별 개수가 뱃지로 붙습니다.
 print(f"     └ 노드 {len(fl['nodes'])} · 화살표 {len(fl['arrows'])}"
       f" · opacity={[a['opacity'] for a in fl['arrows']]}")
-w = call("GET", f"/meetings/{mid}/flow?category=WORK")
-print(f"     └ WORK 화살표 {len(w['arrows'])} · 필터옵션 {w['filter_options']['content_types']}")
+# 작업 플로우는 **프로젝트·기간** 스코프입니다. 회의에 매달리지 않으므로
+# `/meetings/{id}/flow?category=WORK` 로 물으면 한 건도 안 나옵니다. 그 경로로
+# 확인하고 있으면 화면이 빈 채로 열려도 여기서는 통과합니다.
+frm = urllib.parse.quote(
+    (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=20)).isoformat())
+w = call("GET", f"/projects/{pid}/flow?from={frm}")
+print(f"     └ 작업 화살표 {len(w['arrows'])} · 기간 {w.get('period_label')}"
+      f" · 종류 {w['filter_options']['content_types']}"
+      f" · 출처 {w['filter_options']['sources']}")
+# 다섯 칸이 다 있어야 화면의 필터가 온전합니다. 하나라도 비면 그 칸이 안 뜹니다.
+assert set(w["filter_options"]["content_types"]) >= {
+    "WORK", "REVISION", "FEEDBACK", "SHARE", "AI_LOOKUP"}, \
+    w["filter_options"]["content_types"]
+assert w["filter_options"]["sources"], "출처 필터가 비었습니다"
+# 진하기는 저장값이 아니라 **조회 기간**으로 계산합니다. 전부 같으면
+# 계산이 안 걸린 것입니다.
+opac = {a["opacity"] for a in w["arrows"]}
+assert len(opac) > 1, f"진하기가 균일합니다: {opac}"
 call("GET", f"/meetings/{mid}/flow?category=MEETING&content_types=DOCUMENT", expect=400,
      label="GET flow (회의모드에 DOCUMENT → 400)")
 f2 = call("GET", f"/meetings/{mid}/flow?category=MEETING&content_types=REQUEST")
@@ -88,9 +105,22 @@ ag = call("GET", f"/meetings/{mid}/agendas")
 edge_id = fl["arrows"][0]["counts"][0]["edge_ids"][0]
 det = call("GET", f"/flow-edges/{edge_id}")
 print(f"     └ 전달 상세: agenda={bool(det['agenda'])} document={bool(det['document'])}")
+# 작업 화살표에도 상세가 열려야 합니다. 여긴 회의가 없어 권한 검사가 다른
+# 갈래를 타므로(프로젝트 멤버십), 눌러 봐야 확인됩니다.
 work_edge = w["arrows"][0]["counts"][0]["edge_ids"][0]
 d2 = call("GET", f"/flow-edges/{work_edge}")
-print(f"     └ 문서 전달: document={bool(d2['document'])} sections={len((d2['document'] or {}).get('sections',[]))}")
+print(f"     └ 작업 상세: 종류={d2['edge']['content_type']} 출처={d2['edge']['source'] or '-'}")
+
+# `AI 조회` 는 4단 상세가 따로 있습니다. 엣지에서 그리로 갈 수 있어야 화살표를
+# 눌렀을 때 빈 패널이 안 뜹니다.
+lookup_edge = next(eid
+                   for a in w["arrows"] for c in a["counts"]
+                   if c["content_type"] == "AI_LOOKUP" for eid in c["edge_ids"])
+d3 = call("GET", f"/flow-edges/{lookup_edge}")
+assert d3["lookup_id"], "AI 조회 화살표에서 상세로 갈 길이 없습니다"
+lk = call("GET", f"/agent-lookups/{d3['lookup_id']}")
+print(f"     └ AI 조회 4단: 이유={bool(lk['reason'])} 질문={bool(lk['question'])}"
+      f" 확인={lk['answered']} 출처={lk['source']}")
 
 # AI 브리핑
 br = call("GET", f"/meetings/{mid}/ai-briefing")

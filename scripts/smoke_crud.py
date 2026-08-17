@@ -301,7 +301,10 @@ if home["today_schedule"]:
 if home["recent_meeting_summary"]:
     s = home["recent_meeting_summary"]
     print(f"     최근 회의 = {s['team_name']} / {s['title']} / 불참={s['missed']}")
-    assert "main_decisions" in s and "agent_summary" in s, "요약 카드 필드가 옛 모양입니다"
+    # `agent_summary` 가 아니라 `zero_summary` 입니다. 화면에서 대리인의 호칭이
+    # `Zero` 라 계약·구현·CLAUDE.md 가 모두 그 이름을 씁니다 — 스크립트만
+    # 옛 이름으로 남아 있어 여기서 항상 멈췄습니다.
+    assert "main_decisions" in s and "zero_summary" in s, "요약 카드 필드가 옛 모양입니다"
 
 # ═══════════════════════════════════════════ 결과
 print(f"\n{'═' * 60}")
