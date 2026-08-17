@@ -1,4 +1,5 @@
-﻿import os
+﻿import math
+import os
 import logging
 
 import discord
@@ -11,6 +12,7 @@ from cogs.general import GeneralCog
 from cogs.meeting import MeetingCog
 from cogs.delegate import DelegateCog
 from cogs.bordo import BordoCog
+from cogs.outbox import OutboxCog
 
 load_dotenv()
 
@@ -26,6 +28,17 @@ openai_service = OpenAIService(OPENAI_API_KEY, OPENAI_MODEL)
 # discord.log 파일에 로그 생성
 logging.basicConfig(filename="discord.log", encoding="utf-8", level=logging.INFO)
 log = logging.getLogger("bordo")
+
+try:
+    OUTBOX_POLL_INTERVAL = float(os.getenv("BORDO_OUTBOX_INTERVAL", "3"))
+    # math.isfinite()가 nan·inf를 같이 걸러준다 — 그냥 <= 0만 보면 nan은
+    # 모든 비교가 False라 통과하고, inf는 0보다 커서 통과한다. 둘 다
+    # asyncio.sleep()에 들어가면 루프가 그대로 멈춘다.
+    if not math.isfinite(OUTBOX_POLL_INTERVAL) or OUTBOX_POLL_INTERVAL <= 0:
+        raise ValueError
+except ValueError:
+    log.warning("BORDO_OUTBOX_INTERVAL이 올바르지 않아 기본값 3초를 씁니다.")
+    OUTBOX_POLL_INTERVAL = 3.0
 
 
 intents = discord.Intents.default()
@@ -63,10 +76,17 @@ async def setup_hook():
         openai_service
     )
 
+    outbox_cog = OutboxCog(
+        bot,
+        backend,
+        OUTBOX_POLL_INTERVAL
+    )
+
     await bot.add_cog(meeting_cog)
     await bot.add_cog(delegate_cog)
     await bot.add_cog(bordo_cog)
     await bot.add_cog(general_cog)
+    await bot.add_cog(outbox_cog)
 
     await bot.tree.sync()
 
