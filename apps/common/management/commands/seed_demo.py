@@ -39,6 +39,14 @@ class Command(BaseCommand):
     @transaction.atomic
     def handle(self, *args, **opts):
         if opts["reset"]:
+            # 팀을 먼저 지웁니다.
+            #
+            # 사람부터 지우면 `Team.created_by` · `Project.created_by` ·
+            # `Meeting.created_by` 가 PROTECT 라 막힙니다. 만든 사람만 사라지고
+            # 만든 것이 남는 상황을 모델이 거부하는 것이고, 그게 맞습니다.
+            # 시드가 순서를 맞춥니다.
+            Team.all_objects.filter(
+                created_by__email__endswith="@bordo.dev").delete()
             User.all_objects.filter(email__endswith="@bordo.dev").delete()
             self.stdout.write("기존 데모 데이터를 지웠습니다.")
 
