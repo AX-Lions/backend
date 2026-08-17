@@ -102,6 +102,10 @@ urlpatterns = [
          agent.conversation_messages),
     path(f"{API}/me/pending-questions", agent.my_pending_questions),
     path(f"{API}/pending-questions/<uuid:question_id>/answer", agent.answer_question),
+    # AI 실행 단계·근거. 대화 메시지가 내려주는 run_id 로 여기까지 옵니다.
+    path(f"{API}/agent-runs/<uuid:run_id>", agent.agent_run_detail),
+    path(f"{API}/agent-runs/<uuid:run_id>/steps", agent.agent_run_steps),
+    path(f"{API}/agent-runs/<uuid:run_id>/evidence", agent.agent_run_evidence),
 
     # ── 04. 문서
     path(f"{API}/projects/<uuid:project_id>/documents", documents.documents),
