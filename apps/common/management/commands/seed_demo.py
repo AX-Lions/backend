@@ -21,11 +21,17 @@ from apps.meetings.models import (Agenda, AiBriefing, Attendance, FlowCategory,
 from apps.orgs.models import (Favorite, Project, ProjectMember, RecentProject, Team,
                               TeamMember, TeamRole)
 
+#: 데모 팀. `(이메일, 이름, 역할, 아바타)`
+#
+# 아바타 경로는 **프론트 정적 자산**입니다. 같은 출처에서 서빙되므로 그대로
+# 씁니다. 비워 두면 화면이 사람마다 겹친 원(AvatarStack)으로 대신 그리는데,
+# 플로우 화면은 노드가 얼굴로 구별되는 그림이라 전부 같아 보입니다.
 PEOPLE = [
-    ("susu@bordo.dev", "유수인", "design"),
-    ("backend01@bordo.dev", "최비성", "backend"),
-    ("front01@bordo.dev", "임수연", "frontend"),
-    ("jaemin@bordo.dev", "서재민", "backend"),
+    ("susu@bordo.dev", "유수인", "design", "/flowchart/profile-2.jpeg"),
+    ("backend01@bordo.dev", "최비성", "backend", "/flowchart/profile-1.jpeg"),
+    ("front01@bordo.dev", "임수연", "frontend", "/flowchart/profile-3.jpeg"),
+    ("jaemin@bordo.dev", "서재민", "backend", ""),
+    ("daeun@bordo.dev", "강다은", "discord", ""),
 ]
 PASSWORD = "Bordo!2026"
 
@@ -51,11 +57,16 @@ class Command(BaseCommand):
             self.stdout.write("기존 데모 데이터를 지웠습니다.")
 
         users = {}
-        for email, name, role in PEOPLE:
+        for email, name, role, avatar in PEOPLE:
             u = User.all_objects.filter(email=email).first()
             if not u:
                 u = User.objects.create_user(email=email, password=PASSWORD, name=name,
                                              project_role=role, timezone="Asia/Seoul")
+            # 이미 있는 계정에도 아바타를 채웁니다. --reset 없이 다시 돌릴 때
+            # 사람만 남고 그림이 비면 노드가 전부 같아 보입니다.
+            if u.avatar_url != avatar:
+                u.avatar_url = avatar
+                u.save(update_fields=["avatar_url"])
             users[name] = u
             AgentSettings.objects.get_or_create(user=u)
 
@@ -64,7 +75,7 @@ class Command(BaseCommand):
             name="멋사 중앙해커톤",
             defaults={"created_by": owner, "description": "Bordo 개발팀",
                       "category_keys": ["backend", "frontend", "design"]})
-        for i, (_, name, _r) in enumerate(PEOPLE):
+        for i, (_, name, _r, _a) in enumerate(PEOPLE):
             TeamMember.objects.get_or_create(
                 team=team, user=users[name],
                 defaults={"team_role": TeamRole.OWNER if i == 0 else TeamRole.MEMBER})
@@ -77,7 +88,7 @@ class Command(BaseCommand):
                 team=team, name=name,
                 defaults={"team_name": team.name, "created_by": owner,
                           "progress": progress})
-            for _, pname, _r in PEOPLE:
+            for _, pname, _r, _a in PEOPLE:
                 ProjectMember.objects.get_or_create(project=p, user=users[pname])
             p.member_count = ProjectMember.objects.filter(project=p).count()
             p.progress = progress
@@ -104,7 +115,7 @@ class Command(BaseCommand):
                           "status": MeetingStatus.CONFIRMED})
             if created:
                 MeetingSummary.objects.get_or_create(meeting=m)
-                for _, pname, _r in PEOPLE:
+                for _, pname, _r, _a in PEOPLE:
                     MeetingParticipant.objects.get_or_create(
                         meeting=m, user=users[pname],
                         defaults={"user_name": pname})
@@ -124,7 +135,7 @@ class Command(BaseCommand):
             return
 
         parts = {}
-        for i, (_, pname, _r) in enumerate(PEOPLE):
+        for i, (_, pname, _r, _a) in enumerate(PEOPLE):
             att = Attendance.DELEGATED if pname == "유수인" else Attendance.PRESENT
             parts[pname] = MeetingParticipant.objects.create(
                 meeting=meeting, user=users[pname], user_name=pname,
@@ -356,7 +367,24 @@ class Command(BaseCommand):
         emit(6, work(users["최비성"], "로그인 API 구현", WorkStatus.IN_PROGRESS, 40))
         emit(5, work(users["유수인"], "참여자 프로필 제작", WorkStatus.TODO, 0))
 
-        for days, (item, status, progress) in zip((3, 2, 1), changed):
+        # 서재민 · 강다은도 자기 작업을 갖습니다.
+        #
+        # 이게 없으면 플로우 화면에서 **그 사람 노드를 눌러도 우측 패널이 빕니다.**
+        # 노드는 다섯인데 볼 것이 있는 사람은 셋뿐인 상태가 되고, 시연에서
+        # "다른 사람은 눌러도 아무것도 안 나온다" 로 보입니다.
+        changed += [
+            (emit(10, work(users["서재민"], "반응형 기준 변경",
+                           WorkStatus.IN_PROGRESS, 40)), WorkStatus.DONE, 100),
+            (emit(9, work(users["강다은"], "검색 인터렉션 수정",
+                          WorkStatus.TODO, 0)), WorkStatus.IN_PROGRESS, 50),
+        ]
+        emit(8, work(users["서재민"], "모바일 화면 제작", WorkStatus.IN_PROGRESS, 65))
+        emit(7, work(users["서재민"], "로그인 API 연동", WorkStatus.DONE, 100))
+        emit(6, work(users["서재민"], "회의 화면 반응형 작업", WorkStatus.IN_PROGRESS, 35))
+        emit(4, work(users["강다은"], "검색 기능 구현", WorkStatus.IN_PROGRESS, 45))
+        emit(3, work(users["강다은"], "Bordo 브리핑 개선", WorkStatus.TODO, 0))
+
+        for days, (item, status, progress) in zip((3, 2, 1, 5, 2), changed):
             emit(days, move(item, status, progress))
 
         # ── 공유
@@ -414,6 +442,10 @@ class Command(BaseCommand):
 
         emit(5, say("임수연", "우측 패널이 1280 이하에서 잘립니다. 너비를 다시 봐야 합니다."))
         emit(2, say("최비성", "응답 구조를 바꿨습니다. 기존 필드는 한 주만 같이 내려갑니다."))
+        # 사람마다 피드백이 있어야 우측 패널의 `피드백` 칩이 0 이 아닙니다.
+        emit(6, say("서재민", "로그인 실패 원인에 따라 오류 메시지를 구분하는 게 좋겠습니다."))
+        emit(4, say("서재민", "회의 상세 화면은 모바일에서 좌우 스크롤이 생깁니다. 기준폭을 낮춥시다."))
+        emit(3, say("강다은", "Discord 공지 문구에 회의 시각이 두 번 들어갑니다."))
 
         # 중요 표시는 화면에서 **나중에** 켭니다(`PATCH .../important`). 켜지는
         # 순간에도 그려지는지 시드가 함께 확인합니다.
@@ -444,6 +476,23 @@ class Command(BaseCommand):
              "회의 상세 화면에서 지금 붙인 API 가 무엇입니까?",
              "",
              FlowSource.FIGMA),
+            # 화면에서 `AI 조회` 는 주황 선으로 그려집니다. 두 건뿐이면 선이
+            # 한 쌍만 주황이라 색으로 갈랐다는 것이 눈에 안 들어옵니다.
+            (5, "최비성", "유수인", "디자인 최종안 확정 여부",
+             "API 응답 구조를 바꾸기 전에 화면이 확정됐는지 알아야 했습니다.",
+             "회의 상세 화면 시안이 확정됐습니까?",
+             "8월 18일에 확정하기로 했고 지금은 검토 중입니다.",
+             FlowSource.FIGMA),
+            (3, "서재민", "강다은", "Discord 공지 형식",
+             "모바일 반응형 작업 중 공지 문구 길이가 화면에 영향을 줬습니다.",
+             "Discord 공지 문구 형식이 정해졌습니까?",
+             "회의 시각과 링크만 넣기로 했습니다.",
+             FlowSource.NOTION),
+            (1, "강다은", "서재민", "검색 기능 연동 시점",
+             "검색 인터렉션을 고치기 전에 API 가 언제 나오는지 확인했습니다.",
+             "검색 API 는 언제쯤 붙일 수 있습니까?",
+             "",
+             FlowSource.GITHUB),
         ]:
             def ask(a=asker, t=target, tp=topic, r=reason, q=question,
                     ans=answer, s=source, d=days):
