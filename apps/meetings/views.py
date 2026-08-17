@@ -477,7 +477,19 @@ def flow_edge_detail(request, edge_id):
         project_membership(request.user, edge.project_id)
 
     body = {"edge": FlowEdgeSerializer(edge).data,
-            "delivery_context": [], "document": None, "agenda": None}
+            "delivery_context": [], "document": None, "agenda": None,
+            # `AI 조회` 화살표의 4단 상세로 가는 길입니다.
+            #
+            # 상세 자체는 `/agent-lookups/{id}` 가 이미 내려주는데, **엣지에서
+            # 그 id 로 갈 방법이 없었습니다.** 화살표를 눌러도 빈 패널이 열립니다.
+            #
+            # 여기서 내용까지 합치지 않는 이유는 `apps.agent` 를 import 해야
+            # 해서입니다 — `AgentLookup` 이 이쪽 `FlowEdge` 를 참조하므로
+            # 순환이 됩니다. id 만 주고 프론트가 한 번 더 부릅니다.
+            "lookup_id": None}
+    lookup = edge.lookups.first()
+    if lookup is not None:
+        body["lookup_id"] = str(lookup.id)
     if edge.document:
         body["document"] = DocumentRefSerializer(edge.document).data
         body["delivery_context"] = edge.document.delivery_context
