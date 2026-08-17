@@ -159,6 +159,63 @@ class WritePolicyTest(Base):
         self.assertEqual(out.error, "", f"차단이 실행을 죽였습니다: {out.error}")
         self.assertTrue(out.text, "막은 뒤 답을 만들지 못했습니다")
 
+    def test_a_personal_message_is_blocked_when_records_are_private(self):
+        """
+        `send_message` 는 **즉시 나갑니다.** 승인 큐를 안 거치므로 나간 뒤에
+        되돌릴 자리가 없습니다.
+
+        최종 답변은 `judge.can_disclose()` 가 거르지만, 검색이 돌려준 원문은
+        그 전에 이미 모델이 보고 있어 본문에 옮겨 담으면 판정을 우회합니다.
+        """
+        from apps.agent.services.llm import ToolCall
+        from apps.chat.models import ChatMessage
+
+        AgentSettings.objects.filter(user=self.me).update(
+            disclose_work_plan_thought=False)
+        spy = CatalogSpy(
+            # 의도를 `OTHER` 로 둡니다. `STATUS` 로 두면 **POLICY 단계에서 실행
+            # 자체가 거절돼** 도구 루프에 들어가지도 않습니다 — 그러면 이 테스트는
+            # `_may_write` 를 확인하는 게 아니라 앞단이 막았다는 걸 확인하는
+            # 셈이 됩니다(실제로 처음에 그렇게 써서 헛돌았습니다).
+            LLMResponse(text="OTHER"),
+            LLMResponse(tool_calls=[ToolCall("c1", "send_message",
+                                             {"to_user_id": str(self.peer.id),
+                                              "body": "지금 인덱스 작업 중입니다"})]),
+            LLMResponse(text="따로 전하지 않았습니다."),
+        )
+        out = self._run(spy)
+
+        self.assertEqual(ChatMessage.objects.count(), 0, "정책을 뚫고 나갔습니다")
+        blocked = [s for s in out.run.steps if s.get("kind") == "skill_blocked"]
+        self.assertEqual(len(blocked), 1)
+        self._assert_survived(out)
+
+    def test_the_tool_is_still_offered_even_when_blocked(self):
+        """
+        목록에서 빼면 모델은 왜 안 되는지 말할 수조차 없습니다. 두고 막습니다.
+        """
+        AgentSettings.objects.filter(user=self.me).update(allow_schedule_change=False)
+        spy = CatalogSpy(LLMResponse(text="STATUS"), LLMResponse(text="답"))
+        self._run(spy)
+        self.assertIn("propose_schedule", spy.names)
+
+    def test_allowed_write_goes_through(self):
+        from apps.agent.services.llm import ToolCall
+        from apps.tasks.models import Task, TaskStatus
+
+        spy = CatalogSpy(
+            LLMResponse(text="STATUS"),
+            LLMResponse(tool_calls=[ToolCall("c1", "propose_task",
+                                             {"title": "인덱스 추가"})]),
+            LLMResponse(text="후보로 올려 뒀습니다."),
+        )
+        self._run(spy)
+
+        task = Task.objects.get()
+        self.assertEqual(task.title, "인덱스 추가")
+        # 1원칙 — AI 는 후보만 만들고 확정은 사람이 합니다.
+        self.assertEqual(task.status, TaskStatus.PENDING_APPROVAL)
+
     def test_peer_lookup_is_blocked_when_records_are_private(self):
         """
         남에게 물으려면 이쪽 맥락을 얼마간 건네야 합니다. 본인이 자기 기록을
