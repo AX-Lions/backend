@@ -13,6 +13,7 @@
 
 여기서는 `client.chat()` 에 **넘어간 인자**를 붙잡아 봅니다.
 """
+import json
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -30,10 +31,21 @@ class CatalogSpy:
     def __init__(self, *responses):
         self._q = list(responses)
         self.catalogs = []
+        self.turns = []
 
     def chat(self, messages, tools=None, system=""):
         self.catalogs.append(tools)
+        # 얕은 복사를 뜹니다. `messages` 는 루프가 계속 덧붙이는 **같은 객체**라,
+        # 그냥 담아 두면 매 턴이 마지막 상태를 가리켜 "이 턴에 무엇이 보였나" 를
+        # 볼 수 없습니다.
+        self.turns.append(list(messages))
         return self._q.pop(0) if self._q else LLMResponse(text="끝")
+
+    @property
+    def tool_replies(self):
+        """모델이 돌려받은 도구 결과들. 마지막 턴 기준입니다."""
+        return [m for m in (self.turns[-1] if self.turns else [])
+                if m.get("role") == "tool"]
 
     @property
     def names(self):
@@ -238,3 +250,52 @@ class WritePolicyTest(Base):
         blocked = [s for s in out.run.steps if s.get("kind") == "skill_blocked"]
         self.assertEqual(len(blocked), 1)
         self._assert_survived(out)
+
+
+class SkillFailureTest(Base):
+    """
+    스킬이 실패했을 때 **모델이 그 사실을 아는가.**
+
+    실패를 빈 결과로 돌려주면 모델은 "찾았는데 없었다" 와 "부르다 터졌다" 를
+    구별하지 못하고, 되지도 않은 일을 했다고 답합니다.
+    """
+
+    def test_the_model_is_told_why_a_skill_failed(self):
+        from apps.agent.services.llm import ToolCall
+        from apps.chat.models import ChatMessage
+
+        spy = CatalogSpy(
+            LLMResponse(text="OTHER"),
+            # 없는 사람에게 보냅니다 — 스킬이 `not_found` 로 실패합니다.
+            LLMResponse(tool_calls=[ToolCall(
+                "c1", "send_message",
+                {"to_user_id": "00000000-0000-0000-0000-000000000000",
+                 "body": "안녕하세요"})]),
+            LLMResponse(text="전달하지 못했습니다."),
+        )
+        out = self._run(spy)
+
+        self.assertEqual(ChatMessage.objects.count(), 0)
+
+        replies = spy.tool_replies
+        self.assertEqual(len(replies), 1)
+        body = json.loads(replies[0]["content"])
+        # 빈 dict 를 돌려주면 모델은 보낸 줄 압니다.
+        self.assertIn("error", body, f"실패 사유가 모델에게 안 갔습니다: {body}")
+        self.assertIn("받는 사람", body["error"])
+        self.assertEqual(body["code"], "not_found")
+
+    def test_a_successful_skill_still_returns_its_data(self):
+        """실패 경로를 붙이면서 성공 경로 모양이 바뀌면 다른 스킬들이 깨집니다."""
+        from apps.agent.services.llm import ToolCall
+
+        spy = CatalogSpy(
+            LLMResponse(text="STATUS"),
+            LLMResponse(tool_calls=[ToolCall("c1", "search_records",
+                                             {"query": "인덱스"})]),
+            LLMResponse(text="답"),
+        )
+        self._run(spy)
+
+        body = json.loads(spy.tool_replies[0]["content"])
+        self.assertNotIn("error", body)
