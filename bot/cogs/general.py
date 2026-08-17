@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands
@@ -9,17 +8,12 @@ log = logging.getLogger("bordo")
 
 
 class GeneralCog(commands.Cog):
-    def __init__(self, bot, backend, meeting_cog, openai_service):
+    def __init__(self, bot, backend, openai_service):
         self.bot = bot
         self.backend = backend
-        self.meeting_cog = meeting_cog
         self.openai_service = openai_service
 
         self.seen_message_ids: set[str] = set()
-
-    @staticmethod
-    def now_iso() -> str:
-        return datetime.now(timezone.utc).isoformat()
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -28,14 +22,6 @@ class GeneralCog(commands.Cog):
 
         if message.guild is None:
             return  # DM은 대상 밖 (guild_id 필요한 idempotency_key 구성 불가)
-
-        # [TEMP] 활성 회의 스레드의 대화는 종료 시 요약·TODO 생성을 위해 임시로 기록해둔다.
-        if message.channel.id in self.meeting_cog.meeting_transcripts:
-            self.meeting_cog.meeting_transcripts[message.channel.id].append({
-                "author": message.author.display_name,
-                "content": message.content,
-                "at": self.now_iso(),
-            })
 
         # [TEMP] 봇을 멘션하면 일반 채팅으로 LLM이 직접 답한다.
         if self.bot.user in message.mentions:

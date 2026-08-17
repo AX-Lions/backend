@@ -6,13 +6,14 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from services.backend import get_error
 
 log = logging.getLogger("bordo")
 
 
 class MeetingCog(commands.Cog):
 
-    def __init__(self, bot, backend, delegate_on_users: set[str], openai_service):
+    def __init__(self, bot, backend, delegate_on_users: set[str]):
         self.bot = bot
         self.backend = backend
 
@@ -22,11 +23,6 @@ class MeetingCog(commands.Cog):
 
         # [기존] _active_meeting_threads
         self.active_meeting_threads: dict[int, dict] = {}
-
-        # [기존] _meeting_transcripts
-        self.meeting_transcripts: dict[int, list[dict]] = {}
-
-        self.openai_service = openai_service
     # --------------------------------------------------
     # 공통 함수
     # --------------------------------------------------
@@ -89,12 +85,10 @@ class MeetingCog(commands.Cog):
             "participants": participants,
         }
 
-        self.meeting_transcripts[thread.id] = []
-
         announcement = (
             f"🟢 **회의가 시작되었습니다** · 안건: {agenda}\n"
             f"대화는 이 스레드에 남겨주세요. 끝나면 이 스레드 안에서 "
-            f"`/meeting-end`를 실행하면 요약과 TODO가 정리됩니다."
+            f"`/meeting-end`를 실행하면 Backend가 요약을 정리합니다."
         )
 
         delegated = [uid for uid, status in participants.items() if status == "delegated"]
@@ -130,7 +124,7 @@ class MeetingCog(commands.Cog):
     @app_commands.command(
         name="meeting-end",
         description=(
-            "회의를 종료하고 요약·TODO를 정리합니다. "
+            "회의를 종료합니다. Backend가 대화 기록으로 요약을 만듭니다. "
             "회의 스레드 안에서 실행하세요."
         )
     )
@@ -147,32 +141,78 @@ class MeetingCog(commands.Cog):
             return
 
         meeting = self.active_meeting_threads.pop(thread_id)
-        transcript = self.meeting_transcripts.pop(thread_id, [])
 
+        # 봇은 원본을 만들지 않는다. 대화는 이미 on_message에서 발언마다
+        # Backend로 전달돼 있고, 요약도 Backend가 그 발언들로 만든다.
         async with interaction.channel.typing():
-            wrapup = await self.openai_service.generate_meeting_wrapup(transcript)
+            result = await self.backend.post("/internal/v1/meetings/end",
+                json={
+                    "guild_id": str(interaction.guild_id),
+                    "thread_id": str(thread_id),
+                    "ended_by": str(interaction.user.id),
+                    "ended_at": self._now_iso(),
+                }
+            )
 
-        embed = discord.Embed(
-            title=f"📝 회의 요약 · {meeting['agenda']}",
-            description=wrapup["summary"],
-            color=discord.Color.green(),
-        )
-        if wrapup["todos"]:
-            embed.add_field(name="TODO", value="\n".join(f"- [ ] {t}" for t in wrapup["todos"]), inline=False)
-        await interaction.channel.send(embed=embed)
+        if result is None:
+            # 네트워크 오류 등 일시적 실패 — 되돌리면 재시도가 성공할 여지가 있다.
+            self.active_meeting_threads[thread_id] = meeting
+            await interaction.followup.send(
+                "회의 종료에 실패했습니다. 잠시 후 다시 시도해주세요.", ephemeral=True
+            )
+            return
+
+        error = get_error(result)
+        if error:
+            if error.get("code") == "MEETING_NOT_FOUND":
+                # thread_id는 Discord 채널 id라 항상 값이 있어 검증 오류로는 안 걸리고,
+                # 이 코드만큼은 재시도해도 절대 성공하지 않는 영구적 오류다. 되돌리면
+                # 이 회의는 영영 못 끝내므로, Backend가 없어도 봇은 계속 동작해야 한다는
+                # 원칙(CLAUDE.md)대로 Discord 쪽은 정리하고 동기화 실패만 알린다.
+                await interaction.channel.send("🔴 **회의가 종료되었습니다.**")
+                await interaction.followup.send(
+                    f"회의는 종료했지만 Backend와 동기화하지 못했습니다: "
+                    f"{error.get('message', '')}", ephemeral=True
+                )
+                return
+
+            # 그 외(예: 서비스 토큰 오류처럼 @internal 데코레이터가 뷰 실행 전에
+            # 먼저 던지는 4xx)는 원인만 고치면 재시도로 풀린다. None과 동일하게
+            # 되돌려서 다시 시도할 수 있게 한다.
+            self.active_meeting_threads[thread_id] = meeting
+            await interaction.followup.send(
+                error.get("message", "회의 종료에 실패했습니다."), ephemeral=True
+            )
+            return
+
+        if result.get("duplicate"):
+            await interaction.followup.send("이미 종료된 회의입니다.", ephemeral=True)
+            return
+
+        summary = result.get("summary")
+        if summary:
+            embed = discord.Embed(
+                title=f"📝 회의 요약 · {meeting['agenda']}",
+                description=summary.get("one_line", ""),
+                color=discord.Color.green(),
+            )
+            if summary.get("discovered_issues"):
+                embed.add_field(name="발견된 이슈",
+                                value="\n".join(f"- {i}" for i in summary["discovered_issues"]),
+                                inline=False)
+            if summary.get("changes"):
+                embed.add_field(name="변동 사항",
+                                value="\n".join(f"- {c}" for c in summary["changes"]),
+                                inline=False)
+            if summary.get("next_plans"):
+                embed.add_field(name="다음 계획",
+                                value="\n".join(f"- {p}" for p in summary["next_plans"]),
+                                inline=False)
+            await interaction.channel.send(embed=embed)
 
         await interaction.channel.send("🔴 **회의가 종료되었습니다.**")
 
-        await self.backend.post("/internal/v1/meetings/end",
-            json={
-                "guild_id": str(interaction.guild_id),
-                "thread_id": str(thread_id),
-                "ended_by": str(interaction.user.id),
-                "ended_at": self._now_iso(),
-            }
-        )
-
-        await interaction.followup.send("회의를 종료하고 요약을 게시했습니다.")
+        await interaction.followup.send("회의를 종료했습니다.")
 
     # --------------------------------------------------
     # /meeting-status
