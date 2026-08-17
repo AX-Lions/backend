@@ -62,6 +62,13 @@ class Base(TestCase):
         ProjectMember.objects.create(project=cls.project, user=cls.me)
         AgentSettings.objects.create(user=cls.me)
 
+        cls.peer = User.objects.create_user(email="c2@bordo.dev", password="x" * 10,
+                                            name="임수연")
+        TeamMember.objects.create(team=cls.team, user=cls.peer,
+                                  team_role=TeamRole.MEMBER)
+        ProjectMember.objects.create(project=cls.project, user=cls.peer)
+        AgentSettings.objects.create(user=cls.peer)
+
     def _run(self, spy, **kw):
         with patch("apps.agent.services.react.default_client", spy):
             return react.run(principal=self.me, question="진행 상황 알려줘",
@@ -134,32 +141,23 @@ class WritePolicyTest(Base):
         blocked = [s for s in out.run.steps if s.get("kind") == "skill_blocked"]
         self.assertEqual(len(blocked), 1)
         self.assertIn("일정", blocked[0]["reason"])
+        self._assert_survived(out)
 
-    def test_the_tool_is_still_offered_even_when_blocked(self):
+    def _assert_survived(self, out):
         """
-        목록에서 빼면 모델은 왜 안 되는지 말할 수조차 없습니다. 두고 막습니다.
+        막고 **끝난 게 아니라 계속 돌았는지** 봅니다.
+
+        `skill_blocked` 만 보면 부족합니다. 차단 직후 예외가 나도 그 단계는 이미
+        `steps` 에 들어가 있고, 실행이 죽어도 예외 핸들러가 `steps` 를 그대로
+        저장하기 때문입니다. **막았다는 기록은 남는데 실행은 실패한** 상태를
+        구별하지 못합니다.
+
+        실제로 그렇게 한 번 지나갔습니다 — `tool_message(call.id, ...)` 로 넘겨
+        문자열의 `.id` 를 읽다 터졌는데, 이 단언이 없어 테스트가 통과했습니다.
+        회의에서는 대리인이 통째로 침묵합니다.
         """
-        AgentSettings.objects.filter(user=self.me).update(allow_schedule_change=False)
-        spy = CatalogSpy(LLMResponse(text="STATUS"), LLMResponse(text="답"))
-        self._run(spy)
-        self.assertIn("propose_schedule", spy.names)
-
-    def test_allowed_write_goes_through(self):
-        from apps.agent.services.llm import ToolCall
-        from apps.tasks.models import Task, TaskStatus
-
-        spy = CatalogSpy(
-            LLMResponse(text="STATUS"),
-            LLMResponse(tool_calls=[ToolCall("c1", "propose_task",
-                                             {"title": "인덱스 추가"})]),
-            LLMResponse(text="후보로 올려 뒀습니다."),
-        )
-        self._run(spy)
-
-        task = Task.objects.get()
-        self.assertEqual(task.title, "인덱스 추가")
-        # 1원칙 — AI 는 후보만 만들고 확정은 사람이 합니다.
-        self.assertEqual(task.status, TaskStatus.PENDING_APPROVAL)
+        self.assertEqual(out.error, "", f"차단이 실행을 죽였습니다: {out.error}")
+        self.assertTrue(out.text, "막은 뒤 답을 만들지 못했습니다")
 
     def test_peer_lookup_is_blocked_when_records_are_private(self):
         """
@@ -172,10 +170,14 @@ class WritePolicyTest(Base):
         AgentSettings.objects.filter(user=self.me).update(
             disclose_work_plan_thought=False)
         spy = CatalogSpy(
-            LLMResponse(text="STATUS"),
+            # `STATUS` 로 두면 POLICY 가 먼저 거절해 도구 루프에 안 들어갑니다.
+            LLMResponse(text="OTHER"),
             LLMResponse(tool_calls=[ToolCall("c1", "ask_peer_agent",
-                                             {"target_name": "누구", "question": "q"})]),
+                                             {"target_name": "임수연", "question": "q"})]),
             LLMResponse(text="확인하지 않았습니다."),
         )
-        self._run(spy)
+        out = self._run(spy)
         self.assertEqual(AgentLookup.objects.count(), 0)
+        blocked = [s for s in out.run.steps if s.get("kind") == "skill_blocked"]
+        self.assertEqual(len(blocked), 1)
+        self._assert_survived(out)

@@ -198,7 +198,13 @@ def run(*, principal, question: str, meeting=None, project_id=None,
                     # 정책이 막은 것은 실패가 아니라 **하지 않기로 한 것**입니다.
                     # 모델에게 사유를 돌려주면 다른 방법을 찾습니다.
                     _step("skill_blocked", name=call.name, reason=blocked)
-                    messages.append(LLMClient.tool_message(call.id, blocked))
+                    # `tool_message(call, data)` 입니다 — 호출 객체와 dict 를
+                    # 받습니다. `call.id` 를 넘기면 안쪽에서 문자열의 `.id` 를
+                    # 읽어 터지고, 그 예외가 바깥 핸들러까지 올라가 **실행 전체가
+                    # FAILED** 로 끝납니다. 그러면 회의에서 대리인이 아무 말도
+                    # 못 하는데, 정책이 막았다는 사실을 알려 주려고 만든 자리가
+                    # 오히려 침묵을 만듭니다.
+                    messages.append(LLMClient.tool_message(call, {"error": blocked}))
                     continue
 
                 result = registry.dispatch(call.name, call.arguments, ctx)
@@ -292,8 +298,17 @@ def _may_write(skill_name: str, snapshot: dict | None) -> str:
     `SkillKind` docstring 이 "쓰기 스킬은 실행 전에 POLICY 를 다시 본다" 고
     적어 뒀는데 그 자리가 비어 있었습니다. 여기가 그 자리입니다.
 
-    일정만 설정에 걸립니다. 나머지 쓰기는 전부 **후보**를 만들 뿐이고
-    확정은 사람이 하므로(1원칙) 정책으로 더 막지 않습니다.
+    `propose_task` 는 여기서 안 막습니다. 그건 **후보**를 만들 뿐이고 확정은
+    사람이 하므로(1원칙) 승인 화면에서 한 번 더 걸러집니다.
+
+    ## 나가는 것과 쌓이는 것을 가릅니다
+
+        propose_task       PENDING_APPROVAL 로 쌓임 — 사람이 봅니다
+        propose_schedule   DRAFT 로 쌓임 — 다만 설정에 스위치가 있습니다
+        send_message       **즉시 나갑니다** — 되돌릴 자리가 없습니다
+        ask_peer_agent     남에게 이쪽 맥락을 건넵니다
+
+    뒤의 둘은 승인 단계가 없어 여기가 마지막 관문입니다.
     """
     from . import policy
 
@@ -303,11 +318,12 @@ def _may_write(skill_name: str, snapshot: dict | None) -> str:
         return ("본인이 일정 수정을 대리인에게 맡기지 않도록 설정해 두었습니다. "
                 "일정은 제안하지 않고 본인에게 남깁니다.")
 
-    if skill_name == "ask_peer_agent" and not s.get("disclose_work_plan_thought", True):
-        # 남에게 물으려면 이쪽 맥락을 얼마간 건네야 합니다. 본인이 자기 기록을
-        # 안 알리기로 했다면 그 맥락도 나가면 안 됩니다.
-        return ("본인이 작업·계획·생각을 공개하지 않도록 설정해 두었습니다. "
-                "다른 대리인에게 묻지 않습니다.")
+    if not s.get("disclose_work_plan_thought", True):
+        if skill_name == "ask_peer_agent":
+            # 남에게 물으려면 이쪽 맥락을 얼마간 건네야 합니다. 본인이 자기
+            # 기록을 안 알리기로 했다면 그 맥락도 나가면 안 됩니다.
+            return ("본인이 작업·계획·생각을 공개하지 않도록 설정해 두었습니다. "
+                    "다른 대리인에게 묻지 않습니다.")
 
     return ""
 
