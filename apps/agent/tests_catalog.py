@@ -32,7 +32,7 @@ class CatalogSpy:
         self._q = list(responses)
         self.catalogs = []
         self.turns = []
-        self._live = []
+        self._live = None
 
     def chat(self, messages, tools=None, system=""):
         self.catalogs.append(tools)
@@ -45,18 +45,25 @@ class CatalogSpy:
         # 끝나면 마지막 도구 결과가 어느 스냅샷에도 안 들어갑니다.
         # 원본만 들고 있으면 반대로 턴별 구분이 사라집니다.
         self.turns.append(list(messages))
-        if not self._live:
-            # **처음 것만** 잡습니다. `ask_peer_agent` 는 안에서 상대 대리인의
-            # `react.run()` 을 다시 돌리는데, 그쪽도 같은 클라이언트를 씁니다.
-            # 매번 덮으면 `_live` 가 중첩 실행의 목록을 가리킨 채 끝날 수 있고,
-            # 그러면 바깥 실행이 받은 결과 대신 남의 대화를 세게 됩니다.
+        if tools is not None and self._live is None:
+            # **도구를 들고 온 첫 호출**의 목록만 잡습니다.
+            #
+            # 조건이 둘인 이유가 각각 있습니다.
+            #
+            #   tools is not None   의도 분류(`_classify`)는 자기만의 짧은 목록을
+            #                       쓰고 도구를 안 넘깁니다. 그걸 잡으면 도구
+            #                       결과가 한 건도 안 담깁니다
+            #   _live is None       `ask_peer_agent` 는 안에서 상대 대리인의
+            #                       `react.run()` 을 다시 돌리고 그쪽도 같은
+            #                       클라이언트를 씁니다. 매번 덮으면 중첩 실행의
+            #                       목록을 가리킨 채 끝날 수 있습니다
             self._live = messages
         return self._q.pop(0) if self._q else LLMResponse(text="끝")
 
     @property
     def tool_replies(self):
         """모델이 돌려받은 도구 결과 전부."""
-        return [m for m in self._live if m.get("role") == "tool"]
+        return [m for m in (self._live or []) if m.get("role") == "tool"]
 
     @property
     def names(self):
