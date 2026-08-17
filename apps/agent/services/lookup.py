@@ -90,11 +90,11 @@ def ask_peer(*, asker, target, topic: str, reason: str, question: str,
             run=run,
             occurred_at=timezone.now(),
         )
-        _draw(lookup)
+        draw_edge(lookup)
     return lookup
 
 
-def _draw(lookup: AgentLookup) -> None:
+def draw_edge(lookup: AgentLookup) -> None:
     """
     작업 플로우에 `AI 조회` 화살표를 남깁니다.
 

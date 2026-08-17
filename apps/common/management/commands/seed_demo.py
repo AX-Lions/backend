@@ -39,6 +39,14 @@ class Command(BaseCommand):
     @transaction.atomic
     def handle(self, *args, **opts):
         if opts["reset"]:
+            # 팀을 먼저 지웁니다.
+            #
+            # 사람부터 지우면 `Team.created_by` · `Project.created_by` ·
+            # `Meeting.created_by` 가 PROTECT 라 막힙니다. 만든 사람만 사라지고
+            # 만든 것이 남는 상황을 모델이 거부하는 것이고, 그게 맞습니다.
+            # 시드가 순서를 맞춥니다.
+            Team.all_objects.filter(
+                created_by__email__endswith="@bordo.dev").delete()
             User.all_objects.filter(email__endswith="@bordo.dev").delete()
             self.stdout.write("기존 데모 데이터를 지웠습니다.")
 
@@ -181,8 +189,11 @@ class Command(BaseCommand):
         # 한 건씩만 두면 집계가 전부 1 로 나와 뱃지가 제대로인지 알 수 없습니다.
         MT = FlowCategory.MEETING
         edges = [
+            # 문서를 여기 답니다. 회의 중에 기획안이 오간 자리라, 화살표를 누르면
+            # 문서 전달 맥락으로 넘어갑니다. 어디에도 안 달면 문서가 어느 흐름에서
+            # 나왔는지 화면에서 짚을 수 없습니다.
             (MT, FlowContentType.OPINION, "의견",
-             node(users["최비성"]), [node(users["임수연"])], agendas[0], None,
+             node(users["최비성"]), [node(users["임수연"])], agendas[0], doc,
              Surface.DISCORD, 48),
             (MT, FlowContentType.OPINION, "의견",
              node(users["최비성"]), [node(users["임수연"])], agendas[0], None,
@@ -218,12 +229,6 @@ class Command(BaseCommand):
              node(owner, agent=True), [node(users["서재민"])], None, None,
              Surface.SERVICE, 14),
 
-            (FlowCategory.WORK, FlowContentType.DOCUMENT, "문서",
-             node(users["최비성"]), [node(users["임수연"])], None, doc,
-             Surface.SERVICE, 40),
-            (FlowCategory.WORK, FlowContentType.PLAN, "계획",
-             node(users["서재민"]), [node(owner, agent=True)], None, None,
-             Surface.SERVICE, 8),
         ]
         for cat, ctype, label, src, dsts, agenda, document, surface, mins_ago in edges:
             e = FlowEdge.objects.create(
@@ -254,9 +259,199 @@ class Command(BaseCommand):
             target_user=owner, title="디자인 시안 마감 관련",
             body="8/18 마감이면 QA 기간이 3일뿐인데 괜찮을까요?")
 
+        work_edges = self._seed_work_flow(main, users, now)
+
         self.stdout.write(self.style.SUCCESS(
             f"\n시드 완료\n"
             f"  로그인   : susu@bordo.dev / {PASSWORD}\n"
             f"  팀       : {team.name} ({team.id})\n"
             f"  프로젝트 : {main.name} ({main.id})\n"
-            f"  회의     : {meeting.title} ({meeting.id})\n"))
+            f"  회의     : {meeting.title} ({meeting.id})\n"
+            f"  작업 엣지 : {work_edges}\n"))
+
+    # ═══════════════════════════════════════════ 작업 플로우
+
+    def _seed_work_flow(self, project, users, now):
+        """
+        작업 모드 화면에 들어갈 데이터.
+
+        ## FlowEdge 를 직접 심지 않습니다
+
+        위의 회의 엣지는 `FlowEdge.objects.create()` 로 직접 심습니다. 여기서는
+        **실제 모델을 만들어 시그널이 그리게** 합니다.
+
+        직접 심으면 화면은 채워지지만 **생성기가 도는지는 아무도 모릅니다.**
+        실제로 그래서 배포하고 나서야 작업 엣지가 두 개뿐이고 그마저 옛 종류인
+        걸 알았습니다. 이렇게 두면 시드를 돌릴 때마다 생성기가 함께 확인됩니다 —
+        시그널이 끊기면 마지막 줄의 엣지 수가 0 으로 떨어집니다.
+
+        ## 화면의 다섯 칸을 모두 채웁니다
+
+            작업     WorkItem 생성
+            수정     WorkItem 상태 변경 · 문서 수정
+            공유     문서에 전달 맥락이 붙는 순간
+            피드백   프로젝트 방의 중요 표시된 메시지
+            AI 조회  대리인이 다른 대리인에게 물어본 기록
+
+        하나라도 비면 필터 목록에 그 칸이 안 나옵니다 — 목록은 실제로 존재하는
+        종류만 내려주기 때문입니다.
+        """
+        from apps.agent.models import AgentLookup
+        from apps.agent.services.lookup import draw_edge
+        from apps.chat.models import ChatMessage
+        from apps.chat.services import ensure_project_room
+        from apps.documents.models import Document
+        from apps.meetings.models import FlowCategory, FlowEdge, FlowSource
+        from apps.states.models import WorkItem, WorkStatus
+
+        drawn = 0
+
+        def emit(days_ago, make):
+            """
+            모델을 만들고, 그때 그려진 화살표를 과거로 옮깁니다.
+
+            시그널은 `timezone.now()` 로 찍습니다. 시드가 만든 것이 전부 같은
+            시각이면 **진하기가 균일해져** 최근일수록 진해지는 규칙이 화면에서
+            확인되지 않습니다(작업 플로우의 진하기는 조회 기간 기준입니다).
+
+            어느 엣지가 새로 생겼는지는 만들기 전후의 id 집합을 비교해 찾습니다.
+            시그널이 몇 개를 그리는지는 시드가 알 바가 아니고, 알아야 한다면
+            시드가 생성기 내부를 흉내 내는 셈이 됩니다.
+            """
+            nonlocal drawn
+            scope = FlowEdge.objects.filter(project=project,
+                                            category=FlowCategory.WORK)
+            before = set(scope.values_list("id", flat=True))
+            obj = make()
+            drawn += scope.exclude(id__in=before).update(
+                occurred_at=now - timedelta(days=days_ago))
+            return obj
+
+        def work(owner, title, status, progress):
+            return lambda: WorkItem.objects.create(
+                project=project, owner=owner, title=title,
+                status=status, progress=progress)
+
+        def move(item, status, progress):
+            def go():
+                item.status, item.progress = status, progress
+                item.save()
+                return item
+            return go
+
+        # ── 작업 · 수정
+        #
+        # 앞의 셋은 스프린트 초에 열려 최근에 상태가 바뀐 것이고(→ `수정`),
+        # 뒤의 셋은 이번 주에 새로 열린 것입니다(→ `작업` 만).
+        # 생성과 상태 변경 사이가 벌어져 있어야 진하기 차이가 보입니다.
+        changed = [
+            (emit(13, work(users["유수인"], "우측 패널 너비 수정",
+                           WorkStatus.IN_PROGRESS, 30)), WorkStatus.DONE, 100),
+            (emit(12, work(users["최비성"], "API 응답 구조 변경",
+                           WorkStatus.IN_PROGRESS, 45)), WorkStatus.DONE, 100),
+            (emit(11, work(users["임수연"], "프로필 UI 수정",
+                           WorkStatus.TODO, 0)), WorkStatus.IN_PROGRESS, 60),
+        ]
+        emit(7, work(users["임수연"], "회의 상세 화면 제작", WorkStatus.IN_PROGRESS, 55))
+        emit(6, work(users["최비성"], "로그인 API 구현", WorkStatus.IN_PROGRESS, 40))
+        emit(5, work(users["유수인"], "참여자 프로필 제작", WorkStatus.TODO, 0))
+
+        for days, (item, status, progress) in zip((3, 2, 1), changed):
+            emit(days, move(item, status, progress))
+
+        # ── 공유
+        #
+        # 출처가 섞이게 둡니다. 필터의 `출처` 가 Github · Figma · Notion 세 칸인데
+        # 출처는 전달 맥락의 링크에서 알아냅니다 — 링크가 한 종류면 칸이 하나만
+        # 뜨고, 없으면 아예 안 뜹니다.
+        design = emit(9, lambda: Document.objects.create(
+            project=project, owner=users["유수인"], title="디자인 최종안",
+            category="design", summary="회의 상세·플로우 화면 최종 시안"))
+
+        def share_design():
+            # 만들 때는 비어 있다가 **나중에** 전달 맥락이 붙습니다. 실제 사용
+            # 경로가 이 모양이라(문서를 쓰고, 나중에 넘긴다) 여기서도 나눕니다.
+            # 만들면서 같이 채우면 `공유` 화살표만 남고 `작업` 이 안 생깁니다.
+            design.delivery_context = [
+                {"participant_name": "유수인",
+                 "utterance": "최종안 올렸습니다. 여기서 확정할게요.",
+                 "url": "https://www.figma.com/design/bordo/final"},
+                {"participant_name": "임수연",
+                 "utterance": "확인하고 컴포넌트부터 붙이겠습니다."}]
+            design.save()
+            return design
+
+        emit(4, share_design)
+
+        emit(6, lambda: Document.objects.create(
+            project=project, owner=users["서재민"], title="글로벌 회의 운영 기획안",
+            category="planning", summary="시간대가 다른 팀의 회의 운영 방식",
+            delivery_context=[
+                {"participant_name": "서재민",
+                 "utterance": "기획안 정리해 뒀습니다. 여기 기준으로 잡겠습니다.",
+                 "url": "https://www.notion.so/bordo/meeting-ops"}]))
+
+        emit(3, lambda: Document.objects.create(
+            project=project, owner=users["최비성"], title="API 명세서 v2",
+            category="backend", summary="회의·플로우 엔드포인트 계약",
+            delivery_context=[
+                {"participant_name": "최비성",
+                 "utterance": "명세 갱신했습니다. 응답 구조가 바뀌었습니다.",
+                 "url": "https://github.com/AX-Lions/backend/blob/develop/bordo-openapi.yaml"},
+                {"participant_name": "임수연",
+                 "utterance": "프론트 목 데이터도 맞추겠습니다."}]))
+
+        # ── 피드백
+        #
+        # 프로젝트 방이어야 합니다. 1:1 방에도 `project` 가 붙지만 그건 그리지
+        # 않습니다 — 팀 화면에 사적인 대화가 실립니다.
+        room = ensure_project_room(project)
+
+        def say(sender_name, body, important=True):
+            return lambda: ChatMessage.objects.create(
+                room=room, sender=users[sender_name], sender_name=sender_name,
+                body=body, is_important=important)
+
+        emit(5, say("임수연", "우측 패널이 1280 이하에서 잘립니다. 너비를 다시 봐야 합니다."))
+        emit(2, say("최비성", "응답 구조를 바꿨습니다. 기존 필드는 한 주만 같이 내려갑니다."))
+
+        # 중요 표시는 화면에서 **나중에** 켭니다(`PATCH .../important`). 켜지는
+        # 순간에도 그려지는지 시드가 함께 확인합니다.
+        later = say("유수인", "프로필 이미지는 원형으로 통일해 주십시오.", important=False)()
+
+        def flag():
+            later.is_important = True
+            later.save()
+            return later
+
+        emit(1, flag)
+
+        # ── AI 조회
+        #
+        # 시그널이 아니라 `lookup.draw_edge()` 를 직접 부릅니다. 원래 경로는
+        # 대리인이 실제로 도는 것이라 시드에서 LLM 을 부를 수 없습니다.
+        # 그리는 코드 자체는 같은 것을 씁니다.
+        for days, asker, target, topic, reason, question, answer, source in [
+            (4, "유수인", "최비성", "로그인 API 구현 현황",
+             "디자인 최종안을 넘기기 전에 API 가 어디까지 됐는지 알아야 했습니다.",
+             "로그인 API 는 지금 어디까지 됐습니까? 응답 형태가 확정됐는지 궁금합니다.",
+             "토큰 발급까지 돼 있고 재발급은 이번 주에 붙습니다. 응답 형태는 확정입니다.",
+             FlowSource.GITHUB),
+            # 답이 비어 있는 건 유보입니다. 4단 상세에서 `확인된 내용` 이 비는
+            # 경우가 화면에 어떻게 나오는지 프론트가 볼 수 있어야 합니다.
+            (2, "서재민", "임수연", "회의 상세 화면 진행 상황",
+             "응답 구조를 바꾸기 전에 프론트가 어디를 붙였는지 확인이 필요했습니다.",
+             "회의 상세 화면에서 지금 붙인 API 가 무엇입니까?",
+             "",
+             FlowSource.FIGMA),
+        ]:
+            def ask(a=asker, t=target, tp=topic, r=reason, q=question,
+                    ans=answer, s=source, d=days):
+                return draw_edge(AgentLookup.objects.create(
+                    project=project, asker=users[a], target=users[t],
+                    topic=tp, reason=r, question=q, answer=ans,
+                    source=s, occurred_at=now - timedelta(days=d)))
+
+            emit(days, ask)
+
+        return drawn
