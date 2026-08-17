@@ -40,7 +40,12 @@ class FlowEdgeSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = FlowEdge
+        # `source` · `source_url` 은 작업 모드에서만 채워집니다. 필터 목록
+        # (`filter_options.sources`)에는 내려가는데 화살표에는 없어서, 프론트가
+        # **어느 화살표가 Github 인지 알 수 없었습니다.** 뱃지도 못 붙이고
+        # 산출물로 넘어가지도 못합니다. 회의 모드에서는 빈 문자열입니다.
         fields = ("id", "from_node_id", "to_node_ids", "content_type", "surface",
+                  "source", "source_url",
                   "label", "direction_label", "participant_avatar_urls",
                   "extra_participant_count", "document_id", "agenda_id",
                   "occurred_at", "opacity")
