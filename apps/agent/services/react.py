@@ -152,9 +152,27 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             run_id=str(run_obj.id), settings_snapshot=snapshot,
             allow_private=allow_private,
         )
-        # 회의 대리는 읽기만 합니다. 쓰기 스킬은 별도 단계에서 붙습니다 —
-        # 카탈로그에 없으면 모델이 부를 수도 없습니다.
-        catalog = registry.build_catalog(kind=SkillKind.READ)
+        # 읽기와 쓰기를 모두 넘깁니다.
+        #
+        # 한동안 읽기만 넘겼습니다. 그러면 `propose_task` · `propose_schedule` ·
+        # `send_message` · `ask_peer_agent` 를 **모델이 부를 방법이 아예 없습니다** —
+        # 카탈로그가 그대로 OpenAI `tools` 로 나가고, 목록에 없는 이름은 부를 수
+        # 없기 때문입니다. 회의에서 나온 할 일이 태스크 후보로 한 번도 안 만들어졌고,
+        # 시연 시나리오의 "후속 태스크 승인" 은 승인할 것이 없었습니다.
+        #
+        # 무엇을 제안할지는 **맥락을 아는 모델이 판단할 일**입니다. 안전장치는
+        # 카탈로그에서 빼는 것이 아니라 아래 두 가지입니다.
+        #
+        #   1. 쓰기 실행 전에 POLICY 를 다시 본다 (`_may_write`)
+        #   2. AI 산출물은 전부 PENDING_APPROVAL · DRAFT 로 시작한다 (1원칙)
+        #
+        # `speak_in_meeting` 만 카탈로그에서 뺍니다. 그건 모델이 고를 일이 아니라
+        # 루프가 끝난 뒤 코드가 부르는 것입니다(`tasks.py::_speak`). 목록에 두면
+        # 모델이 중간에 회의에 끼어들 수 있습니다.
+        # 도구 스펙은 프로바이더 중립 형식입니다(`name` 이 최상위). OpenAI
+        # 모양으로 바꾸는 것은 `llm.py` 가 합니다.
+        catalog = [t for t in registry.build_catalog()
+                   if t["name"] != "speak_in_meeting"]
 
         messages = [{"role": "user", "content": question}]
         answer_text = ""
@@ -175,6 +193,14 @@ def run(*, principal, question: str, meeting=None, project_id=None,
 
             messages.append(LLMClient.assistant_message(resp))
             for call in resp.tool_calls:
+                blocked = _may_write(call.name, snapshot)
+                if blocked:
+                    # 정책이 막은 것은 실패가 아니라 **하지 않기로 한 것**입니다.
+                    # 모델에게 사유를 돌려주면 다른 방법을 찾습니다.
+                    _step("skill_blocked", name=call.name, reason=blocked)
+                    messages.append(LLMClient.tool_message(call.id, blocked))
+                    continue
+
                 result = registry.dispatch(call.name, call.arguments, ctx)
                 _step("skill", name=call.name, args=call.arguments,
                       ok=result.ok, message=result.message,
@@ -245,6 +271,45 @@ def _snapshot_of(principal) -> dict:
 def _set(run_obj: AgentRun, status: str):
     run_obj.status = status
     run_obj.save(update_fields=["status", "updated_at"])
+
+
+def _may_write(skill_name: str, snapshot: dict | None) -> str:
+    """
+    쓰기 스킬을 실행해도 되는지.
+
+    막을 사유가 있으면 **사용자에게 보여줄 한국어**를 돌려주고, 괜찮으면 빈
+    문자열을 돌려줍니다. 그 문구는 모델에게도 그대로 전달돼 다른 방법을 찾게
+    합니다.
+
+    ## 카탈로그에서 빼지 않고 여기서 막는 이유
+
+    빼 버리면 모델은 그런 도구가 있다는 것조차 모릅니다. 그러면 "일정을 바꾸는
+    건 제 권한이 아닙니다" 같은 말도 못 하고 그냥 침묵합니다. 목록에는 두되
+    실행 직전에 막는 편이, 사용자에게 **왜 안 했는지**를 남깁니다.
+
+    ## 무엇을 보는가
+
+    `SkillKind` docstring 이 "쓰기 스킬은 실행 전에 POLICY 를 다시 본다" 고
+    적어 뒀는데 그 자리가 비어 있었습니다. 여기가 그 자리입니다.
+
+    일정만 설정에 걸립니다. 나머지 쓰기는 전부 **후보**를 만들 뿐이고
+    확정은 사람이 하므로(1원칙) 정책으로 더 막지 않습니다.
+    """
+    from . import policy
+
+    s = {**policy.DEFAULTS, **(snapshot or {})}
+
+    if skill_name == "propose_schedule" and not s.get("allow_schedule_change", True):
+        return ("본인이 일정 수정을 대리인에게 맡기지 않도록 설정해 두었습니다. "
+                "일정은 제안하지 않고 본인에게 남깁니다.")
+
+    if skill_name == "ask_peer_agent" and not s.get("disclose_work_plan_thought", True):
+        # 남에게 물으려면 이쪽 맥락을 얼마간 건네야 합니다. 본인이 자기 기록을
+        # 안 알리기로 했다면 그 맥락도 나가면 안 됩니다.
+        return ("본인이 작업·계획·생각을 공개하지 않도록 설정해 두었습니다. "
+                "다른 대리인에게 묻지 않습니다.")
+
+    return ""
 
 
 def _finish(run_obj: AgentRun, *, answered: bool, text: str = "", reason: str = "",
