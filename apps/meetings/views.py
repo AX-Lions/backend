@@ -487,9 +487,12 @@ def flow_edge_detail(request, edge_id):
             # 해서입니다 — `AgentLookup` 이 이쪽 `FlowEdge` 를 참조하므로
             # 순환이 됩니다. id 만 주고 프론트가 한 번 더 부릅니다.
             "lookup_id": None}
-    lookup = edge.lookups.first()
-    if lookup is not None:
-        body["lookup_id"] = str(lookup.id)
+    # 종류를 먼저 봅니다. 나머지 화살표에는 조회 기록이 붙을 수 없는데,
+    # 그것까지 매번 물으면 화살표를 누를 때마다 헛조회가 한 번씩 나갑니다.
+    if edge.content_type == FlowContentType.AI_LOOKUP:
+        lookup = edge.lookups.first()
+        if lookup is not None:
+            body["lookup_id"] = str(lookup.id)
     if edge.document:
         body["document"] = DocumentRefSerializer(edge.document).data
         body["delivery_context"] = edge.document.delivery_context
