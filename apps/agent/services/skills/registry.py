@@ -55,9 +55,22 @@ class SkillRegistry:
 
         try:
             result = skill.run(args, ctx)
-        except Exception as exc:                      # noqa: BLE001
+        except Exception:                             # noqa: BLE001
+            # 예외 문구를 `message` 에 담지 않습니다.
+            #
+            # `message` 는 규약상 **사용자에게 그대로 보여줄 한국어**이고, 실패
+            # 사유는 이제 모델에게도 전달됩니다. `str(exc)` 를 넣으면 Django 의
+            # 영문 오류나 제약 조건 이름·질의값이 그대로 실려 나가고, 모델이
+            # 그것을 답변에 옮겨 적을 수 있습니다.
+            #
+            # 대리인은 **남의 요청을 받아 본인을 대리**합니다. 요청자는 본인이
+            # 아닐 수 있으므로, 새어 나가는 것이 남에게 보이는 것과 같습니다.
+            #
+            # 진짜 내용은 위의 `logger.exception` 이 스택까지 남깁니다.
             logger.exception("스킬 실행 실패: %s", name)
-            return SkillResult.fail(str(exc), "internal")
+            return SkillResult.fail(f"'{name}' 을 실행하지 못했습니다. "
+                                    "다른 방법을 찾거나 확인이 필요하다고 답하십시오.",
+                                    "internal")
 
         if not isinstance(result, SkillResult):
             # 스킬이 dict 나 None 을 돌려주면 루프가 조용히 오작동합니다.

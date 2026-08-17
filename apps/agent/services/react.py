@@ -219,7 +219,21 @@ def run(*, principal, question: str, meeting=None, project_id=None,
                     if key not in seen:
                         seen.add(key)
                         evidence.append(item)
-                messages.append(LLMClient.tool_message(call, result.data))
+                # 실패는 사유를 붙여 돌려줍니다.
+                #
+                # `SkillResult.fail()` 은 `data` 를 채우지 않아, 그냥 넘기면
+                # 모델은 **빈 dict 를 받습니다.** 그러면 "찾았는데 없었다" 와
+                # "부르다 터졌다" 가 구별되지 않습니다.
+                #
+                #     propose_schedule → {}      지금. 일정이 잡힌 줄 압니다
+                #     propose_schedule → {"error": "start_at 형식이 잘못됐습니다."}
+                #
+                # 앞의 경우 대리인은 "9월 7일로 잡았습니다" 라고 답합니다.
+                # **없는 일을 했다고 말하게 됩니다.** 정책이 막을 때는 사유를
+                # 돌려주면서 정작 실패는 안 돌려주고 있었습니다.
+                payload = result.data if result.ok else {
+                    "error": result.message, "code": result.error_code}
+                messages.append(LLMClient.tool_message(call, payload))
         else:
             # 상한 소진. 강제로 답을 만들게 하지 않습니다 — 그 순간 지어내기가
             # 됩니다. 모인 근거로 판정하고, 부족하면 유보로 끝납니다.

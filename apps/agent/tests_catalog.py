@@ -13,6 +13,7 @@
 
 여기서는 `client.chat()` 에 **넘어간 인자**를 붙잡아 봅니다.
 """
+import json
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -30,10 +31,39 @@ class CatalogSpy:
     def __init__(self, *responses):
         self._q = list(responses)
         self.catalogs = []
+        self.turns = []
+        self._live = None
 
     def chat(self, messages, tools=None, system=""):
         self.catalogs.append(tools)
+        # 두 가지를 다 들고 있습니다.
+        #
+        #   turns   턴마다 얕은 복사 — "이 턴에 모델이 무엇을 보고 있었나"
+        #   _live   원본 참조       — 루프가 끝난 뒤의 최종 상태
+        #
+        # 복사만 뜨면 **마지막 chat() 이후에 붙은 것**을 못 봅니다. 상한을 소진해
+        # 끝나면 마지막 도구 결과가 어느 스냅샷에도 안 들어갑니다.
+        # 원본만 들고 있으면 반대로 턴별 구분이 사라집니다.
+        self.turns.append(list(messages))
+        if tools is not None and self._live is None:
+            # **도구를 들고 온 첫 호출**의 목록만 잡습니다.
+            #
+            # 조건이 둘인 이유가 각각 있습니다.
+            #
+            #   tools is not None   의도 분류(`_classify`)는 자기만의 짧은 목록을
+            #                       쓰고 도구를 안 넘깁니다. 그걸 잡으면 도구
+            #                       결과가 한 건도 안 담깁니다
+            #   _live is None       `ask_peer_agent` 는 안에서 상대 대리인의
+            #                       `react.run()` 을 다시 돌리고 그쪽도 같은
+            #                       클라이언트를 씁니다. 매번 덮으면 중첩 실행의
+            #                       목록을 가리킨 채 끝날 수 있습니다
+            self._live = messages
         return self._q.pop(0) if self._q else LLMResponse(text="끝")
+
+    @property
+    def tool_replies(self):
+        """모델이 돌려받은 도구 결과 전부."""
+        return [m for m in (self._live or []) if m.get("role") == "tool"]
 
     @property
     def names(self):
@@ -238,3 +268,90 @@ class WritePolicyTest(Base):
         blocked = [s for s in out.run.steps if s.get("kind") == "skill_blocked"]
         self.assertEqual(len(blocked), 1)
         self._assert_survived(out)
+
+
+class SkillFailureTest(Base):
+    """
+    스킬이 실패했을 때 **모델이 그 사실을 아는가.**
+
+    실패를 빈 결과로 돌려주면 모델은 "찾았는데 없었다" 와 "부르다 터졌다" 를
+    구별하지 못하고, 되지도 않은 일을 했다고 답합니다.
+    """
+
+    def test_the_model_is_told_why_a_skill_failed(self):
+        from apps.agent.services.llm import ToolCall
+        from apps.chat.models import ChatMessage
+
+        spy = CatalogSpy(
+            LLMResponse(text="OTHER"),
+            # 없는 사람에게 보냅니다 — 스킬이 `not_found` 로 실패합니다.
+            LLMResponse(tool_calls=[ToolCall(
+                "c1", "send_message",
+                {"to_user_id": "00000000-0000-0000-0000-000000000000",
+                 "body": "안녕하세요"})]),
+            LLMResponse(text="전달하지 못했습니다."),
+        )
+        out = self._run(spy)
+
+        self.assertEqual(ChatMessage.objects.count(), 0)
+
+        replies = spy.tool_replies
+        self.assertEqual(len(replies), 1)
+        body = json.loads(replies[0]["content"])
+        # 빈 dict 를 돌려주면 모델은 보낸 줄 압니다.
+        self.assertIn("error", body, f"실패 사유가 모델에게 안 갔습니다: {body}")
+        self.assertIn("받는 사람", body["error"])
+        self.assertEqual(body["code"], "not_found")
+
+    def test_an_exception_message_never_reaches_the_model(self):
+        """
+        스킬이 터졌을 때 **예외 문구를 그대로 넘기면 안 됩니다.**
+
+        사유를 모델에게 돌려주기로 하면서 `registry.dispatch` 의 `str(exc)` 가
+        모델까지 닿는 길이 열렸습니다. Django 의 영문 오류나 제약 조건 이름,
+        질의값이 실려 나가고 모델이 그것을 답변에 옮겨 적을 수 있습니다.
+
+        대리인은 **남의 요청을 받아 본인을 대리**합니다. 요청자가 본인이 아닐
+        수 있으므로, 새어 나가는 것은 남에게 보이는 것과 같습니다.
+        """
+        from apps.agent.services.skills import SkillContext, registry
+        from apps.agent.services.skills.base import SkillBase, SkillKind
+
+        secret = "SELECT secret_token FROM vault WHERE user_id=42"
+
+        class Boom(SkillBase):
+            name = "boom_for_test"
+            kind = SkillKind.READ
+            description = "터집니다"
+            parameters = {"type": "object", "properties": {}}
+
+            def run(self, args, ctx):
+                raise RuntimeError(secret)
+
+        registry.register(Boom())
+        try:
+            result = registry.dispatch("boom_for_test", {},
+                                       SkillContext(principal_id=str(self.me.id)))
+        finally:
+            registry._skills.pop("boom_for_test", None)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "internal")
+        self.assertNotIn(secret, result.message)
+        # 대신 무엇을 해야 하는지가 들어 있어야 합니다.
+        self.assertIn("확인이 필요", result.message)
+
+    def test_a_successful_skill_still_returns_its_data(self):
+        """실패 경로를 붙이면서 성공 경로 모양이 바뀌면 다른 스킬들이 깨집니다."""
+        from apps.agent.services.llm import ToolCall
+
+        spy = CatalogSpy(
+            LLMResponse(text="STATUS"),
+            LLMResponse(tool_calls=[ToolCall("c1", "search_records",
+                                             {"query": "인덱스"})]),
+            LLMResponse(text="답"),
+        )
+        self._run(spy)
+
+        body = json.loads(spy.tool_replies[0]["content"])
+        self.assertNotIn("error", body)
