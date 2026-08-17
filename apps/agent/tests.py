@@ -70,10 +70,20 @@ class RegistryTest(SimpleTestCase):
     def test_exception_is_captured(self):
         """루프 한가운데서 터지면 steps·evidence 가 통째로 날아갑니다."""
         self.reg.register(_Boom())
-        r = self.reg.dispatch("boom", {}, _ctx())
+        with self.assertLogs("bordo.agent", level="ERROR") as logged:
+            r = self.reg.dispatch("boom", {}, _ctx())
         self.assertFalse(r.ok)
         self.assertEqual(r.error_code, "internal")
-        self.assertIn("의도된 폭발", r.message)
+
+        # 예외 문구는 **로그에만** 남습니다.
+        #
+        # 예전에는 `message` 에도 그대로 담았고 이 테스트가 그걸 고정하고
+        # 있었습니다. 그런데 실패 사유가 이제 모델에게 전달되므로(#66),
+        # 담아 두면 Django 의 영문 오류나 제약 조건 이름이 모델을 거쳐 답변에
+        # 실려 나갈 수 있습니다. `message` 는 사용자에게 보여줄 한국어입니다.
+        self.assertNotIn("의도된 폭발", r.message)
+        self.assertIn("의도된 폭발", "\n".join(logged.output))
+        self.assertIn("확인이 필요", r.message)
 
     def test_wrong_return_type_is_rejected(self):
         """dict 를 돌려주면 루프가 조용히 오작동합니다."""
