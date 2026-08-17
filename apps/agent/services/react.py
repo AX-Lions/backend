@@ -158,6 +158,10 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             # 도중에 사용자가 바꿔도 **이 실행은 시작할 때의 설정으로 끝나야**
             # 하기 때문입니다 — `active_version` 이 가리키는 것도 그것입니다.
             tone=(snapshot or {}).get("tone", ""),
+            # 설정 화면에 저장해 둔 지시. 한동안 아무도 안 읽었습니다 —
+            # 사용자는 "말하면 안 되는 것" 을 적어 두고 대리인이 지킨다고
+            # 믿고 있었습니다.
+            standing_prompts=prompts.standing_prompts_for(principal),
         )
         ctx = SkillContext(
             principal_id=str(principal.id), actor_id=str(actor_id or principal.id),

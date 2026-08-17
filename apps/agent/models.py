@@ -50,10 +50,27 @@ class AgentSettings(TimeStamped):
     disclose_work_plan_thought = models.BooleanField(default=True)   # 작업/계획/생각 공개
     tone = models.CharField(max_length=10, choices=AgentTone.choices,
                             default=AgentTone.FORMAL)
+    agent_name = models.CharField(
+        max_length=40, blank=True, default="",
+        help_text="대리인 호칭. 비면 `{사용자 이름}의 Bordo` 를 씁니다.")
     active_version = models.PositiveIntegerField(default=1)
 
     class Meta:
         db_table = "agent_settings"
+
+    @property
+    def display_name(self) -> str:
+        """
+        화면에 찍히는 대리인 이름.
+
+        **한 군데서만 만듭니다.** 플로우 노드·AI 조회 상세·채팅방 제목이 각자
+        문자열을 조립하면, 사용자가 이름을 바꿨을 때 어떤 화면은 새 이름이고
+        어떤 화면은 옛 이름입니다.
+
+        비어 있으면 기본 호칭입니다. 빈 값을 그대로 쓰면 노드에 아무것도 안 적혀
+        누구의 대리인인지 알 수 없습니다.
+        """
+        return self.agent_name.strip() or f"{self.user.name}의 Bordo"
 
     def as_snapshot(self):
         return {
@@ -62,6 +79,7 @@ class AgentSettings(TimeStamped):
             "allow_midmeeting_question": self.allow_midmeeting_question,
             "disclose_work_plan_thought": self.disclose_work_plan_thought,
             "tone": self.tone,
+            "agent_name": self.agent_name,
             "active_version": self.active_version,
         }
 

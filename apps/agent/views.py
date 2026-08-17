@@ -37,6 +37,16 @@ def settings_view(request):
                 changed[f] = {"from": old, "to": new}
                 setattr(obj, f, new)
 
+    if "agent_name" in request.data:
+        # 길이만 봅니다. 빈 값은 "기본 호칭으로 되돌린다" 는 뜻이라 허용합니다 —
+        # 지운 사람에게 "이름을 넣으십시오" 라고 하면 되돌릴 방법이 없습니다.
+        new = str(request.data["agent_name"] or "").strip()
+        if len(new) > 40:
+            raise BordoError("VALIDATION_ERROR", "대리인 이름은 40자를 넘을 수 없습니다.")
+        if new != obj.agent_name:
+            changed["agent_name"] = {"from": obj.agent_name, "to": new}
+            obj.agent_name = new
+
     if "tone" in request.data:
         # 없는 값을 넣으면 400 입니다. 조용히 기본값으로 되돌리면 사용자는
         # 골랐다고 생각하는데 대리인은 다른 투로 말합니다.

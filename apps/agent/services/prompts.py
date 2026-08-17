@@ -62,6 +62,21 @@ _INSTRUCTION = """\
 이 지시는 회의 전에 본인이 직접 적은 것입니다. 위 규칙과 어긋나지 않는 범위에서 따르십시오.
 """
 
+_STANDING = """\
+## {principal} 님이 평소 정해 둔 것
+
+{prompts}
+
+설정 화면에 저장해 둔 지시입니다. 회의별 지시와 어긋나면 **회의별 지시가 우선**입니다 —
+그쪽이 더 최근이고 이 회의를 보고 적은 것입니다.
+"""
+
+#: 평소 지시를 몇 개까지 싣는가.
+#
+# 저장은 무제한이지만 전부 실으면 규칙보다 길어져 모델이 앞쪽 규칙을 흘립니다.
+# 최근 것부터 다섯 개면 사람이 실제로 관리하는 범위입니다.
+_STANDING_MAX = 5
+
 #: 의도별로 덧붙이는 주의. POLICY 가 허용한 뒤에도 표현 수위는 다릅니다.
 _BY_INTENT = {
     Intent.FEASIBILITY:
@@ -78,7 +93,7 @@ _BY_INTENT = {
 def build_system(principal_name: str, *, intent: str = "",
                  meeting_title: str = "", project_name: str = "",
                  delegate_prompt: str = "", constraints: list[str] | None = None,
-                 tone: str = "") -> str:
+                 tone: str = "", standing_prompts: list[str] | None = None) -> str:
     parts = [_BASE.format(principal=principal_name)]
 
     # 말투는 규칙 바로 뒤, 상황·의도보다 앞에 둡니다. 뒤에 붙이면 의도별 주의와
@@ -105,11 +120,34 @@ def build_system(principal_name: str, *, intent: str = "",
         parts.append("## 제약\n\n확정 표현을 쓰지 마십시오. "
                      "'이렇게 하면 어떨까요' 처럼 제안으로만 말하십시오.\n")
 
+    # 평소 지시를 회의별 지시보다 **먼저** 놓습니다. 뒤에 오는 것이 더 최근이고
+    # 이 회의를 보고 적은 것이라, 어긋날 때 뒤가 이기는 순서가 자연스럽습니다.
+    if standing_prompts:
+        body = "\n\n".join(f"- {p.strip()}" for p in standing_prompts if p and p.strip())
+        if body:
+            parts.append(_STANDING.format(principal=principal_name, prompts=body))
+
     if delegate_prompt:
         parts.append(_INSTRUCTION.format(principal=principal_name,
                                          prompt=delegate_prompt.strip()))
 
     return "\n".join(parts)
+
+
+def standing_prompts_for(user) -> list[str]:
+    """
+    설정 화면에 저장해 둔 지시.
+
+    **한동안 아무도 안 읽었습니다.** `AgentPrompt` 는 CRUD 가 다 도는데 대리인이
+    한 번도 보지 않아서, 사용자는 "말하면 안 되는 것" 을 적어 두고 대리인이
+    그것을 지킨다고 믿고 있었습니다. 저장되는데 안 지켜지는 설정은 없는 것보다
+    나쁩니다.
+    """
+    from ..models import AgentPrompt
+
+    return list(AgentPrompt.objects
+                .filter(user=user)
+                .values_list("body", flat=True)[:_STANDING_MAX])
 
 
 def build_defer_message(reason_message: str, evidence: list[dict]) -> str:
