@@ -45,7 +45,12 @@ class CatalogSpy:
         # 끝나면 마지막 도구 결과가 어느 스냅샷에도 안 들어갑니다.
         # 원본만 들고 있으면 반대로 턴별 구분이 사라집니다.
         self.turns.append(list(messages))
-        self._live = messages
+        if not self._live:
+            # **처음 것만** 잡습니다. `ask_peer_agent` 는 안에서 상대 대리인의
+            # `react.run()` 을 다시 돌리는데, 그쪽도 같은 클라이언트를 씁니다.
+            # 매번 덮으면 `_live` 가 중첩 실행의 목록을 가리킨 채 끝날 수 있고,
+            # 그러면 바깥 실행이 받은 결과 대신 남의 대화를 세게 됩니다.
+            self._live = messages
         return self._q.pop(0) if self._q else LLMResponse(text="끝")
 
     @property
