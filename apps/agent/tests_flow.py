@@ -164,22 +164,43 @@ class AnswerFlowTest(Base):
 
 
 class DeferFlowTest(Base):
+    """
+    유보는 **플로우에 그리지 않습니다.**
 
-    def test_defer_is_not_the_same_kind_as_an_answer(self):
-        """
-        화면에서 "답했다" 와 "확인이 필요하다" 가 같은 색으로 보이면,
-        유보를 보여 주는 의미가 사라집니다.
-        """
-        self._run(FakeLLM(LLMResponse(text="STATUS"),
-                          LLMResponse(text="아마 곧 끝날 겁니다")))
-        e = FlowEdge.objects.get(label="본인 확인 필요")
-        self.assertEqual(e.content_type, FlowContentType.ETC)
-        self.assertNotEqual(e.content_type, FlowContentType.OPINION)
+    필터로 걸러 보는 것이 아니라 사용자가 반드시 답해야 하는 일이라, 필터 축이
+    아니라 알림 축에 있습니다(2026-08-17 디자인 확인). `PendingQuestion` 과
+    브리핑의 `답변이 필요해요` 로 이미 사용자에게 갑니다.
+    """
 
-    def test_defer_still_draws_the_question(self):
-        self._run(FakeLLM(LLMResponse(text="STATUS"),
-                          LLMResponse(text="아마 곧 끝날 겁니다")))
-        self.assertEqual(self._labels(), ["사전 지시", "질문", "본인 확인 필요"])
+    def _defer(self):
+        return self._run(FakeLLM(LLMResponse(text="STATUS"),
+                                 LLMResponse(text="아마 곧 끝날 겁니다")))
+
+    def test_defer_draws_no_arrow(self):
+        """
+        한동안 `기타`(ETC) 로 그렸는데 잘못이었습니다. `기타` 체크를 끈 사람에게는
+        안 보이고, 켠 사람에게도 다른 화살표와 같은 무게로 섞입니다.
+        """
+        self._defer()
+        self.assertEqual(
+            FlowEdge.objects.filter(label="본인 확인 필요").count(), 0)
+        self.assertEqual(
+            FlowEdge.objects.filter(content_type=FlowContentType.ETC).count(), 0)
+
+    def test_the_question_arrow_still_remains(self):
+        """
+        답을 못 했더라도 **질문이 저 사람에게 갔다는 사실은 남아야 합니다.**
+        답이 없는 것과 질문이 닿지도 않은 것은 전혀 다른 이야기입니다.
+        """
+        self._defer()
+        self.assertEqual(self._labels(), ["사전 지시", "질문"])
+
+    def test_the_deferral_itself_is_still_recorded(self):
+        """화살표를 안 그릴 뿐, 유보가 사라지면 안 됩니다."""
+        from apps.agent.models import PendingQuestion
+
+        self._defer()
+        self.assertEqual(PendingQuestion.objects.count(), 1)
 
 
 class NoiseTest(Base):
@@ -537,3 +558,95 @@ class NodeShapeTest(TestCase):
         n = flow.server_node()
         self.assertEqual(set(n), {"id", "kind", "user_id", "name", "avatar_url"})
         self.assertIsNone(n["user_id"])
+
+
+class AgendaLinkTest(Base):
+    """
+    화살표를 안건에 잇습니다.
+
+    좌측 `인덱스` 에서 안건을 누르면 관련 화살표로 점프하는데, 그 연결이 비어
+    있어서 인덱스가 아무 데도 못 갔습니다.
+
+    **짐작입니다.** 발언과 안건을 잇는 명시적 신호가 없어(Discord 에서 "지금부터
+    2번 안건" 이라고 선언하지 않습니다) 낱말 겹침으로 고릅니다. 그래서
+    **애매하면 비우는 쪽**을 택했는지가 이 테스트의 핵심입니다.
+    """
+
+    def _agenda(self, title):
+        from apps.meetings.models import Agenda
+        return Agenda.objects.create(meeting=self.meeting, title=title)
+
+    def test_a_clear_match_is_linked(self):
+        a = self._agenda("team_members 마이그레이션 설계")
+        self._run(self._answering(), body="team_members 마이그레이션 어디까지 됐어요?")
+        self.assertEqual(FlowEdge.objects.get(label="질문").agenda_id, a.id)
+
+    def test_a_single_shared_word_is_not_enough(self):
+        """
+        겹치는 낱말이 하나뿐이면 우연일 가능성이 큽니다. 틀린 안건에 붙으면
+        인덱스를 눌렀을 때 엉뚱한 곳으로 갑니다 — 비어 있는 것보다 나쁩니다.
+        """
+        self._agenda("마이그레이션 일정 조율")
+        self._run(self._answering(), body="마이그레이션 어디까지 됐어요?")
+        self.assertIsNone(FlowEdge.objects.get(label="질문").agenda_id)
+
+    def test_a_tie_links_nothing(self):
+        """두 안건이 똑같이 맞으면 아무것도 고르지 않습니다."""
+        self._agenda("team_members 마이그레이션 설계")
+        self._agenda("team_members 마이그레이션 검토")
+        self._run(self._answering(), body="team_members 마이그레이션 어디까지 됐어요?")
+        self.assertIsNone(FlowEdge.objects.get(label="질문").agenda_id)
+
+    def test_no_agenda_is_fine(self):
+        """안건을 안 적은 회의도 있습니다. 그때도 화살표는 그려져야 합니다."""
+        self._run(self._answering())
+        self.assertIsNotNone(FlowEdge.objects.filter(label="질문").first())
+
+    def test_the_answer_lands_on_the_same_agenda(self):
+        """질문과 답이 다른 안건에 흩어지면 인덱스가 둘로 갈립니다."""
+        a = self._agenda("team_members 마이그레이션 설계")
+        self._run(self._answering(), body="team_members 마이그레이션 어디까지 됐어요?")
+        self.assertEqual(FlowEdge.objects.get(label="대리인 답변").agenda_id, a.id)
+
+    def test_the_index_can_now_jump(self):
+        """
+        이 연결이 있어야 `GET /meetings/{id}/indexes` 의 `related_edge_ids` 가
+        찹니다. 비어 있으면 인덱스를 눌러도 아무 일이 안 일어납니다.
+        """
+        from apps.orgs.models import ProjectMember, TeamMember, TeamRole
+        from rest_framework.test import APIClient
+
+        a = self._agenda("team_members 마이그레이션 설계")
+        self._run(self._answering(), body="team_members 마이그레이션 어디까지 됐어요?")
+
+        TeamMember.objects.get_or_create(team=self.team, user=self.speaker,
+                                         defaults={"team_role": TeamRole.MEMBER})
+        ProjectMember.objects.get_or_create(project=self.project, user=self.speaker)
+        api = APIClient()
+        api.force_authenticate(user=self.speaker)
+
+        r = api.get(f"/api/v1/meetings/{self.meeting.id}/indexes")
+        self.assertEqual(r.status_code, 200, r.content[:200])
+        rows = [x for x in r.json()["results"] if x["id"] == str(a.id)]
+        self.assertTrue(rows and rows[0]["related_edge_ids"],
+                        "인덱스가 화살표로 못 갑니다")
+
+    def test_the_agenda_is_looked_up_once_per_utterance(self):
+        """
+        안건 목록을 읽고 제목을 전부 토큰으로 쪼갭니다. 질문 화살표와 답변
+        화살표가 각자 구하면 **같은 조회와 같은 계산이 발언마다 두 번** 돕니다.
+        회의가 길어질수록 그대로 쌓입니다.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._agenda("team_members 마이그레이션 설계")
+
+        with CaptureQueriesContext(connection) as ctx:
+            self._run(self._answering(), body="team_members 마이그레이션 어디까지 됐어요?")
+
+        agenda_reads = [q["sql"] for q in ctx.captured_queries
+                        if q["sql"].lstrip().upper().startswith("SELECT")
+                        and '"agenda"' in q["sql"]]
+        self.assertEqual(len(agenda_reads), 1,
+                         f"안건 조회가 {len(agenda_reads)}번 나갔습니다")

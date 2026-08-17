@@ -36,9 +36,20 @@ class FlowContentType(models.TextChoices):
 
     `REVISION`(수정사항) → `CHANGE`(변동사항) 로 바꾼 건 화면 라벨을 따른 것입니다.
     중앙 요약표 헤더도 `변동 사항` 입니다.
+
+    **작업 모드는 종류가 아예 다릅니다.** 같은 필터 자리에 다른 항목이 뜹니다.
+
+        회의   의견 · 요청사항 · 변동사항 · 일정 · 결론 · 기타
+        작업   작업 · 수정 · 피드백 · 공유 · AI 조회
+
+    `DOCUMENT` · `PLAN` 은 Figma 어디에도 없는 초기 설계의 잔재입니다. 시드가
+    쓰고 있어 남겨 두지만 새 코드에서는 쓰지 마십시오.
     """
+    # 초기 설계 잔재. 시드 전용
     DOCUMENT = "DOCUMENT", "문서"
     PLAN = "PLAN", "계획"
+
+    # 회의 모드 — 화면 필터 6칸과 1:1
     OPINION = "OPINION", "의견"
     REQUEST = "REQUEST", "요청사항"
     CHANGE = "CHANGE", "변동사항"
@@ -46,10 +57,37 @@ class FlowContentType(models.TextChoices):
     CONCLUSION = "CONCLUSION", "결론"
     ETC = "ETC", "기타"
 
+    # 작업 모드 — 화면 필터 5칸과 1:1
+    #
+    # 여기 `REVISION` 은 작업물을 고친 것(`수정`)이고, 위 `CHANGE`(`변동사항`)는
+    # 회의에서 무엇이 달라졌는가입니다. 이름이 비슷하지만 다른 축입니다.
+    WORK = "WORK", "작업"
+    REVISION = "REVISION", "수정"
+    FEEDBACK = "FEEDBACK", "피드백"
+    SHARE = "SHARE", "공유"
+    AI_LOOKUP = "AI_LOOKUP", "AI 조회"
+
 
 class Surface(models.TextChoices):
+    """그 일이 **어디서** 일어났는가."""
     SERVICE = "SERVICE", "서비스"
     DISCORD = "DISCORD", "Discord"
+
+
+class FlowSource(models.TextChoices):
+    """
+    그 산출물이 **어디에 있는가**. 작업 모드 `필터링 > 출처`.
+
+    `Surface` 와 헷갈리기 쉬운데 다른 축입니다.
+
+        surface   일이 일어난 곳      서비스 / Discord
+        source    산출물이 있는 곳    Github / Figma / Notion
+
+    회의 모드에서는 비어 있습니다.
+    """
+    GITHUB = "GITHUB", "Github"
+    FIGMA = "FIGMA", "Figma"
+    NOTION = "NOTION", "Notion"
 
 
 class Meeting(UUIDModel, TimeStamped, SoftDeletable, Versioned):
@@ -174,11 +212,24 @@ class FlowEdge(UUIDModel, TimeStamped):
     서비스 대리인과 Discord 대리인은 **같은 노드**로 취급하되(`kind=AGENT`),
     엣지에는 `surface` 로 출처를 남깁니다.
     """
-    meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE, related_name="flow_edges")
+    # 회의 플로우만 채웁니다.
+    #
+    # 작업 플로우는 회의가 아니라 **기간**이 스코프입니다(화면 헤더가
+    # `8.10 - 8.16 작업 흐름`). 붙일 회의가 없으므로 비워 둡니다.
+    meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE,
+                                null=True, blank=True, related_name="flow_edges")
+    # 두 모드 공통. 작업 플로우 조회의 기준이 됩니다.
+    project = models.ForeignKey("orgs.Project", on_delete=models.CASCADE,
+                                related_name="flow_edges")
     category = models.CharField(max_length=10, choices=FlowCategory.choices)
     content_type = models.CharField(max_length=10, choices=FlowContentType.choices)
     surface = models.CharField(max_length=10, choices=Surface.choices,
                                default=Surface.SERVICE)
+    # 작업 모드 `필터링 > 출처`. 회의 모드에서는 빕니다.
+    source = models.CharField(max_length=10, choices=FlowSource.choices,
+                              blank=True, default="")
+    # 화면에서 눌러 원본으로 이동합니다.
+    source_url = models.URLField(blank=True, default="")
 
     from_node = models.JSONField(help_text='{"id","kind","user_id","name"}')
     to_nodes = models.JSONField(default=list, help_text="같은 모양의 배열. 1:N 가능.")
@@ -202,6 +253,8 @@ class FlowEdge(UUIDModel, TimeStamped):
         indexes = [
             models.Index(fields=["meeting", "occurred_at"]),
             models.Index(fields=["meeting", "category", "content_type"]),
+            # 작업 플로우 조회 그대로입니다: 프로젝트의 WORK 엣지를 기간으로 자름.
+            models.Index(fields=["project", "category", "occurred_at"]),
         ]
 
     def compute_opacity(self, oldest=None, newest=None):
@@ -211,8 +264,15 @@ class FlowEdge(UUIDModel, TimeStamped):
         기준을 조회 시점이 아니라 회의 구간으로 잡아야 같은 회의를 언제 열어도
         그림이 같습니다.
         """
-        newest = newest or self.meeting.ended_at or timezone.now()
-        oldest = oldest or self.meeting.started_at or self.meeting.scheduled_at
+        # 작업 플로우 엣지에는 회의가 없습니다. 그때는 호출부가 조회 기간을
+        # oldest/newest 로 넘겨야 합니다 — 넘기지 않으면 갈릴 기준이 없어
+        # 전부 같은 값이 됩니다.
+        if self.meeting_id is None:
+            if oldest is None or newest is None:
+                return 1.0
+        else:
+            newest = newest or self.meeting.ended_at or timezone.now()
+            oldest = oldest or self.meeting.started_at or self.meeting.scheduled_at
         span = (newest - oldest).total_seconds()
         if span <= 0:
             return 1.0

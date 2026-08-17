@@ -73,6 +73,8 @@ urlpatterns = [
     path(f"{API}/meetings/<uuid:meeting_id>", meetings.meeting_detail),
     path(f"{API}/meetings/<uuid:meeting_id>/delegate", meetings.delegate),
     path(f"{API}/meetings/<uuid:meeting_id>/flow", meetings.flow),
+    # 작업 플로우는 기간이 스코프라 회의 경로를 쓸 수 없습니다 (이슈 #54)
+    path(f"{API}/projects/<uuid:project_id>/flow", meetings.project_flow),
     path(f"{API}/meetings/<uuid:meeting_id>/indexes", meetings.indexes),
     path(f"{API}/meetings/<uuid:meeting_id>/summary-table", meetings.summary_table),
     path(f"{API}/meetings/<uuid:meeting_id>/context", meetings.context),
@@ -80,6 +82,8 @@ urlpatterns = [
     path(f"{API}/meetings/<uuid:meeting_id>/agendas/<uuid:agenda_id>",
          meetings.agenda_detail),
     path(f"{API}/flow-edges/<uuid:edge_id>", meetings.flow_edge_detail),
+    # AI 조회 4단 상세 (이슈 #56)
+    path(f"{API}/agent-lookups/<uuid:lookup_id>", agent.agent_lookup_detail),
     path(f"{API}/me/flow-filters", meetings.flow_filters),
     path(f"{API}/me/flow-filters/<uuid:preset_id>", meetings.flow_filter_detail),
 
@@ -173,6 +177,11 @@ urlpatterns = [
     path(f"{INTERNAL}/meetings/end", discord_internal.meeting_end),
     path(f"{INTERNAL}/discord/messages", discord_internal.discord_messages),
     path(f"{INTERNAL}/discord/presence", discord_internal.discord_presence),
+
+    # 발송함 — 서버가 쓰고 봇이 가져갑니다 (이슈 #52)
+    path(f"{INTERNAL}/outbox-events", discord_internal.outbox_events),
+    path(f"{INTERNAL}/outbox-events/<uuid:event_id>/ack", discord_internal.outbox_ack),
+    path(f"{INTERNAL}/outbox-events/<uuid:event_id>/fail", discord_internal.outbox_fail),
 
     # 봇이 아직 쓰는 옛 경로. 명세는 /meetings/start 입니다.
     # 봇이 옮겨 오면 지웁니다 — 지금 지우면 회의 시작이 통째로 막힙니다.

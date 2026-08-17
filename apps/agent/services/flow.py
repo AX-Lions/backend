@@ -95,6 +95,9 @@ def record(meeting, *, from_node: dict, to_nodes: list[dict], label: str,
 
         edge = FlowEdge(
             meeting=meeting,
+            # 작업 플로우와 공통 스코프입니다. 회의 엣지도 채워 둬야
+            # 프로젝트 단위 조회에서 빠지지 않습니다.
+            project_id=meeting.project_id,
             category=category,
             content_type=content_type,
             surface=surface,
@@ -159,6 +162,59 @@ def recompute_for_meeting(meeting) -> int:
     return len(edges)
 
 
+def agenda_for(meeting, text: str):
+    """
+    이 발언이 어느 안건에 속하는지 **짐작**합니다.
+
+    화면 좌측 `인덱스` 에서 안건을 누르면 관련 화살표로 점프합니다
+    (`GET /meetings/{id}/indexes` 의 `related_edge_ids`). 그 연결이 지금 비어
+    있어서 인덱스가 아무 데도 못 갑니다.
+
+    ## 짐작이라고 적어 두는 이유
+
+    발언과 안건을 잇는 **명시적인 신호가 없습니다.** Discord 에서 "지금부터
+    2번 안건" 이라고 선언하지 않습니다. 그래서 제목과 발언의 낱말 겹침으로
+    고릅니다 — 검색 스킬이 쓰는 것과 같은 방식입니다.
+
+    ## 애매하면 비웁니다
+
+    두 안건이 같은 점수면 **아무것도 고르지 않습니다.** 틀린 안건에 붙으면
+    사용자가 인덱스를 눌렀을 때 엉뚱한 곳으로 갑니다 — 비어 있는 것보다 나쁩니다.
+
+    ## 알려진 한계
+
+    낱말 두 개가 겹쳐야 하므로 **제목이 한 낱말인 안건은 영영 안 걸립니다**
+    (`로그인` 같은). 지금 시안의 안건은 `진행 상황 공유` · `백엔드 개발 논의`
+    처럼 두 낱말 이상이라 문제가 안 되지만, 짧은 제목이 흔해지면 다시 봐야
+    합니다. 문턱을 낮추는 것보다 이대로 두는 편이 나은 이유는 위와 같습니다.
+
+    ## 발언마다 한 번만 부르십시오
+
+    안건 목록을 읽고 제목을 전부 토큰으로 쪼갭니다. 질문 화살표와 답변 화살표에
+    각각 부르면 **같은 조회와 같은 계산이 두 번** 돕니다. 호출부에서 한 번 구해
+    양쪽에 넘기십시오.
+    """
+    from apps.agent.services.skills.search_records import _tokens
+    from apps.meetings.models import Agenda
+
+    words = set(_tokens(text or ""))
+    if not words:
+        return None
+
+    best, best_score, tied = None, 0, False
+    for agenda in Agenda.objects.filter(meeting=meeting):
+        score = len(words & set(_tokens(agenda.title)))
+        if score > best_score:
+            best, best_score, tied = agenda, score, False
+        elif score == best_score and score > 0:
+            tied = True
+
+    # 겹치는 낱말이 하나뿐이면 우연일 가능성이 큽니다.
+    if best_score < 2 or tied:
+        return None
+    return best
+
+
 # ═══════════════════════════════════════════ 상황별 기록
 
 def delegate_prompt_given(meeting, user, prompt: str):
@@ -200,17 +256,19 @@ def delegate_prompt_given(meeting, user, prompt: str):
                       occurred_at=meeting.scheduled_at)
 
 
-def question_routed(meeting, *, asker, target, surface=Surface.DISCORD):
+def question_routed(meeting, *, asker, target, agenda=None,
+                    surface=Surface.DISCORD):
     """회의 중 — 질문이 누구의 대리인에게 향했는지."""
     if asker is None:
         return None
     return record(meeting,
                   from_node=user_node(asker), to_nodes=[agent_node(target)],
                   label="질문", content_type=FlowContentType.REQUEST,
-                  surface=surface)
+                  surface=surface, agenda=agenda)
 
 
-def answered(meeting, *, principal, audience: list, surface=Surface.DISCORD):
+def answered(meeting, *, principal, audience: list, agenda=None,
+             surface=Surface.DISCORD):
     """
     회의 중 — 대리인이 답했습니다.
 
@@ -221,21 +279,33 @@ def answered(meeting, *, principal, audience: list, surface=Surface.DISCORD):
                   from_node=agent_node(principal),
                   to_nodes=[user_node(u) for u in audience],
                   label="대리인 답변", content_type=FlowContentType.OPINION,
-                  surface=surface)
+                  surface=surface, agenda=agenda)
 
 
 def deferred(meeting, *, principal, asker, surface=Surface.DISCORD):
     """
     회의 중 — 유보했습니다.
 
-    **답변과 다른 content_type 을 씁니다.** 화면에서 "답했다" 와 "확인이 필요하다" 가
-    같은 색으로 보이면, 유보를 보여주는 의미가 사라집니다.
+    ## 화살표를 그리지 않습니다
+
+    한동안 `기타`(ETC) 로 그렸는데 **잘못이었습니다.**
+
+    유보는 필터로 걸러 보는 것이 아니라 **사용자가 반드시 답해야 하는 일**입니다.
+    필터 축에 넣으면 `기타` 체크를 끈 사람에게는 안 보이고, 켠 사람에게도
+    다른 화살표들과 같은 무게로 섞입니다. 둘 다 "답해야 한다" 와 어긋납니다.
+
+        필터 축   의견 · 요청사항 · 변동사항 · 일정 · 결론 · 기타
+        알림 축   유보 질문 ← 여기
+
+    (2026-08-17 디자인 확인. 필터 6칸에 `유보` 가 없는 것은 누락이 아니라 의도입니다.)
+
+    유보 자체는 `PendingQuestion` 으로 이미 남고, 브리핑의 `답변이 필요해요`
+    섹션과 알림으로 사용자에게 갑니다. **플로우에 한 번 더 그릴 이유가 없습니다.**
+
+    함수를 지우지 않고 남겨 둔 이유는, 유보가 났다는 사실을 플로우에서도 보여줄
+    자리가 생기면(디자인 논의 중) 여기만 고치면 되기 때문입니다.
     """
-    return record(meeting,
-                  from_node=agent_node(principal),
-                  to_nodes=[user_node(asker)] if asker else [server_node()],
-                  label="본인 확인 필요", content_type=FlowContentType.ETC,
-                  surface=surface)
+    return None
 
 
 def artifact_proposed(meeting, *, principal, kind: str, title: str):

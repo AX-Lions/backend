@@ -55,8 +55,11 @@ def run_agent_for_utterance(utterance_id: str) -> None:
     # 닿지도 않은 것은 사용자에게 전혀 다른 이야기입니다.
     flow.delegate_prompt_given(utterance.meeting, target.user,
                                target.delegate_prompt or "")
+    # 안건은 여기서 한 번만 구해 질문·답변 화살표에 함께 넘깁니다. 각자 구하면
+    # 같은 조회와 같은 토큰 계산이 발언마다 두 번 돕니다.
+    agenda = flow.agenda_for(utterance.meeting, utterance.body)
     flow.question_routed(utterance.meeting, asker=utterance.participant,
-                         target=target.user)
+                         target=target.user, agenda=agenda)
 
     try:
         outcome = react.run(
@@ -78,11 +81,11 @@ def run_agent_for_utterance(utterance_id: str) -> None:
         # 떠들면 회의가 어지러워지고, 사람이 할 수 있는 일도 없습니다.
         return
 
-    _record_flow(outcome, utterance, target.user)
+    _record_flow(outcome, utterance, target.user, agenda)
     _speak(outcome, utterance)
 
 
-def _record_flow(outcome, utterance, principal) -> None:
+def _record_flow(outcome, utterance, principal, agenda=None) -> None:
     """
     답변과 유보를 화면에 남깁니다.
 
@@ -120,7 +123,8 @@ def _record_flow(outcome, utterance, principal) -> None:
         if not audience and utterance.participant:
             # 참석 상태가 아직 안 들어온 회의도 있습니다. 최소한 질문자에게는 그립니다.
             audience = [utterance.participant]
-        flow.answered(utterance.meeting, principal=principal, audience=audience)
+        flow.answered(utterance.meeting, principal=principal, audience=audience,
+                      agenda=agenda)
     except Exception:                                          # noqa: BLE001
         logger.exception("플로우 기록 실패 run=%s", getattr(outcome.run, "id", None))
 

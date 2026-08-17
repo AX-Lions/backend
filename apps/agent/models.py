@@ -10,6 +10,7 @@ from django.db import models
 from django.utils import timezone
 
 from apps.common.models import TimeStamped, UUIDModel
+from apps.meetings.models import FlowSource
 
 
 class AgentSettings(TimeStamped):
@@ -265,14 +266,36 @@ class OutboxEvent(UUIDModel, TimeStamped):
         self.last_error = ""
         self.save(update_fields=["status", "sent_at", "last_error", "updated_at"])
 
+    def mark_handed_out(self) -> bool:
+        """
+        봇이 가져갔습니다. **가져간 것 자체가 한 번의 시도입니다.**
+
+        시도 횟수를 `mark_failed()` 에서만 세면, 봇이 게시하다 그냥 죽는 경우를
+        영영 못 셉니다. 가시성 타임아웃이 지나 다시 보이고, 또 가져가고, 또
+        죽고를 **무한히 반복하면서 `DEAD` 에는 절대 도달하지 않습니다.**
+        하필 그 상황이 사람이 봐야 하는 상황입니다.
+
+        상한을 넘겼으면 `DEAD` 로 두고 `False` 를 돌려줍니다 — 내보내지 마십시오.
+        """
+        self.attempts += 1
+        if self.attempts > self.max_attempts:
+            self.status = self.Status.DEAD
+            self.save(update_fields=["attempts", "status", "updated_at"])
+            return False
+        self.save(update_fields=["attempts", "updated_at"])
+        return True
+
     def mark_failed(self, error: str = ""):
         """
         재시도 간격을 지수로 늘립니다.
 
         같은 간격으로 반복하면 Discord 가 잠시 불안정할 때 재시도가 몰려
         상황을 더 나쁘게 만듭니다.
+
+        **횟수는 여기서 세지 않습니다.** 가져갈 때(`mark_handed_out`) 이미 셌고,
+        실패는 그 시도의 결과일 뿐입니다. 여기서 또 세면 한 번의 시도가 두 번으로
+        기록돼 상한이 절반으로 줄어듭니다.
         """
-        self.attempts += 1
         self.last_error = (error or "")[:2000]
         if self.attempts >= self.max_attempts:
             self.status = self.Status.DEAD
@@ -281,3 +304,63 @@ class OutboxEvent(UUIDModel, TimeStamped):
             self.available_at = timezone.now() + timedelta(seconds=30 * (2 ** (self.attempts - 1)))
         self.save(update_fields=["status", "attempts", "last_error",
                                  "available_at", "updated_at"])
+
+
+class AgentLookup(UUIDModel, TimeStamped):
+    """
+    Bordo 가 다른 Bordo 에게 물어본 기록.
+
+    작업 플로우의 `AI 조회` 화살표를 누르면 뜨는 4단 상세입니다.
+
+        조회 이유 → 질문 → 확인된 내용 → 출처·시각
+
+    ## 왜 FlowEdge 에 못 넣는가
+
+    `label` 이 60자, `direction_label` 이 200자입니다. 위 넷은 각각 문장 여러
+    개라 들어가지 않습니다. 화살표는 "무엇이 오갔다" 만 말하고, 내용은 여기 둡니다.
+
+    ## 승인 대상이 아닙니다
+
+    AI 가 만든 것이지만 `PENDING_APPROVAL` 로 시작하지 않습니다. 승인이 필요한
+    것은 **앞으로 할 일**(태스크·일정·결정)이고, 이건 **이미 일어난 일의 기록**
+    입니다. 승인 큐에 로그가 쌓이면 승인이라는 행위가 뜻을 잃습니다.
+
+    다만 `run` 으로 어느 실행에서 나왔는지는 남깁니다. 대리인이 무엇을 근거로
+    답했는지 되짚을 수 없으면 추적성이 끊깁니다.
+    """
+    project = models.ForeignKey("orgs.Project", on_delete=models.CASCADE,
+                                related_name="agent_lookups")
+    # 화살표에서 상세로 잇습니다. 엣지가 지워져도 기록은 남깁니다.
+    edge = models.ForeignKey("meetings.FlowEdge", on_delete=models.SET_NULL,
+                             null=True, blank=True, related_name="lookups")
+
+    asker = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                              related_name="lookups_made",
+                              help_text="조회한 대리인의 주인")
+    target = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                               related_name="lookups_received",
+                               help_text="조회받은 대리인의 주인")
+
+    topic = models.CharField(max_length=200, help_text="모바일 반응형 작업 진행 현황")
+    reason = models.TextField(help_text="왜 물었는가")
+    question = models.TextField()
+    answer = models.TextField(blank=True, default="",
+                              help_text="확인된 내용. 유보하면 빕니다.")
+
+    source = models.CharField(max_length=10, choices=FlowSource.choices,
+                              blank=True, default="")
+    run = models.ForeignKey(AgentRun, on_delete=models.SET_NULL,
+                            null=True, blank=True, related_name="lookups")
+    occurred_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "agent_lookup"
+        ordering = ["-occurred_at"]
+        indexes = [
+            # 작업 플로우 상세 조회 그대로입니다.
+            models.Index(fields=["project", "-occurred_at"]),
+            models.Index(fields=["target", "-occurred_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.asker_id} → {self.target_id}: {self.topic[:20]}"

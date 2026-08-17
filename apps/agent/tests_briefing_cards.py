@@ -54,7 +54,7 @@ class Base(TestCase):
 
     def _edge(self, content_type, *, sender, to=None, label="라벨"):
         return FlowEdge.objects.create(
-            meeting=self.meeting, category=FlowCategory.MEETING,
+            meeting=self.meeting, project=self.meeting.project, category=FlowCategory.MEETING,
             content_type=content_type,
             from_node={"id": f"u{sender.id}", "kind": "USER",
                        "user_id": str(sender.id), "name": sender.name},
