@@ -32,20 +32,26 @@ class CatalogSpy:
         self._q = list(responses)
         self.catalogs = []
         self.turns = []
+        self._live = []
 
     def chat(self, messages, tools=None, system=""):
         self.catalogs.append(tools)
-        # 얕은 복사를 뜹니다. `messages` 는 루프가 계속 덧붙이는 **같은 객체**라,
-        # 그냥 담아 두면 매 턴이 마지막 상태를 가리켜 "이 턴에 무엇이 보였나" 를
-        # 볼 수 없습니다.
+        # 두 가지를 다 들고 있습니다.
+        #
+        #   turns   턴마다 얕은 복사 — "이 턴에 모델이 무엇을 보고 있었나"
+        #   _live   원본 참조       — 루프가 끝난 뒤의 최종 상태
+        #
+        # 복사만 뜨면 **마지막 chat() 이후에 붙은 것**을 못 봅니다. 상한을 소진해
+        # 끝나면 마지막 도구 결과가 어느 스냅샷에도 안 들어갑니다.
+        # 원본만 들고 있으면 반대로 턴별 구분이 사라집니다.
         self.turns.append(list(messages))
+        self._live = messages
         return self._q.pop(0) if self._q else LLMResponse(text="끝")
 
     @property
     def tool_replies(self):
-        """모델이 돌려받은 도구 결과들. 마지막 턴 기준입니다."""
-        return [m for m in (self.turns[-1] if self.turns else [])
-                if m.get("role") == "tool"]
+        """모델이 돌려받은 도구 결과 전부."""
+        return [m for m in self._live if m.get("role") == "tool"]
 
     @property
     def names(self):
@@ -284,6 +290,44 @@ class SkillFailureTest(Base):
         self.assertIn("error", body, f"실패 사유가 모델에게 안 갔습니다: {body}")
         self.assertIn("받는 사람", body["error"])
         self.assertEqual(body["code"], "not_found")
+
+    def test_an_exception_message_never_reaches_the_model(self):
+        """
+        스킬이 터졌을 때 **예외 문구를 그대로 넘기면 안 됩니다.**
+
+        사유를 모델에게 돌려주기로 하면서 `registry.dispatch` 의 `str(exc)` 가
+        모델까지 닿는 길이 열렸습니다. Django 의 영문 오류나 제약 조건 이름,
+        질의값이 실려 나가고 모델이 그것을 답변에 옮겨 적을 수 있습니다.
+
+        대리인은 **남의 요청을 받아 본인을 대리**합니다. 요청자가 본인이 아닐
+        수 있으므로, 새어 나가는 것은 남에게 보이는 것과 같습니다.
+        """
+        from apps.agent.services.skills import SkillContext, registry
+        from apps.agent.services.skills.base import SkillBase, SkillKind
+
+        secret = "SELECT secret_token FROM vault WHERE user_id=42"
+
+        class Boom(SkillBase):
+            name = "boom_for_test"
+            kind = SkillKind.READ
+            description = "터집니다"
+            parameters = {"type": "object", "properties": {}}
+
+            def run(self, args, ctx):
+                raise RuntimeError(secret)
+
+        registry.register(Boom())
+        try:
+            result = registry.dispatch("boom_for_test", {},
+                                       SkillContext(principal_id=str(self.me.id)))
+        finally:
+            registry._skills.pop("boom_for_test", None)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "internal")
+        self.assertNotIn(secret, result.message)
+        # 대신 무엇을 해야 하는지가 들어 있어야 합니다.
+        self.assertIn("확인이 필요", result.message)
 
     def test_a_successful_skill_still_returns_its_data(self):
         """실패 경로를 붙이면서 성공 경로 모양이 바뀌면 다른 스킬들이 깨집니다."""
