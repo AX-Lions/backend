@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<style>
+:root{--ink:#1f1f1f;--muted:#626262;--border:#dedede;--soft:#f7f7f8;--brand:#002662;--progress:#fff052}
+*{box-sizing:border-box}
+body{margin:0;background:#fff;font-family:Pretendard,'Malgun Gothic',system-ui,sans-serif;color:var(--ink);padding:36px 40px;width:1000px}
+h1{font-size:14px;color:var(--muted);font-weight:500;margin:0 0 6px}
+.route{display:inline-block;font:12px ui-monospace,Consolas,monospace;background:var(--soft);border:1px solid var(--border);border-radius:6px;padding:2px 8px;margin-bottom:24px}
+.wrap{display:flex;gap:40px;align-items:flex-start}
+.panel{width:380px;border-left:1px solid var(--border);background:var(--soft);padding:36px 24px 24px;border-radius:0 12px 12px 0}
+.panel h2{margin:0;font-size:20px;font-weight:700}
+.sub{margin:4px 0 0;color:var(--muted);font-size:12px}
+.hr{height:1px;background:var(--border);margin:20px 0}
+.sec h3{margin:0 0 12px;font-size:15px;font-weight:700}
+.list{display:grid;gap:12px}
+.card{display:grid;gap:6px;padding:12px 16px;border-radius:8px;background:#fff}
+.card strong{font-size:14px;font-weight:700;line-height:1.3}
+.card small{color:var(--muted);font-size:12px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chips span{padding:2px 8px;border-radius:999px;background:#f0f1f3;color:var(--muted);font-size:11px}
+.chips .mcp{background:var(--progress);color:var(--ink);font-weight:600}
+.bar{height:6px;border-radius:999px;background:#ececee;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--brand)}
+.legend{font-size:13px;line-height:1.9;color:var(--muted);max-width:480px}
+.legend b{color:var(--ink)}
+.legend code{background:var(--soft);border:1px solid var(--border);border-radius:4px;padding:0 5px;font-size:12px}
+.pill{display:inline-block;padding:2px 8px;border-radius:999px;background:var(--progress);font-size:11px;font-weight:600;color:var(--ink)}
+</style></head><body>
+<h1>플로우 보드 · 사람 노드 패널 「작업 한눈에 보기」 — <b style="color:#1f1f1f">개인 AI 가 기록한 항목에 뱃지</b></h1>
+<span class="route">/flow-board  ·  FlowNodePanel (FlowInspectorPanel.jsx)  ·  GET /projects/{id}/flow/participants/{user_id}</span>
+<div class="wrap">
+<aside class="panel">
+  <h2>서재민</h2>
+  <p class="sub">참석</p>
+  <div class="hr"></div>
+  <div class="sec">
+    <h3>작업 한눈에 보기</h3>
+    <div class="list">
+      <article class="card">
+        <strong>MCP 연동</strong>
+        <div class="bar"><i style="width:80%"></i></div>
+        <small>진행 중 · 80% · 방금</small>
+        <div class="chips"><span>backend</span><span class="mcp">개인 AI가 기록함</span></div>
+      </article>
+      <article class="card">
+        <strong>브리핑 카드 정리</strong>
+        <div class="bar"><i style="width:100%"></i></div>
+        <small>완료 · 100% · 어제</small>
+        <div class="chips"><span>agent</span></div>
+      </article>
+      <article class="card">
+        <strong>Outbox 재시도 정책</strong>
+        <div class="bar"><i style="width:40%"></i></div>
+        <small>막힘 · 40% · 3일 전</small>
+        <div class="chips"><span>discord</span><span class="mcp">개인 AI가 기록함</span></div>
+      </article>
+    </div>
+  </div>
+</aside>
+<div class="legend">
+  <p><b>규칙 하나뿐입니다.</b> work · plan · thought 응답에 <code>source</code> 가 새로 옵니다 —<br><code>"web"</code> · <code>"mcp"</code> · <code>"agent"</code>.<br><code>source === "mcp"</code> 이면 <span class="pill">개인 AI가 기록함</span> 칩을 답니다. 나머지는 지금과 같습니다.</p>
+  <p>같은 항목이 <b>현재 상태 카드</b>(홈·프로젝트)에 나올 때도 같은 칩입니다.<br>필드는 <b>추가만</b> 됐으므로 안 그려도 깨지지 않습니다.</p>
+  <p style="margin-top:20px">색은 <code>--progress</code>(#fff052) 를 썼습니다 — 대리인 노드와 같은 "AI 가 한 것" 계열. 디자인 토큰은 시우님·서인님 영역이라 여기 것은 자리만 보여주는 예시입니다.</p>
+</div>
+</div>
+</body></html>

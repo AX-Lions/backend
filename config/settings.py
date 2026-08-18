@@ -77,6 +77,7 @@ INSTALLED_APPS = [
     "apps.calendars",
     "apps.documents",
     "apps.discord",
+    "apps.mcp",
 ]
 
 MIDDLEWARE = [
@@ -215,6 +216,8 @@ BORDO = {
     # 봇 전용 API 를 부를 수 있습니다. 비어 있으면 인증이 전부 401 로 닫힙니다 —
     # 조용히 열려 있는 것보다 눈에 띄게 막히는 편이 낫습니다.
     "SERVICE_TOKEN": os.environ.get("BORDO_SERVICE_TOKEN", ""),
+    # MCP 토큰 발급 응답의 `setup_command` 에 들어가는 서버 주소. 비우면 요청 Host 로 만듭니다.
+    "PUBLIC_URL": os.environ.get("BORDO_PUBLIC_URL", ""),
 
     # 대리인 유보 판정 임계값. 코드에 박으면 시연 중에 조정할 수 없습니다.
     # 값을 올리면 더 자주 유보하고, 내리면 더 자주 답합니다.

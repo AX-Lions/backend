@@ -7,8 +7,9 @@ Bordo API 라우팅.
 * **D(API 서버)** — 채팅 · 현재 상태 · 태스크 · 캘린더 · 문서
 * **A(Discord)** — `/internal/v1/...`
 * **B(AI · 실시간)** — Agent Run 스트림, `/ws/projects/{id}`
+* **MCP** — `/mcp` (개인 AI 클라이언트, `brd_` 토큰) · `/api/v1/me/mcp-token`
 
-MCP(`/mcp`)와 동기화는 2차라 아직 없습니다.
+동기화(`sync-*`)는 2차라 아직 없습니다.
 """
 from django.contrib import admin
 from django.urls import path
@@ -20,6 +21,7 @@ from apps.discord import views as discord_internal
 from apps.chat import views as chat
 from apps.documents import views as documents
 from apps.home import views as home
+from apps.mcp import views as mcp
 from apps.meetings import views as meetings
 from apps.orgs import views as orgs
 from apps.states import views as states
@@ -193,4 +195,8 @@ urlpatterns = [
     # 봇이 아직 쓰는 옛 경로. 명세는 /meetings/start 입니다.
     # 봇이 옮겨 오면 지웁니다 — 지금 지우면 회의 시작이 통째로 막힙니다.
     path(f"{INTERNAL}/meetings", discord_internal.meeting_start),
+
+    # ── /mcp — 개인 AI 클라이언트 (brd_ 토큰). JWT 를 타지 않으므로 /api/v1 과 섞지 않습니다.
+    path("mcp", mcp.mcp),
+    path(f"{API}/me/mcp-token", mcp.me_mcp_token),
 ]
