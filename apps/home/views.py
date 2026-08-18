@@ -144,7 +144,11 @@ def home(request):
             {"delegated": my_part[str(m.id)].delegated,
              "prompt": my_part[str(m.id)].delegate_prompt,
              # `null` 이면 고른 적 없음(제한 없음), `[]` 면 아무것도 안 씀.
-             "sources": my_part[str(m.id)].allowed_sources}
+             "sources": my_part[str(m.id)].allowed_sources,
+             # `회의에 참여하지 않아요` 를 누르면 부를 곳과, 그다음 열 화면.
+             # 클라이언트가 경로를 조립하면 경로가 바뀔 때 두 곳을 고쳐야 합니다.
+             "absence_url": f"/api/v1/meetings/{m.id}/absence",
+             "prep_url": f"/api/v1/meetings/{m.id}/prep"}
             if str(m.id) in my_part else None),
     } for m in today]
 
