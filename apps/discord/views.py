@@ -221,14 +221,28 @@ def _set_delegate(request, on: bool):
 
     user = _user_of(request.data.get("discord_user_id"))
 
-    # 진행 중이거나 예정된 회의에만 적용합니다. 끝난 회의의 참석 상태를 뒤늦게
-    # 바꾸면 그때 대리인이 왜 답했는지 기록과 어긋납니다.
+    # 진행 중이거나 아직 안 열린 회의에만 적용합니다. 끝난 회의의 참석 상태를
+    # 뒤늦게 바꾸면 그때 대리인이 왜 답했는지 기록과 어긋납니다.
+    #
+    # `CONFIRMED` 를 빠뜨리고 있었습니다 — 일정이 확정된 회의가 대부분인데 그
+    # 회의들에는 `/delegate-on` 이 아무 일도 안 했습니다.
     qs = MeetingParticipant.objects.filter(
         user=user,
-        meeting__status__in=[MeetingStatus.SCHEDULED, MeetingStatus.ACTIVE])
+        meeting__status__in=[MeetingStatus.SCHEDULED, MeetingStatus.CONFIRMED,
+                             MeetingStatus.ACTIVE])
 
-    changed = qs.update(delegated=on,
-                        attendance=Attendance.ABSENT if on else Attendance.PRESENT)
+    if on:
+        # 웹 경로(`/meetings/{id}/absence`)와 같은 값을 씁니다. 같은 행위가
+        # 경로에 따라 `ABSENT` 와 `DELEGATED` 로 갈리면, 어디서 눌렀느냐에 따라
+        # 화면 뱃지가 `불참` 과 `Bordo 대리 참석 예정` 으로 달라집니다.
+        changed = qs.update(delegated=True, attendance=Attendance.DELEGATED)
+    else:
+        # 되돌릴 때는 회의 상태로 나눕니다. 열리지도 않은 회의를 `PRESENT` 로
+        # 두면 참석자 목록에 이미 와 있는 사람으로 그려집니다.
+        changed = qs.filter(meeting__status=MeetingStatus.ACTIVE).update(
+            delegated=False, attendance=Attendance.PRESENT)
+        changed += qs.exclude(meeting__status=MeetingStatus.ACTIVE).update(
+            delegated=False, attendance=Attendance.PENDING)
     return Response({"delegated": on, "meetings_updated": changed})
 
 
@@ -303,7 +317,8 @@ def meeting_start(request):
             MeetingParticipant.objects.update_or_create(
                 meeting=meeting, user=u,
                 defaults=dict(user_name=u.name, delegated=delegated,
-                              attendance=(Attendance.ABSENT if delegated
+                              # 웹 경로와 같은 값입니다 (`_set_delegate` 주석 참고).
+                              attendance=(Attendance.DELEGATED if delegated
                                           else Attendance.PRESENT)))
 
     return Response({"meeting_id": str(meeting.id),
