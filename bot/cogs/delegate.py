@@ -1,5 +1,3 @@
-import asyncio
-
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -13,20 +11,7 @@ class DelegateCog(commands.Cog):
         self.backend = backend
         self.meeting_cog = meeting_cog
 
-    async def _post_with_retry(self, path: str, json: dict, retries: int = 1, delay: float = 2.0):
-        """BackendClient.request()가 이미 네트워크 오류를 자체 재시도하다
-        최종적으로 None을 돌려준 뒤, 한 번 더 시도해본다. 4xx(get_error로
-        걸러지는 것)는 재시도해도 같은 결과라 여기서 다시 부르지 않는다 —
-        오직 완전 실패(None)일 때만 대상이다."""
-        result = await self.backend.post(path, json=json)
-        for _ in range(retries):
-            if result is not None:
-                break
-            await asyncio.sleep(delay)
-            result = await self.backend.post(path, json=json)
-        return result
-
-    async def _announce_delegate_change(self, user_id: int, result: dict, *, delegated: bool) -> None:
+    async def _announce_delegate_change(self, user_id: int, result, *, delegated: bool) -> None:
         """대리 참석 전환을 진행 중인 회의 스레드에 알린다.
 
         Backend 응답의 thread_ids를 우선 쓴다 — 방금 실제로 갱신한 회의가
@@ -36,7 +21,16 @@ class DelegateCog(commands.Cog):
         분기는 자동으로 안 타게 된다.
         """
         uid = str(user_id)
-        thread_ids = result.get("thread_ids")
+
+        # get_error()는 dict가 아닌 result(2xx인데 JSON이 아닌 응답)도
+        # 안전하게 통과시키므로, 여기서도 같은 경우를 방어한다 — 알릴
+        # 스레드를 알 수 없으니 조용히 스킵한다(Backend 저장 자체는
+        # 이미 끝난 뒤라 사용자에게는 성공으로 안내된다).
+        thread_ids = result.get("thread_ids") if isinstance(result, dict) else None
+        if isinstance(thread_ids, str):
+            # 원소 하나짜리를 배열 대신 문자열로 보내는 실수를 방어한다 —
+            # 그대로 순회하면 "123..."의 글자 하나하나를 id로 오인한다.
+            thread_ids = [thread_ids]
         if thread_ids is None:
             thread_ids = [
                 tid for tid, meeting in self.meeting_cog.active_meeting_threads.items()
@@ -70,7 +64,7 @@ class DelegateCog(commands.Cog):
     async def delegate_on(self, interaction: discord.Interaction, scope: str):
         await interaction.response.defer(ephemeral=True)
 
-        result = await self._post_with_retry(
+        result = await self.backend.post_with_retry(
             "/internal/v1/delegate/on",
             json={"discord_user_id": str(interaction.user.id), "scope": scope},
         )
@@ -101,7 +95,7 @@ class DelegateCog(commands.Cog):
     async def delegate_off(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        result = await self._post_with_retry(
+        result = await self.backend.post_with_retry(
             "/internal/v1/delegate/off", json={"discord_user_id": str(interaction.user.id)}
         )
 

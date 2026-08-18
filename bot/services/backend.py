@@ -61,6 +61,21 @@ class BackendClient:
     def post(self, path, **kw):
         return self.request("POST", path, **kw)
 
+    async def post_with_retry(self, path, *, retries: int = 1, delay: float = 2.0, **kw):
+        """post()가 이미 네트워크 오류를 자체 재시도하다 최종적으로 None을
+        돌려준 뒤(위 request()의 max_retries), 한 번 더 시도해본다 —
+        마지막 시도가 서버에서는 실제로 성공하고 응답만 유실됐을 수
+        있어서다. 4xx(딕셔너리로 온 에러 응답)는 재시도해도 같은
+        결과라 여기서 다시 부르지 않는다 — 오직 완전 실패(None)일 때만
+        대상이다."""
+        result = await self.post(path, **kw)
+        for _ in range(retries):
+            if result is not None:
+                break
+            await asyncio.sleep(delay)
+            result = await self.post(path, **kw)
+        return result
+
 
 def get_error(result) -> dict | None:
     """result가 4xx 오류 응답(error.code 포함)이면 그 error 딕셔너리를,
