@@ -472,6 +472,9 @@ main                 배포 기준
 | 화면에 찍히는 문자열 | 클라이언트가 ISO 를 포맷 | 서버가 완성해 내려줌 (`displayed_at` · `time_range` · `status` · `location` · `meta`) | 브라우저 시간대로 찍으면 같은 회의를 사람마다 다른 시각으로 봅니다 |
 | 대리인 호칭 | `AI 대리인` | **`{이름}의 Bordo`**, 화자일 때 **`Zero`** | `AI 대리인` 은 화면 어디에도 없는 낱말입니다 |
 | MCP 도구·토큰 이름 | `deputy_` · `dpt_` | **`bordo_` · `brd_`** | 도구 이름은 사용자 AI 대화창에 그대로 찍힙니다. 서비스 이름이 Bordo 입니다 |
+| 회의 전 준비 | `prebrief`(생성만) + `preanswers`(정규식 패턴) | **`/absence` → `/prep`** · `DebatePoint` + `DebateStance` | `prebrief` 는 만들라는 오퍼레이션만 있고 **결과를 꺼낼 경로가 스펙에 없었습니다.** `preanswer` 는 `pattern` 기반이라 논쟁점에 묶을 필드도 수정·삭제도 없는데, 화면은 카드마다 ⋮ 메뉴를 요구합니다 |
+| 자료 공개 스위치 | 한 칸(`disclose_work_plan_thought`) | **작업 · 계획 · 생각 셋** | 화면에는 스위치가 셋인데 모델이 한 칸이라 어느 것을 눌러도 셋이 함께 움직였습니다 |
+| 대리 참석 뱃지 | 없음 | `{이름}의 Bordo 대리 참석 예정` 을 서버가 조립 | 진입점이 홈과 Discord 팝업 둘이라, 클라이언트가 만들면 어디서 눌렀느냐에 따라 문구가 갈립니다 |
 
 `used_answers` / `deferred_answers` 는 화면에서 빠졌지만 **응답에는 남깁니다** —
 대리인이 무엇을 근거로 답했는지는 추적성 자산이라 화면에 없다고 지우면 안 됩니다.
@@ -519,6 +522,10 @@ A 가 발송함을 붙이면 그 이벤트를 받아 큐에 넣습니다. 페이
 | `ai-briefing` 조회 = 읽음 | `?mark_read=false` 로 끌 수 있음 (기본은 읽음) | 플로우 화면이 패널을 열든 말든 부르므로, 회의에 잠깐 들른 것만으로 홈 브리핑 버튼이 사라졌습니다 |
 | `/mcp` 도구 13종 · `initialize` 만 | **쓰기 3종** (`bordo_record_work` · `bordo_upload_document` · `bordo_complete_work`) · **dual-era** (legacy `initialize` + modern `server/discover`) · 도구 실행 오류는 `result.isError` | 읽기 도구가 없어야 장기 토큰이 새도 가져갈 게 없습니다. 한쪽 세대만 받으면 클라이언트에 따라 연결이 안 됩니다. `docs/decisions/2026-08-18-mcp-범위.md` |
 | MCP Tool 인자가 `team_id` | `project_id` (생략 시 최근 프로젝트, 결과에 `resolved_by`) | 문서·work 는 프로젝트에 매달립니다. 팀만으로는 어디에 쓸지 정할 수 없습니다 |
+| 불참과 대리 참석이 별개 | **같은 행위** — `/absence` 하나가 `delegated=True` + `attendance=DELEGATED` | `delegated=False` 로 두면 회의 후 브리핑이 통째로 안 생깁니다(브리핑은 대리 참석자에게만). 없는 사이 무슨 일이 있었는지 못 봅니다 |
+| 봇 경로가 `ABSENT`, 웹이 `DELEGATED` | **둘 다 `DELEGATED`** | 같은 행위가 경로에 따라 다른 값이면 홈 카드 뱃지가 어디서 눌렀느냐에 따라 갈립니다 |
+| 회의별 설정 없음 | `MeetingParticipant.settings_override` · `prompt_override` | 회의 하나 때문에 평소 설정을 바꿔 두면 끝난 뒤 되돌리는 것이 사람 몫이 되고 대개 잊습니다 |
+| 논쟁점이 사람마다 | **회의에 답니다** (입장만 사람별) | 쟁점은 회의의 성질입니다. 사람마다 만들면 같은 예측을 두 번 돌리고, 둘이 서로 다른 쟁점을 보게 되어 회의 후에 말이 안 맞습니다 |
 
 ---
 
@@ -529,7 +536,7 @@ A 가 발송함을 붙이면 그 이벤트를 받아 큐에 넣습니다. 페이
 
 | 상태 | 영역 |
 |---|---|
-| 동작함 | 인증 · 팀 · 프로젝트 · 홈 · 회의 CRUD · 플로우(조회 **+ 생성**) · 대리인 설정 · 채팅 · 현재 상태 · 태스크 · 캘린더 · 문서 · Discord `/internal/v1` · WebSocket · 대리인 코어(ReAct · POLICY · 유보 · 브리핑) · **MCP 1단계** (`/mcp` 쓰기 3종 · `brd_` 토큰) |
+| 동작함 | 인증 · 팀 · 프로젝트 · 홈 · 회의 CRUD · 플로우(조회 **+ 생성**) · 대리인 설정 · 채팅 · 현재 상태 · 태스크 · 캘린더 · 문서 · Discord `/internal/v1` · WebSocket · 대리인 코어(ReAct · POLICY · 유보 · 브리핑) · **MCP 1단계** (`/mcp` 쓰기 3종 · `brd_` 토큰) · **회의 대리 참석 준비**(불참 등록 · 논쟁점 예측 · 입장 · 회의별 설정) |
 | 미구현 | MCP 2단계(읽기 · 동기화 · 대리인 질문 10종) · 동기화 4 · `Idempotency-Key` · 문서 임베딩 검색 · `DailyChatSummary` 생성기 |
 
 > **껍데기 3종은 없어졌습니다.** `ai-briefing` · `pending-questions` · 플로우 엣지 모두
@@ -564,6 +571,10 @@ A 가 발송함을 붙이면 그 이벤트를 받아 큐에 넣습니다. 페이
    디자인에 칸이 생기면 종류를 나누는 게 맞습니다
 3. `FlowEdge` 의 `agenda` · `document` 연결이 비어 있습니다. 안건 자동 매칭이 붙으면
    좌측 인덱스에서 화살표로 점프할 수 있습니다
+3-1. Discord 회의 시작 팝업(10초 뒤 자동 대리)은 **봇 쪽 몫**입니다. 서버는
+   `GET /internal/v1/meetings/participants` 로 물어볼 대상(`asked=false`)을 알려주고
+   `POST /internal/v1/meetings/absence` 로 결과를 받습니다. 타이머를 서버가 들면
+   봇이 죽어 있을 때 **아무에게도 안 물어보고 대리 처리**됩니다
 4. `DailyChatSummary` 생성기 (B 담당)
 5. `Idempotency-Key` — 지금은 도메인 멱등 키로만 막고 있습니다 (아래 「알려진 미구현」)
 6. MCP 2단계 — 읽기 도구 + 토큰 만료 · 동기화 4 · `bordo_ask_agent`
