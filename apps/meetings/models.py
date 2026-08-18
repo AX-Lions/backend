@@ -149,6 +149,34 @@ class MeetingParticipant(TimeStamped):
     delegated = models.BooleanField(default=False, help_text="대리 참석 활성화 여부")
     delegate_prompt = models.TextField(
         blank=True, default="", help_text="이 회의에 한정된 지시. 비면 기본 프롬프트를 씁니다.")
+    allowed_sources = models.JSONField(
+        null=True, blank=True, default=None,
+        help_text="이 회의에서 대리인이 근거로 쓸 자료 종류. "
+                  "null 이면 고른 적 없음(제한 없음), [] 면 아무것도 쓰지 않음.")
+
+    #: 이 회의에서 대리인이 볼 수 있는 자료 종류.
+    #
+    # `search_records` 의 `kinds` 와 **같은 값을 씁니다.** 화면에서 고른 것이
+    # 검색 종류와 다른 낱말이면, 무엇을 끄면 무엇이 안 나오는지 사용자가
+    # 짚을 수 없습니다.
+    SOURCE_CHOICES = ("work", "plan", "thought", "document")
+
+    @property
+    def source_scope(self) -> list[str]:
+        """
+        실제로 검색에 쓸 종류.
+
+        **`null` 과 `[]` 는 다릅니다.**
+
+            null   고른 적 없음  → 전부
+            []     전부 껐음     → 아무것도 안 봄
+
+        둘을 같게 다루면 전부 끈 사람의 대리인이 **모든 자료를 보게 됩니다.**
+        정반대로 동작하는 셈입니다.
+        """
+        if self.allowed_sources is None:
+            return list(self.SOURCE_CHOICES)
+        return [s for s in self.allowed_sources if s in self.SOURCE_CHOICES]
 
     class Meta:
         db_table = "meeting_participant"

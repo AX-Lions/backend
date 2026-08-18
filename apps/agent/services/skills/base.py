@@ -72,8 +72,24 @@ class SkillContext:
     #: 없으므로 True 로 켭니다. 같은 검색 코드가 두 상황을 다르게 다뤄야 합니다.
     allow_private: bool = False
 
+    #: 이 회의에서 근거로 쓸 수 있는 자료 종류.
+    #:
+    #: `None` 이면 제한 없음입니다. 회의마다 본인이 고를 수 있고
+    #: (`MeetingParticipant.allowed_sources`), 고르지 않았으면 전부 봅니다.
+    #:
+    #: **모델이 `kinds` 로 요청한 것과 교집합을 냅니다.** 모델이 요청하지 않은
+    #: 것을 여기서 더해 주지 않습니다 — 범위 설정은 넓히는 장치가 아니라
+    #: 좁히는 장치입니다.
+    allowed_sources: list[str] | None = None
+
     def is_principal(self, user_id) -> bool:
         return str(user_id) == str(self.principal_id)
+
+    def sources_for(self, requested: list[str]) -> list[str]:
+        """모델이 요청한 종류에서 허용된 것만 남깁니다."""
+        if self.allowed_sources is None:
+            return list(requested)
+        return [k for k in requested if k in self.allowed_sources]
 
 
 class SkillBase:

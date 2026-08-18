@@ -81,12 +81,22 @@ Intent_OTHER = policy.Intent.OTHER
 
 def run(*, principal, question: str, meeting=None, project_id=None,
         actor_id=None, asker=None, delegate_prompt: str = "", allow_private: bool = False,
-        trace_id=None, hop_count: int = 0,
+        trace_id=None, hop_count: int = 0, scope_meeting_id=None,
         client: LLMClient | None = None, registry=None) -> RunOutcome:
     """
     대리인 실행 한 번.
 
     `principal` 은 대리 대상(User), `actor_id` 는 질문한 사람입니다.
+
+    ## `scope_meeting_id` 를 `meeting` 과 나눠 둔 이유
+
+    자료 범위(`MeetingParticipant.allowed_sources`)만 그 회의 기준으로 보고,
+    실행 자체는 회의에 매달지 않기 위해서입니다.
+
+    대리인끼리 묻는 경우(`lookup.ask_peer`)가 그렇습니다. 답하는 쪽은 그 회의에
+    있지도 않은데 `meeting` 을 넘기면 `AgentRun.meeting` 이 붙고 `search_meeting`
+    으로 **남의 회의 발언까지 읽게** 됩니다. 그렇다고 안 넘기면 본인이 그 회의에
+    걸어 둔 범위 설정이 통째로 무시됩니다.
     """
     client = client or default_client
     registry = registry or default_registry
@@ -144,6 +154,14 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             project_name=getattr(meeting, "project_name", ""),
             delegate_prompt=delegate_prompt,
             constraints=gate.constraints,
+            # 설정 스냅샷에서 꺼냅니다. 설정 행을 다시 읽지 않는 이유는 실행
+            # 도중에 사용자가 바꿔도 **이 실행은 시작할 때의 설정으로 끝나야**
+            # 하기 때문입니다 — `active_version` 이 가리키는 것도 그것입니다.
+            tone=(snapshot or {}).get("tone", ""),
+            # 설정 화면에 저장해 둔 지시. 한동안 아무도 안 읽었습니다 —
+            # 사용자는 "말하면 안 되는 것" 을 적어 두고 대리인이 지킨다고
+            # 믿고 있었습니다.
+            standing_prompts=prompts.standing_prompts_for(principal),
         )
         ctx = SkillContext(
             principal_id=str(principal.id), actor_id=str(actor_id or principal.id),
@@ -151,6 +169,8 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             project_id=str(project_id or getattr(meeting, "project_id", "") or "") or None,
             run_id=str(run_obj.id), settings_snapshot=snapshot,
             allow_private=allow_private,
+            allowed_sources=_sources_for(
+                getattr(meeting, "id", None) or scope_meeting_id, principal),
         )
         # 읽기와 쓰기를 모두 넘깁니다.
         #
@@ -291,6 +311,37 @@ def _snapshot_of(principal) -> dict:
 def _set(run_obj: AgentRun, status: str):
     run_obj.status = status
     run_obj.save(update_fields=["status", "updated_at"])
+
+
+def _sources_for(meeting_id, principal) -> list[str] | None:
+    """
+    이 회의에서 근거로 쓸 자료 범위.
+
+    **범위는 언제나 `principal` 본인이 고른 것입니다.** 누가 물었는지는 상관이
+    없습니다 — 대리인끼리 묻는 경우에도 답하는 쪽이 자기 회의에 걸어 둔 설정이
+    그대로 적용돼야 합니다. 그렇지 않으면 남의 대리인을 거쳐 물어보는 것만으로
+    범위 설정이 뚫립니다.
+
+    회의가 없는 실행(본인이 자기 대리인과 나누는 대화)에는 제한이 없습니다.
+    범위는 회의마다 고르는 것이라 회의가 없으면 고를 자리도 없습니다.
+
+    참석자 행을 못 찾아도 제한을 걸지 않습니다. 그 사람은 이 회의에 대해
+    **고른 적이 없는** 것이고, 여기서 조용히 빈 목록을 주면 대리인이 아무 근거도
+    못 찾아 전부 유보하는데 사용자는 왜 그런지 알 방법이 없습니다. 좁히는 것은
+    본인이 고른 경우에만 합니다 — 전역 공개 설정은 `judge.can_disclose()` 가
+    따로 봅니다.
+    """
+    if not meeting_id:
+        return None
+
+    from apps.meetings.models import MeetingParticipant
+
+    row = (MeetingParticipant.objects
+           .filter(meeting_id=meeting_id, user_id=principal.id)
+           .only("allowed_sources").first())
+    if row is None or row.allowed_sources is None:
+        return None
+    return row.source_scope
 
 
 def _may_write(skill_name: str, snapshot: dict | None) -> str:

@@ -122,7 +122,23 @@ class SearchRecordsSkill(SkillBase):
         if not ctx.project_id:
             return SkillResult.fail("프로젝트 범위가 없습니다.", "validation")
 
-        kinds = args.get("kinds") or ["work", "plan", "thought", "document"]
+        requested = args.get("kinds") or ["work", "plan", "thought", "document"]
+
+        # 본인이 이 회의에서 쓸 자료 범위를 좁혀 뒀으면 여기서 걸러집니다.
+        #
+        # 검색어를 바꿔 가며 다시 부르는 것으로는 못 뚫습니다 — 모델의 요청과
+        # 교집합을 내므로, 꺼 둔 종류는 어떤 호출로도 안 나옵니다.
+        kinds = ctx.sources_for(requested)
+        if not kinds:
+            # 0건과 다릅니다. **찾을 자리 자체가 없다**는 것을 모델이 알아야
+            # 검색어만 바꿔 가며 헛돌지 않고 유보로 갑니다.
+            return SkillResult(
+                ok=True,
+                message="이 회의에서는 그 자료를 근거로 쓰지 않기로 하셨습니다.",
+                data={"items": [], "blocked_kinds": sorted(set(requested))},
+                evidence=[],
+            )
+
         evidence: list[dict] = []
 
         if "work" in kinds:

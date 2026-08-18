@@ -75,6 +75,9 @@ urlpatterns = [
     path(f"{API}/meetings/<uuid:meeting_id>/flow", meetings.flow),
     # 작업 플로우는 기간이 스코프라 회의 경로를 쓸 수 없습니다 (이슈 #54)
     path(f"{API}/projects/<uuid:project_id>/flow", meetings.project_flow),
+    # 플로우 노드(사람)를 눌렀을 때 우측 패널이 부릅니다.
+    path(f"{API}/projects/<uuid:project_id>/flow/participants/<uuid:user_id>",
+         meetings.flow_participant),
     path(f"{API}/meetings/<uuid:meeting_id>/indexes", meetings.indexes),
     path(f"{API}/meetings/<uuid:meeting_id>/summary-table", meetings.summary_table),
     path(f"{API}/meetings/<uuid:meeting_id>/context", meetings.context),
@@ -102,6 +105,10 @@ urlpatterns = [
          agent.conversation_messages),
     path(f"{API}/me/pending-questions", agent.my_pending_questions),
     path(f"{API}/pending-questions/<uuid:question_id>/answer", agent.answer_question),
+    # AI 실행 단계·근거. 대화 메시지가 내려주는 run_id 로 여기까지 옵니다.
+    path(f"{API}/agent-runs/<uuid:run_id>", agent.agent_run_detail),
+    path(f"{API}/agent-runs/<uuid:run_id>/steps", agent.agent_run_steps),
+    path(f"{API}/agent-runs/<uuid:run_id>/evidence", agent.agent_run_evidence),
 
     # ── 04. 문서
     path(f"{API}/projects/<uuid:project_id>/documents", documents.documents),

@@ -39,7 +39,8 @@ _TOPIC_MAX = 200
 
 
 def ask_peer(*, asker, target, topic: str, reason: str, question: str,
-             project_id, run=None, source: str = "") -> AgentLookup | None:
+             project_id, run=None, source: str = "",
+             meeting_id=None) -> AgentLookup | None:
     """
     상대 대리인에게 묻고 결과를 남깁니다.
 
@@ -72,6 +73,16 @@ def ask_peer(*, asker, target, topic: str, reason: str, question: str,
             project_id=project_id,
             trace_id=getattr(run, "trace_id", None) or getattr(run, "id", None),
             hop_count=hops,
+            # 답하는 쪽이 **그 회의에 걸어 둔 자료 범위**를 그대로 적용합니다.
+            #
+            # 이걸 안 넘기면 범위 설정이 통째로 뚫립니다. 직접 물으면 `생각` 이
+            # 안 나오는데, 남의 대리인을 거쳐 물으면 나옵니다. 게다가 그 답은
+            # `AgentLookup` 으로 남아 **프로젝트 참여자 전원이 볼 수 있는**
+            # `AI 조회` 상세에 실립니다 — 1:1 유출보다 넓습니다.
+            #
+            # `meeting` 자체를 넘기지 않는 이유는 위쪽 `react.run` docstring 에
+            # 적어 뒀습니다. 답하는 쪽은 그 회의에 있지도 않을 수 있습니다.
+            scope_meeting_id=meeting_id,
         )
     except Exception:                                          # noqa: BLE001
         logger.exception("피어 조회 실패 asker=%s target=%s", asker.id, target.id)

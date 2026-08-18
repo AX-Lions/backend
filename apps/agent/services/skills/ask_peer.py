@@ -91,6 +91,8 @@ class AskPeerAgentSkill(SkillBase):
             question=question,
             project_id=ctx.project_id,
             run=run,
+            # 답하는 쪽이 이 회의에 걸어 둔 자료 범위를 적용받게 합니다.
+            meeting_id=ctx.meeting_id,
         )
         if lookup is None:
             # 깊이 초과이거나 상대 실행이 실패했습니다. 둘 다 정상 실패라
