@@ -41,7 +41,7 @@ python main.py
 |---|---|
 | `/bordo-connect` | 계정 연결 코드를 DM으로 발급 |
 | `/bordo-team` | 현재 연결된 팀 조회 |
-| `/meeting-start` | 웹에서 예정된 회의를 골라(자동완성) 열거나, agenda로 즉석 회의를 새로 만듭니다 |
+| `/meeting-start` | 웹에서 예정된 회의 중 하나를 골라(자동완성) 스레드를 엽니다 |
 | `/meeting-end` | 회의 종료(회의 스레드 안에서 실행) |
 | `/ask-bordo` | 특정 대리인에게 질문 전달(답변은 비동기) |
 | `/delegate-on` / `/delegate-off` | 내 AI 대리인 자동 참석 전역 토글 |
