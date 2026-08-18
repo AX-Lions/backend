@@ -127,17 +127,33 @@ def _work_facts(meeting, tz, since) -> list[dict]:
     바뀐 필드를 그대로 문장으로 옮기고, 무엇이 바뀌었는지를 화면이 보여줍니다.
     """
     from apps.common.display import date_label
-    from apps.states.models import ActivityEvent
+    from apps.states.models import ActivityEvent, Visibility, WorkItem
 
     rows = (ActivityEvent.objects
             .filter(project_id=meeting.project_id, occurred_at__gte=since,
                     kind__startswith="work.")
+            .exclude(kind="work.deleted")
             .select_related("actor")
             .order_by("-occurred_at")[:MAX_FACTS])
 
+    # **비공개 작업은 근거가 되면 안 됩니다.**
+    #
+    # 활동 로그에는 공개 여부가 없습니다. 여기서 안 거르면 본인이 비공개로 둔
+    # 작업의 제목과 변경 내용이 근거 카드에 실려 **회의 참석자 전원**에게
+    # 보입니다 — 대리인 발언은 `can_disclose` 가 거르지만 이 화면은 그 앞입니다.
+    #
+    # 이미 지워진 작업도 뺍니다. 지워진 것을 근거로 "이렇게 갈릴 것" 이라고
+    # 말하면 사용자는 화면에서 찾을 수 없는 것을 놓고 입장을 정하게 됩니다.
+    target_ids = [e.target_id for e in rows]
+    open_ids = set(WorkItem.objects
+                   .filter(id__in=target_ids, visibility=Visibility.TEAM)
+                   .values_list("id", flat=True))
+
     out = []
     for e in rows:
-        line = _describe_change(e.detail or {})
+        if e.target_id not in open_ids:
+            continue
+        line = _describe_change(e.detail or {}, e.kind)
         if not line:
             continue
         who = e.actor.display_name if e.actor_id else "(탈퇴한 사용자)"
@@ -161,14 +177,19 @@ _FIELD_LABEL = {
 }
 
 
-def _describe_change(detail: dict) -> str:
+def _describe_change(detail: dict, kind: str = "") -> str:
     """
     `{"expected_end_at": {"from": ..., "to": ...}}` → `완료 예정일이 A → B 로 바뀌었어요`.
 
     바뀐 값을 문장으로 만드는 것을 클라이언트에 맡기지 않습니다. 근거 카드는
     화면 세 곳(준비 화면·브리핑·플로우)에 같은 모양으로 나가야 합니다.
+
+    `kind` 를 함께 받는 이유 — 생성·삭제 로그의 `detail` 모양이 `{"title": ...}`
+    로 **똑같습니다.** 로그 종류를 안 보면 지워진 작업이 `새로 생겼어요` 로 찍힙니다.
     """
     if "title" in detail and not isinstance(detail.get("title"), dict):
+        if kind and not kind.endswith(".created"):
+            return ""
         return f"「{detail['title']}」 작업이 새로 생겼어요."
 
     parts = []
@@ -245,13 +266,15 @@ def _parse(raw: str) -> list[dict]:
 def _option_rows(raw) -> list[dict]:
     """선택지에 `A` · `B` 를 코드가 붙입니다. 모델이 붙이면 건너뛰거나 겹칩니다."""
     out = []
-    for i, item in enumerate(raw if isinstance(raw, list) else []):
+    for item in (raw if isinstance(raw, list) else []):
         if not isinstance(item, dict):
             continue
         title = str(item.get("title") or "").strip()
         if not title:
             continue
-        out.append({"key": chr(ord("A") + i), "title": title[:60],
+        # 걸러진 것을 건너뛰고 **남은 것에 차례로** 붙입니다. 원본 인덱스를 쓰면
+        # 앞이 걸러졌을 때 키가 `B` 부터 시작해 화면에 A 없는 선택지가 뜹니다.
+        out.append({"key": chr(ord("A") + len(out)), "title": title[:60],
                     "description": str(item.get("description") or "").strip()[:120]})
     return out[:4]
 
@@ -266,9 +289,14 @@ def _evidence_rows(picked, facts: list[dict]) -> list[dict]:
     out = []
     for n in (picked if isinstance(picked, list) else []):
         try:
-            fact = facts[int(n) - 1]
-        except (ValueError, TypeError, IndexError):
+            idx = int(n)
+        except (ValueError, TypeError):
             continue
+        # 번호는 1부터입니다. 0 이나 음수를 그대로 빼면 파이썬 음수 인덱스가 되어
+        # **맨 뒤 사실**이 엉뚱하게 근거로 붙습니다.
+        if idx < 1 or idx > len(facts):
+            continue
+        fact = facts[idx - 1]
         out.append({k: fact[k] for k in ("kind", "title", "who", "body", "link")}
                    | {"at": fact["at"].isoformat()})
     return out[:4]
@@ -340,7 +368,6 @@ def _from_agendas(meeting) -> list[dict]:
 # ═══════════════════════════════════════════ 저장
 
 
-@transaction.atomic
 def build_for(meeting, client=None) -> int:
     """
     이 회의의 예상 논쟁점을 만들어 저장하고 **개수**를 돌려줍니다.
@@ -360,23 +387,39 @@ def build_for(meeting, client=None) -> int:
     from .llm import client as default_client
     client = client or default_client
 
+    # **모델 호출을 트랜잭션 밖에서 합니다.** 안에 두면 응답을 기다리는 수십 초
+    # 동안 DB 트랜잭션이 열려 있어, 그 사이 같은 행을 건드리는 요청이 밀립니다.
     rows = _from_llm(meeting, gather_facts(meeting), client) or _from_agendas(meeting)
+    if not rows:
+        # 아무것도 못 만들었으면 **있던 것을 건드리지 않습니다.** 모델이 한 번
+        # 실패했다고 이미 보여 주던 쟁점이 사라지면, 화면을 열어 둔 사람은
+        # 방금까지 있던 목록이 빈 칸이 된 것을 봅니다.
+        return 0
 
-    seen = []
-    for order, row in enumerate(rows, start=1):
-        key = _source_key(row["title"])
-        if key in seen:
-            continue
-        seen.append(key)
-        DebatePoint.objects.update_or_create(
-            meeting=meeting, source_key=key,
-            defaults={"order": order, "title": row["title"],
-                      "options": row["options"], "rationale": row["rationale"],
-                      "evidence": row["evidence"],
-                      "created_by_agent": row["created_by_agent"]})
+    with transaction.atomic():
+        seen = []
+        for row in rows:
+            key = _source_key(row["title"])
+            if key in seen:
+                continue
+            seen.append(key)
+            DebatePoint.objects.update_or_create(
+                meeting=meeting, source_key=key,
+                defaults={"order": len(seen), "title": row["title"],
+                          "options": row["options"], "rationale": row["rationale"],
+                          "evidence": row["evidence"],
+                          "created_by_agent": row["created_by_agent"]})
 
-    (DebatePoint.objects
-     .filter(meeting=meeting, stances__isnull=True)
-     .exclude(source_key__in=seen)
-     .delete())
+        (DebatePoint.objects
+         .filter(meeting=meeting, stances__isnull=True)
+         .exclude(source_key__in=seen)
+         .delete())
+
+        # 답이 달려 살아남은 쟁점은 새 목록 **뒤에** 붙습니다. 번호를 다시 매기지
+        # 않으면 `논쟁점 01` 이 둘이 되어 화면에서 어느 것을 말하는지 알 수 없습니다.
+        for order, row in enumerate(
+                DebatePoint.objects.filter(meeting=meeting)
+                .exclude(source_key__in=seen).order_by("created_at"),
+                start=len(seen) + 1):
+            DebatePoint.objects.filter(pk=row.pk).update(order=order)
     return len(seen)

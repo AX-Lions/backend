@@ -257,3 +257,83 @@ class TaskTest(Base):
 
         from apps.agent.tasks import build_debate_points
         build_debate_points(str(uuid.uuid4()))
+
+
+class EvidenceSafetyTest(Base):
+    """근거 카드에 나가면 안 되는 것."""
+
+    def _event(self, work, kind="work.updated", detail=None):
+        return ActivityEvent.objects.create(
+            project=self.project, actor=self.me, kind=kind, target_id=work.id,
+            detail=detail or {"progress": {"from": 40, "to": 80}})
+
+    def test_private_work_is_not_evidence(self):
+        """회의 참석자 전원이 보는 화면입니다. 대리인 발언 판정보다 앞입니다."""
+        from apps.states.models import Visibility
+
+        w = WorkItem.objects.create(project=self.project, owner=self.me,
+                                    title="비공개 작업", visibility=Visibility.PRIVATE)
+        self._event(w)
+        self.assertEqual(contention.gather_facts(self.meeting()), [])
+
+    def test_deleted_work_is_not_evidence(self):
+        """지워진 것을 놓고 입장을 정하게 하면 화면에서 찾을 수가 없습니다."""
+        w = WorkItem.objects.create(project=self.project, owner=self.me, title="지운 작업")
+        self._event(w, kind="work.deleted", detail={"title": "지운 작업"})
+        w.delete()
+        self.assertEqual(contention.gather_facts(self.meeting()), [])
+
+    def test_created_log_still_reads_as_created(self):
+        w = WorkItem.objects.create(project=self.project, owner=self.me, title="새 작업")
+        self._event(w, kind="work.created", detail={"title": "새 작업"})
+        self.assertIn("새로 생겼어요", contention.gather_facts(self.meeting())[0]["body"])
+
+    def test_evidence_index_zero_does_not_wrap_around(self):
+        """0 을 그대로 빼면 음수 인덱스가 되어 맨 뒤 사실이 엉뚱하게 붙습니다."""
+        self.past_utterance()
+        m = self.meeting()
+        contention.build_for(m, client=Fake(ANSWER.replace('"evidence": [1]',
+                                                           '"evidence": [0, -1]')))
+        self.assertEqual(DebatePoint.objects.get(meeting=m).evidence, [])
+
+    def test_option_keys_start_at_a_even_if_one_is_dropped(self):
+        self.past_utterance()
+        m = self.meeting()
+        holed = ANSWER.replace('{"title": "핵심 기능만 구현", "description": "남은 기간을 고려해 축소"}',
+                               '{"description": "제목이 없어 걸러짐"}')
+        contention.build_for(m, client=Fake(holed))
+        # 선택지가 하나만 남아 쟁점이 아니게 됩니다
+        self.assertEqual(DebatePoint.objects.filter(meeting=m).count(), 0)
+
+    def test_option_keys_are_sequential(self):
+        self.past_utterance()
+        m = self.meeting()
+        three = ANSWER.replace('{"title": "기존 기획 범위 유지", "description": "계획한 기능을 최대한 구현"}',
+                               '{"title": "유지"}, {"title": "절충"}')
+        contention.build_for(m, client=Fake(three))
+        self.assertEqual([o["key"] for o in DebatePoint.objects.get(meeting=m).options],
+                         ["A", "B", "C"])
+
+
+class RebuildSafetyTest(Base):
+
+    def test_failed_rebuild_keeps_what_was_showing(self):
+        """모델이 한 번 실패했다고 화면을 열어 둔 사람의 목록이 빈 칸이 되면 안 됩니다."""
+        self.past_utterance()
+        m = self.meeting()
+        contention.build_for(m, client=Fake(ANSWER))
+        self.assertEqual(contention.build_for(m, client=Fake(error="503")), 0)
+        self.assertEqual(DebatePoint.objects.filter(meeting=m).count(), 1)
+
+    def test_surviving_answered_point_gets_a_new_number(self):
+        """번호를 다시 안 매기면 `논쟁점 01` 이 둘이 되어 어느 것을 말하는지 알 수 없습니다."""
+        self.past_utterance()
+        m = self.meeting()
+        contention.build_for(m, client=Fake(ANSWER))
+        old = DebatePoint.objects.get(meeting=m)
+        DebateStance.objects.create(point=old, user=self.me, body="내 입장")
+
+        contention.build_for(m, client=Fake(
+            ANSWER.replace(TITLE, "QA 일정을 연기할 것인가, 유지할 것인가?")))
+        orders = sorted(DebatePoint.objects.filter(meeting=m).values_list("order", flat=True))
+        self.assertEqual(orders, [1, 2])
