@@ -1,4 +1,6 @@
 """AI 대리인 설정 · 프롬프트 · 대화."""
+import logging
+
 from django.db import transaction
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -12,6 +14,9 @@ from .models import (AgentConversation, AgentMessage, AgentPrompt, AgentSettings
                      AgentSettingsVersion, PendingQuestion)
 from .serializers import (AgentConversationSerializer, AgentPromptSerializer,
                           AgentSettingsSerializer)
+from .tasks import run_agent_for_conversation
+
+logger = logging.getLogger("bordo.agent")
 
 BOOL_FIELDS = ("mention_feasibility", "allow_schedule_change",
                "allow_midmeeting_question", "disclose_work_plan_thought")
@@ -157,6 +162,21 @@ def conversation_messages(request, conversation_id):
         # 첫 메시지로 임시 제목을 잡아둡니다. 실제 요약 제목은 워커가 갱신합니다.
         conv.title = body[:40]
     conv.save(update_fields=["last_message_preview", "title", "updated_at"])
+
+    # 대리인을 실제로 부릅니다.
+    #
+    # 여기가 비어 있었습니다. 메시지는 적히고 202 는 나가는데 **그것을 읽는 쪽이
+    # 없어서**, 홈 대화창과 채팅 AI 방이 영영 `답을 준비하고 있습니다` 에
+    # 머물렀습니다. 화면은 처음부터 답을 기다리게 만들어져 있었습니다.
+    #
+    # 저장에 실패하지 않았는데 호출에서 터지면 사용자 메시지만 남고 202 대신
+    # 500 이 나갑니다. 화면은 "안 보내졌다" 로 읽고 같은 말을 다시 보내는데,
+    # 앞의 것은 이미 저장돼 있어 대화에 같은 말이 두 번 남습니다.
+    try:
+        run_agent_for_conversation.delay(str(msg.id))
+    except Exception:                                          # noqa: BLE001
+        logger.exception("대리인 호출 실패 message=%s", msg.id)
+
     return Response({"id": str(msg.id), "role": msg.role, "body": msg.body,
                      "sent_at": msg.sent_at,
                      "run": {"status": "RECEIVED", "run_id": None}}, status=202)

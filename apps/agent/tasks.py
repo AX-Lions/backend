@@ -154,3 +154,91 @@ def _speak(outcome, utterance) -> None:
     result = SpeakInMeetingSkill().run({"body": body}, ctx)
     if not result.ok:
         logger.error("회의 발언 실패 run=%s: %s", outcome.run.id, result.message)
+
+
+@shared_task(name="agent.run_for_conversation")
+def run_agent_for_conversation(message_id: str) -> None:
+    """
+    대리인이 **본인과의 1:1 대화**에 답합니다.
+
+    `POST /me/agent/conversations/{id}/messages` 가 부릅니다. 그 자리는 지금까지
+    사용자 메시지를 적어 두고 202 만 돌려줬습니다. 적히기만 하고 **아무도 읽지
+    않아서**, 홈 대화창과 채팅의 AI 방이 영영 `답을 준비하고 있습니다` 에
+    머물렀습니다. 화면은 처음부터 답을 기다리게 만들어져 있었습니다.
+
+    ## 회의 대리와 다른 점
+
+    회의에서는 기술적 실패를 말하지 않습니다 — 여러 사람이 듣고 있고, 대리인이
+    "오류가 났습니다" 를 떠들면 회의가 어지러워지기 때문입니다.
+
+    **여기서는 말합니다.** 듣는 사람이 본인 하나뿐이고, 아무 말이 없으면 사용자는
+    답이 없는 것을 *내 메시지가 안 갔다* 로 읽습니다. 그러면 같은 말을 여러 번
+    보냅니다. 조용히 멈춰 있는 것이 여기서는 가장 나쁩니다.
+
+    ## 비공개 기록을 봅니다
+
+    `allow_private=True` 입니다. 본인이 자기 대리인과 이야기하는 자리라 숨길
+    이유가 없습니다. 회의 대리(`allow_private=False`)와 **같은 검색 코드가 두
+    상황을 다르게 다뤄야** 하는 지점입니다.
+    """
+    from .models import AgentMessage
+    from .services import react
+
+    msg = (AgentMessage.objects
+           .filter(pk=message_id, role=AgentMessage.Role.USER)
+           .select_related("conversation", "conversation__user")
+           .first())
+    if msg is None:
+        logger.warning("대화 메시지를 찾을 수 없습니다: %s", message_id)
+        return
+
+    # 같은 질문에 두 번 답하지 않습니다. 사용자 메시지의 `run` 이 "이 질문을
+    # 처리한 실행" 표시입니다 — 재시도나 중복 호출이 와도 여기서 멈춥니다.
+    if msg.run_id:
+        return
+
+    conv = msg.conversation
+
+    try:
+        outcome = react.run(
+            principal=conv.user,
+            question=msg.body,
+            actor_id=str(conv.user_id),
+            allow_private=True,
+        )
+    except Exception:                                          # noqa: BLE001
+        logger.exception("대화 대리인 실행 실패 message=%s", message_id)
+        _reply(conv, msg, None,
+               "지금은 답을 만들지 못했습니다. 잠시 후 다시 물어봐 주십시오.")
+        return
+
+    body = (outcome.text or "").strip()
+    if outcome.error or not body:
+        # 실패 사유를 그대로 옮기지 않습니다. 규약상 사용자에게 보이는 문구는
+        # 한국어이고, 내부 오류 문구에는 질의값이나 제약 조건 이름이 섞입니다.
+        logger.warning("대화 대리인 답 없음 message=%s error=%s", message_id, outcome.error)
+        body = "지금은 답을 만들지 못했습니다. 잠시 후 다시 물어봐 주십시오."
+
+    _reply(conv, msg, outcome.run, body)
+
+
+def _reply(conversation, question, run, body: str) -> None:
+    """
+    대리인의 답을 대화에 남깁니다.
+
+    질문 쪽에도 `run` 을 답니다. 중복 실행을 막는 표시이면서, 나중에 "이 답이
+    무엇을 보고 나왔는가" 를 질문에서부터 따라갈 수 있게 됩니다.
+    """
+    from django.db import transaction
+
+    from .models import AgentMessage
+
+    with transaction.atomic():
+        AgentMessage.objects.create(conversation=conversation,
+                                    role=AgentMessage.Role.AGENT,
+                                    body=body, run=run)
+        if run is not None:
+            question.run = run
+            question.save(update_fields=["run"])
+        conversation.last_message_preview = body[:200]
+        conversation.save(update_fields=["last_message_preview", "updated_at"])
