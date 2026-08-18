@@ -101,7 +101,11 @@ def run(*, principal, question: str, meeting=None, project_id=None,
     client = client or default_client
     registry = registry or default_registry
 
-    snapshot = _snapshot_of(principal)
+    # 이 회의에서의 내 설정 한 줄. 스냅샷·자료 범위·프롬프트가 모두 여기서
+    # 나오므로 한 번만 읽습니다.
+    participant = _participant_of(
+        getattr(meeting, "id", None) or scope_meeting_id, principal)
+    snapshot = _snapshot_of(principal, participant)
     max_hops = dj_settings.BORDO.get("MAX_HOPS", 3)
 
     run_obj = AgentRun.objects.create(
@@ -161,7 +165,11 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             # 설정 화면에 저장해 둔 지시. 한동안 아무도 안 읽었습니다 —
             # 사용자는 "말하면 안 되는 것" 을 적어 두고 대리인이 지킨다고
             # 믿고 있었습니다.
-            standing_prompts=prompts.standing_prompts_for(principal),
+            standing_prompts=_prompts_for(principal, participant),
+            # 회의 전에 논쟁점마다 적어 둔 입장. **회의별 지시보다 뒤**에 놓여
+            # 가장 세게 걸립니다 — 이 쟁점이 실제로 나왔을 때 대리인이 다르게
+            # 말하면 준비 화면을 채운 일이 헛것이 됩니다.
+            stances=_stances_for(getattr(meeting, "id", None), principal),
         )
         ctx = SkillContext(
             principal_id=str(principal.id), actor_id=str(actor_id or principal.id),
@@ -295,17 +303,82 @@ def run(*, principal, question: str, meeting=None, project_id=None,
 
 # ── 상태 기록 ──────────────────────────────────────────────
 
-def _snapshot_of(principal) -> dict:
+def _participant_of(meeting_id, principal):
+    """이 회의에서의 내 참석자 행. 없으면 None."""
+    if not meeting_id:
+        return None
+    from apps.meetings.models import MeetingParticipant
+    return (MeetingParticipant.objects
+            .filter(meeting_id=meeting_id, user_id=principal.id)
+            .first())
+
+
+def _snapshot_of(principal, participant=None) -> dict:
     """
     실행 시작 시점의 POLICY 를 DB 에서 새로 읽습니다.
 
     `principal.agent_settings` 로 가면 인스턴스에 캐시된 값이 잡힙니다. 사용자가
     회의 직전에 설정을 바꿨는데 그 전에 불러온 객체를 들고 있으면 **낡은 정책으로
     판정**하게 되고, 스냅샷에도 낡은 값이 박혀 나중에 재현할 때 사실과 어긋납니다.
+
+    ## 회의별 덮어쓰기
+
+    준비 화면에서 `이번에만 다르게 사용` 을 고른 경우입니다. 평소 설정 위에
+    그 회의 것만 얹습니다. **병합한 결과가 그대로 `AgentRun.settings_snapshot`
+    에 박힙니다** — 나중에 "왜 저 회의에서만 저렇게 말했지" 를 되짚을 때
+    평소 설정만 남아 있으면 답이 안 나옵니다.
     """
     from ..models import AgentSettings
     s = AgentSettings.objects.filter(user=principal).first()
-    return s.as_snapshot() if s else {}
+    base = s.as_snapshot() if s else {}
+    if participant is None:
+        return base
+
+    merged = participant.effective_settings(base)
+    # 낱개를 덮어썼으면 파생값도 다시 계산합니다. 옛 키를 그대로 두면 셋을 모두
+    # 끈 회의에서 STATUS 관문이 통과해 버립니다.
+    if any(k in (participant.settings_override or {})
+           for k in ("disclose_work", "disclose_plan", "disclose_thought")):
+        merged["disclose_work_plan_thought"] = any(
+            merged.get(k, True) for k in
+            ("disclose_work", "disclose_plan", "disclose_thought"))
+    return merged
+
+
+def _prompts_for(principal, participant) -> list[str]:
+    """
+    이 실행에 실을 시스템 프롬프트.
+
+    회의별 목록이 있으면 그것만 씁니다. **빈 배열도 존중합니다** — 준비 화면에서
+    프롬프트를 전부 지운 사람에게 평소 지시를 그대로 쓰면, 이번 회의에서만
+    지우려던 것이 그대로 나갑니다.
+    """
+    override = getattr(participant, "prompt_override", None)
+    if override is not None:
+        return [str(p) for p in override]
+    return prompts.standing_prompts_for(principal)
+
+
+def _stances_for(meeting_id, principal) -> list[dict]:
+    """
+    회의 전에 논쟁점마다 적어 둔 내 입장.
+
+    회의가 없는 실행에는 없습니다 — 쟁점은 회의에 매달린 것입니다.
+    """
+    if not meeting_id:
+        return []
+    from apps.meetings.models import DebateStance
+
+    rows = (DebateStance.objects
+            .filter(point__meeting_id=meeting_id, user=principal)
+            .select_related("point").order_by("point__order"))
+    out = []
+    for r in rows:
+        picked = next((o for o in (r.point.options or [])
+                       if str(o.get("key")) == r.option_key), None)
+        out.append({"title": r.point.title, "body": r.body,
+                    "option": (picked or {}).get("title", "")})
+    return out
 
 
 def _set(run_obj: AgentRun, status: str):
