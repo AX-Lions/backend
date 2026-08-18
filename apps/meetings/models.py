@@ -154,6 +154,20 @@ class MeetingParticipant(TimeStamped):
         help_text="이 회의에서 대리인이 근거로 쓸 자료 종류. "
                   "null 이면 고른 적 없음(제한 없음), [] 면 아무것도 쓰지 않음.")
 
+    # ── 이번 회의에만 다르게 (「Bordo 활동 설정」) ─────────────
+    #
+    # 평소 설정(`AgentSettings`)을 **덮어쓰지 않습니다.** 회의 하나 때문에 평소
+    # 설정을 바꿔 두면 그 회의가 끝난 뒤 되돌리는 것은 사람 몫이 되고, 대개
+    # 잊습니다. 다음 회의에서 켜 둔 줄 알았던 것이 꺼져 있습니다.
+    settings_override = models.JSONField(
+        default=dict, blank=True,
+        help_text="이 회의에만 적용할 설정. 바꾼 키만 담습니다. "
+                  "{} 면 평소 설정 그대로.")
+    prompt_override = models.JSONField(
+        null=True, blank=True, default=None,
+        help_text="이 회의에만 쓸 시스템 프롬프트 목록. "
+                  "null 이면 평소 것 그대로, [] 면 아무 프롬프트도 쓰지 않음.")
+
     #: 이 회의에서 대리인이 볼 수 있는 자료 종류.
     #
     # `search_records` 의 `kinds` 와 **같은 값을 씁니다.** 화면에서 고른 것이
@@ -189,6 +203,21 @@ class MeetingParticipant(TimeStamped):
     def missed(self):
         """홈 카드의 `불참한 회의` 뱃지 판정."""
         return self.attendance in (Attendance.ABSENT, Attendance.DELEGATED)
+
+    @property
+    def uses_standing_settings(self) -> bool:
+        """
+        화면의 `현재 설정 사용` / `이번에만 다르게 사용` 중 어느 쪽인가.
+
+        컬럼을 따로 두지 않습니다. 모드 컬럼과 실제 덮어쓴 값이 어긋나면
+        (모드는 `현재 설정 사용` 인데 override 에 값이 남아 있는 식) 화면과
+        대리인이 서로 다른 것을 보게 됩니다.
+        """
+        return not self.settings_override and self.prompt_override is None
+
+    def effective_settings(self, base: dict) -> dict:
+        """평소 설정 위에 이 회의 것만 얹습니다."""
+        return {**(base or {}), **(self.settings_override or {})}
 
 
 class Agenda(UUIDModel, TimeStamped):
