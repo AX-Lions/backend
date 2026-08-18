@@ -11,8 +11,7 @@ python main.py
 ```
 
 `.env` 필수값: `DISCORD_TOKEN`, `BORDO_SERVICE_TOKEN`(Backend 호출용, 봇 토큰과 별개).
-선택: `BORDO_BACKEND_URL`(기본 `http://localhost:8000`), `BORDO_OUTBOX_INTERVAL`,
-`OPENAI_API_KEY` / `OPENAI_MODEL`.
+선택: `BORDO_BACKEND_URL`(기본 `http://localhost:8000`), `BORDO_OUTBOX_INTERVAL`.
 
 Developer Portal: `MESSAGE CONTENT INTENT` 활성화 필수, 초대 스코프는 `bot` +
 `applications.commands` **둘 다** (후자가 빠지면 슬래시 명령이 에러 없이 등록 실패).
@@ -23,9 +22,9 @@ Developer Portal: `MESSAGE CONTENT INTENT` 활성화 필수, 초대 스코프는
 
 Discord 이벤트를 Backend로 전달하고, Backend가 결정한 내용만 화면에 표시한다.
 회의 요약은 `/meeting-end`가 Backend를 호출하고 응답에 담겨 온 것을 그대로 게시할 뿐,
-봇이 직접 만들지 않는다 (`generate_meeting_wrapup` 제거됨). 현재 남은 `llm_chat_reply`
-(멘션 시 일반 채팅 응답)만 **Backend가 없는 동안의 임시 대체물**이다. Backend에
-해당 기능이 붙으면 걷어낸다 — 여기에 판단 로직을 더 쌓지 않는다.
+봇이 직접 만들지 않는다 (`generate_meeting_wrapup` 제거됨). 봇을 멘션해도 봇이 직접
+답하지 않는다 — 그대로 Backend로 넘기면 대리인이 대상 판정까지 한다
+(`llm_chat_reply`/`OpenAIService` 제거됨, #17). 여기에 판단 로직을 쌓지 않는다.
 
 **Discord가 회의의 원본이다.** 회의 시작·종료는 `/internal/v1`에만 존재하고,
 프론트에는 없다. 이 봇이 회의의 생명주기를 만든다.

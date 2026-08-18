@@ -20,8 +20,6 @@ pip install -r requirements.txt
 | `BORDO_SERVICE_TOKEN` | ✅ | Backend 호출용 인증 시크릿(`DISCORD_TOKEN`과 별개). Backend가 생기기 전까지는 임의 문자열이어도 됩니다 |
 | `BORDO_BACKEND_URL` |  | Backend 주소. 기본값 `http://localhost:8000` |
 | `BORDO_OUTBOX_INTERVAL` |  | Outbox 폴링 주기(초). 정의만 돼 있고 현재는 사용되지 않습니다 |
-| `OPENAI_API_KEY` |  | 멘션 시 일반 채팅 응답 기능(임시 구현)을 켭니다. 없으면 안내 문구로 대체됩니다 |
-| `OPENAI_MODEL` |  | 기본값 `gpt-5.5` |
 
 ## 실행
 
@@ -48,7 +46,7 @@ python main.py
 
 ## 아키텍처 원칙
 
-봇은 판단하지 않고 릴레이·표시만 합니다. Discord 이벤트를 Backend로 전달하고, Backend가 결정한 내용만 화면에 표시하는 것이 목표입니다. 회의 요약은 `/meeting-end`가 Backend를 호출한 응답을 그대로 게시할 뿐, 봇이 직접 만들지 않습니다. 현재 남은 `llm_chat_reply`(멘션 시 일반 채팅 응답)만 Backend가 없는 동안의 임시 대체물입니다.
+봇은 판단하지 않고 릴레이·표시만 합니다. Discord 이벤트를 Backend로 전달하고, Backend가 결정한 내용만 화면에 표시하는 것이 목표입니다. 회의 요약은 `/meeting-end`가 Backend를 호출한 응답을 그대로 게시할 뿐, 봇이 직접 만들지 않습니다. 봇을 멘션해도 봇이 직접 답하지 않고 그대로 Backend로 넘깁니다.
 
 ## 알려진 공백
 
