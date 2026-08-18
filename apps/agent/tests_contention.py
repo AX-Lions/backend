@@ -1,0 +1,212 @@
+"""
+예상 논쟁점 생성.
+
+여기서 막아야 하는 것 세 가지 —
+1. 모델이 인용문을 고쳐 쓰는 것 (화면의 따옴표가 실제 발언과 달라짐)
+2. 재예측이 사람이 적어 둔 입장을 지우는 것
+3. 모델이 없을 때 화면이 통째로 비는 것
+"""
+from django.test import TestCase
+from django.utils import timezone
+
+from apps.accounts.models import User
+from apps.agent.services import contention
+from apps.agent.services.llm import LLMResponse
+from apps.meetings.models import (Agenda, DebatePoint, DebateStance, Meeting,
+                                  MeetingStatus, Utterance)
+from apps.orgs.models import Project, ProjectMember, Team, TeamMember
+from apps.states.models import ActivityEvent, WorkItem
+
+
+class Fake:
+    """`chat()` 하나만 흉내 냅니다."""
+
+    def __init__(self, text="", error=""):
+        self.text, self.error = text, error
+        self.seen = None
+
+    def chat(self, messages, tools=None, system=""):
+        self.seen = {"messages": messages, "system": system}
+        return LLMResponse(text=self.text, error=self.error)
+
+
+FENCE = "```"
+ANSWER = FENCE + """json
+{"points": [
+  {"title": "개발 범위를 축소할 것인가, 기존 범위를 유지할 것인가?",
+   "options": [{"title": "핵심 기능만 구현", "description": "남은 기간을 고려해 축소"},
+               {"title": "기존 기획 범위 유지", "description": "계획한 기능을 최대한 구현"}],
+   "rationale": "이전 회의에서 범위를 축소하자는 의견이 있었어요.",
+   "evidence": [1]}
+]}
+""" + FENCE
+
+TITLE = "개발 범위를 축소할 것인가, 기존 범위를 유지할 것인가?"
+
+
+class Base(TestCase):
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.me = User.objects.create_user(email="me@bordo.dev", password="x" * 10,
+                                          name="최비성", timezone="Asia/Seoul")
+        cls.team = Team.objects.create(name="AX Lions", created_by=cls.me)
+        TeamMember.objects.create(team=cls.team, user=cls.me, team_role="OWNER")
+        cls.project = Project.objects.create(team=cls.team, team_name=cls.team.name,
+                                             name="해커톤", created_by=cls.me)
+        ProjectMember.objects.create(project=cls.project, user=cls.me)
+
+    def meeting(self, title="개발 방향 논의", status=MeetingStatus.SCHEDULED, ago_days=0):
+        return Meeting.objects.create(
+            project=self.project, project_name=self.project.name, title=title,
+            status=status, created_by=self.me,
+            scheduled_at=timezone.now() - timezone.timedelta(days=ago_days))
+
+    def past_utterance(self, body="남은 기간을 생각하면 핵심 기능부터 구현해야 할 것 같아요."):
+        past = self.meeting("기능 구현 범위 논의", MeetingStatus.ENDED, ago_days=3)
+        return Utterance.objects.create(
+            meeting=past, participant=self.me, participant_name="최비성", body=body,
+            spoken_at=timezone.now() - timezone.timedelta(days=3))
+
+
+class FactsTest(Base):
+
+    def test_previous_meeting_utterances_become_facts(self):
+        self.past_utterance()
+        facts = contention.gather_facts(self.meeting())
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0]["kind"], "meeting")
+        self.assertEqual(facts[0]["who"], "최비성")
+        self.assertIn("기능 구현 범위 논의", facts[0]["title"])
+        self.assertEqual(facts[0]["link"]["label"], "회의에서 보기")
+
+    def test_this_meeting_is_not_a_fact(self):
+        """아직 열리지도 않은 회의의 발언을 근거로 쓸 수는 없습니다."""
+        m = self.meeting()
+        Utterance.objects.create(meeting=m, participant=self.me, participant_name="최비성",
+                                 body="이번 회의에서 한 말입니다 길게 적습니다",
+                                 spoken_at=timezone.now())
+        self.assertEqual(contention.gather_facts(m), [])
+
+    def test_short_chatter_is_dropped(self):
+        self.past_utterance(body="넵")
+        self.assertEqual(contention.gather_facts(self.meeting()), [])
+
+    def test_work_change_becomes_a_sentence(self):
+        w = WorkItem.objects.create(project=self.project, owner=self.me, title="개발")
+        ActivityEvent.objects.create(
+            project=self.project, actor=self.me, kind="work.updated", target_id=w.id,
+            detail={"expected_end_at": {"from": "8월 17일", "to": "8월 18일"}})
+        facts = contention.gather_facts(self.meeting())
+        self.assertEqual(facts[0]["kind"], "work")
+        self.assertEqual(facts[0]["who"], "최비성의 작업")
+        self.assertIn("완료 예정일", facts[0]["body"])
+        self.assertIn("8월 17일 → 8월 18일", facts[0]["body"])
+        self.assertEqual(facts[0]["link"]["label"], "작업에서 보기")
+
+    def test_unknown_field_change_is_ignored(self):
+        w = WorkItem.objects.create(project=self.project, owner=self.me, title="개발")
+        ActivityEvent.objects.create(project=self.project, actor=self.me,
+                                     kind="work.updated", target_id=w.id,
+                                     detail={"visibility": {"from": "team", "to": "private"}})
+        self.assertEqual(contention.gather_facts(self.meeting()), [])
+
+
+class BuildTest(Base):
+
+    def test_llm_points_are_saved_with_keys_and_evidence(self):
+        self.past_utterance()
+        m = self.meeting()
+        self.assertEqual(contention.build_for(m, client=Fake(ANSWER)), 1)
+
+        p = DebatePoint.objects.get(meeting=m)
+        self.assertEqual(p.order, 1)
+        self.assertTrue(p.created_by_agent)
+        self.assertEqual([o["key"] for o in p.options], ["A", "B"])
+        self.assertEqual(p.options[0]["title"], "핵심 기능만 구현")
+        self.assertEqual(len(p.evidence), 1)
+
+    def test_evidence_quote_comes_from_the_record_not_the_model(self):
+        """모델이 인용문을 고쳐 쓰면 화면의 따옴표가 실제 발언과 달라집니다."""
+        self.past_utterance()
+        m = self.meeting()
+        contention.build_for(m, client=Fake(ANSWER))
+        card = DebatePoint.objects.get(meeting=m).evidence[0]
+        self.assertEqual(card["body"],
+                         "남은 기간을 생각하면 핵심 기능부터 구현해야 할 것 같아요.")
+        self.assertEqual(card["who"], "최비성")
+
+    def test_bad_evidence_index_is_dropped_not_crashed(self):
+        self.past_utterance()
+        m = self.meeting()
+        bad = ANSWER.replace('"evidence": [1]', '"evidence": [9, "x", 1]')
+        contention.build_for(m, client=Fake(bad))
+        self.assertEqual(len(DebatePoint.objects.get(meeting=m).evidence), 1)
+
+    def test_single_option_is_not_a_debate(self):
+        self.past_utterance()
+        m = self.meeting()
+        one = '{"points": [{"title": "제목", "options": [{"title": "하나"}], "evidence": []}]}'
+        contention.build_for(m, client=Fake(one))
+        self.assertEqual(DebatePoint.objects.filter(meeting=m).count(), 0)
+
+    def test_broken_json_falls_back_to_agendas(self):
+        self.past_utterance()
+        m = self.meeting()
+        Agenda.objects.create(meeting=m, title="QA 일정", sort_order=1)
+        contention.build_for(m, client=Fake("이건 JSON 이 아닙니다"))
+        p = DebatePoint.objects.get(meeting=m)
+        self.assertIn("QA 일정", p.title)
+        self.assertFalse(p.created_by_agent)
+
+    def test_no_api_key_still_fills_the_screen(self):
+        m = self.meeting()
+        Agenda.objects.create(meeting=m, title="발표 준비", sort_order=1)
+        self.assertEqual(
+            contention.build_for(m, client=Fake(error="OPENAI_API_KEY 가 없습니다")), 1)
+
+    def test_nothing_at_all_is_not_an_error(self):
+        self.assertEqual(contention.build_for(self.meeting(), client=Fake(error="x")), 0)
+
+
+class RebuildTest(Base):
+
+    def _build(self, m, answer=ANSWER):
+        return contention.build_for(m, client=Fake(answer))
+
+    def test_same_title_keeps_the_stance(self):
+        """재예측이 적어 둔 입장을 지우면 준비 화면을 두 번 채우게 됩니다."""
+        self.past_utterance()
+        m = self.meeting()
+        self._build(m)
+        p = DebatePoint.objects.get(meeting=m)
+        DebateStance.objects.create(point=p, user=self.me, body="축소가 맞아요")
+
+        self._build(m)
+        self.assertEqual(DebatePoint.objects.filter(meeting=m).count(), 1)
+        self.assertTrue(DebateStance.objects.filter(point=p).exists())
+
+    def test_answered_point_survives_even_if_prediction_changes(self):
+        self.past_utterance()
+        m = self.meeting()
+        self._build(m)
+        old = DebatePoint.objects.get(meeting=m)
+        DebateStance.objects.create(point=old, user=self.me, body="내 입장")
+
+        self._build(m, ANSWER.replace(TITLE, "QA 일정을 연기할 것인가, 유지할 것인가?"))
+        self.assertEqual(DebatePoint.objects.filter(meeting=m).count(), 2)
+        self.assertTrue(DebateStance.objects.filter(point=old).exists())
+
+    def test_unanswered_point_is_replaced(self):
+        self.past_utterance()
+        m = self.meeting()
+        self._build(m)
+        self._build(m, ANSWER.replace(TITLE, "QA 일정을 연기할 것인가, 유지할 것인가?"))
+        self.assertEqual(DebatePoint.objects.filter(meeting=m).count(), 1)
+
+    def test_source_key_follows_the_title_not_the_order(self):
+        """순서로 열쇠를 만들면 2번이 다른 쟁점이 되면서 1번 입장이 엉뚱한 곳에 붙습니다."""
+        a = contention._source_key("개발 범위를  축소할 것인가?")
+        b = contention._source_key("개발 범위를 축소할 것인가?")
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, contention._source_key("QA 일정을 연기할 것인가?"))
