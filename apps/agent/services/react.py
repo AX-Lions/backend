@@ -122,8 +122,11 @@ def run(*, principal, question: str, meeting=None, project_id=None,
                        text="대리인끼리 주고받은 횟수가 상한에 닿아 본인 확인이 필요합니다.")
 
     steps: list[dict] = []
-    evidence: list[dict] = []
-    seen: set = set()
+    # 회의 전에 적어 둔 입장을 **처음부터** 근거로 깔아 둡니다. 모델이 도구를
+    # 안 불러도 판정이 이것을 봅니다 (`_stance_evidence` 주석 참고).
+    stances = _stances_for(getattr(meeting, "id", None) or scope_meeting_id, principal)
+    evidence: list[dict] = _stance_evidence(stances)
+    seen: set = {(e["source_type"], e["source_id"]) for e in evidence}
 
     def _step(step_kind: str, **payload):
         # 인자 이름을 kind 로 두면 payload 의 kind 키와 부딪혀 TypeError 로 죽습니다.
@@ -173,11 +176,9 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             # 회의 전에 논쟁점마다 적어 둔 입장. **회의별 지시보다 뒤**에 놓여
             # 가장 세게 걸립니다 — 이 쟁점이 실제로 나왔을 때 대리인이 다르게
             # 말하면 준비 화면을 채운 일이 헛것이 됩니다.
-            # `scope_meeting_id` 도 봅니다. 대리인끼리 묻는 경로(`lookup.ask_peer`)는
-            # `meeting` 을 안 넘기는데, 그때만 준비해 둔 입장이 빠지면 **남의
-            # 대리인을 거쳐 물어보는 것만으로 준비해 둔 답이 무시**됩니다.
-            stances=_stances_for(
-                getattr(meeting, "id", None) or scope_meeting_id, principal),
+            # 위에서 이미 모아 둔 것을 씁니다 — 프롬프트와 근거가 같은 목록이어야
+            # "적어 둔 대로 말하되 그 근거로 판정" 이 어긋나지 않습니다.
+            stances=stances,
         )
         ctx = SkillContext(
             principal_id=str(principal.id), actor_id=str(actor_id or principal.id),
@@ -342,15 +343,9 @@ def _snapshot_of(principal, participant=None) -> dict:
     if participant is None:
         return base
 
-    merged = participant.effective_settings(base)
-    # 낱개를 덮어썼으면 파생값도 다시 계산합니다. 옛 키를 그대로 두면 셋을 모두
-    # 끈 회의에서 STATUS 관문이 통과해 버립니다.
-    if any(k in (participant.settings_override or {})
-           for k in ("disclose_work", "disclose_plan", "disclose_thought")):
-        merged["disclose_work_plan_thought"] = any(
-            merged.get(k, True) for k in
-            ("disclose_work", "disclose_plan", "disclose_thought"))
-    return merged
+    # 파생 키 재계산은 `effective_settings` 안에 있습니다 — 준비 화면도 같은
+    # 메서드를 지나야 화면과 판정이 갈리지 않습니다.
+    return participant.effective_settings(base)
 
 
 def _prompts_for(principal, participant) -> list[str]:
@@ -385,7 +380,58 @@ def _stances_for(meeting_id, principal) -> list[dict]:
         picked = next((o for o in (r.point.options or [])
                        if str(o.get("key")) == r.option_key), None)
         out.append({"title": r.point.title, "body": r.body,
-                    "option": (picked or {}).get("title", "")})
+                    "option": (picked or {}).get("title", ""),
+                    "stance_id": str(r.id),
+                    "updated_at": r.updated_at})
+    return out
+
+
+def _stance_evidence(stances: list[dict]) -> list[dict]:
+    """
+    입장을 **근거로도** 넣습니다.
+
+    ## 왜 프롬프트만으로는 안 되는가
+
+    루프가 끝나면 반드시 `judge` 를 지나는데, 프롬프트에 답이 적혀 있으면 모델은
+    도구를 **한 번도 안 부르고** 바로 답합니다. 그러면 `evidence` 가 비어 R1
+    (근거없음)에 걸려, 준비해 둔 답 대신 "관련 기록을 찾지 못해 보류했습니다"
+    가 회의에 나갑니다.
+
+    **입장을 적어 두는 상황은 대부분 시스템에 기록이 없어서입니다.** 바로 그
+    경우에 대리인이 입을 다무는 셈이라, 준비 화면을 만든 이유가 사라집니다.
+
+    ## `judge` 에 예외를 두지 않는 이유
+
+    "근거 없이도 말하는 경로" 를 하나 만들면 유보 규칙 전체가 약해집니다.
+    본인이 회의를 앞두고 직접 적은 문장은 **가장 확실한 근거**입니다 — 규칙이
+    막으려는 것(대리인이 기록 없이 지어내는 것)과 정반대입니다. 예외가 아니라
+    근거로 인정하는 편이 규칙과 맞습니다.
+
+    `source_type` 을 `stance` 로 둡니다. `work`·`plan`·`thought` 가 아니라서
+    자료 공개 설정(`can_disclose`)과 확신도 규칙(R5)에 걸리지 않습니다 —
+    본인이 지금 적은 말이라 오래됐을 수도, 확신이 없을 수도 없습니다.
+    """
+    from .judge import MATCH_DIRECT
+
+    out = []
+    for s in stances:
+        body = (s.get("body") or "").strip()
+        if not body:
+            continue
+        out.append({
+            "source_type": "stance",
+            "source_id": s.get("stance_id", ""),
+            "title_snapshot": s.get("title", ""),
+            "excerpt": body[:300],
+            "owner_is_principal": True,
+            "match": MATCH_DIRECT,
+            "visibility": "team",
+            "staleness_days": 0,
+            # `AgentRun.evidence` 는 JSONField 라 datetime 을 그대로 담으면
+            # 저장할 때 터집니다 — 실행 전체가 FAILED 로 끝납니다.
+            "updated_at": (s["updated_at"].isoformat()
+                           if s.get("updated_at") else None),
+        })
     return out
 
 
