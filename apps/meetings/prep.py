@@ -1,0 +1,174 @@
+"""
+회의 대리 참석 준비 — 불참 등록과 준비 화면.
+
+자리를 비우기로 한 사람이 회의 **전에** 채워 두는 자리입니다.
+
+    홈 「오늘 일정」의 `회의에 참여하지 않아요`  ─┐
+                                                 ├→ POST /meetings/{id}/absence
+    Discord 회의 시작 팝업의 `불참하기`          ─┘        → 준비 화면(GET .../prep)
+
+`views.py` 와 파일을 나눈 이유 — 저기는 이미 800줄에 회의 CRUD·플로우·브리핑이
+얹혀 있습니다. 준비 화면은 모델 셋(참석자·논쟁점·입장)과 대리인 설정을 함께
+읽는 별개의 묶음이라, 같은 파일에 두면 무엇이 무엇의 도우미인지 흐려집니다.
+
+## 왜 `delegate` 와 따로 두는가
+
+`POST /meetings/{id}/delegate` 는 **전량 교체** 계약입니다 — `prompt` 키가 없으면
+빈 문자열로 덮어씁니다. 홈의 대리 참석 팝업이 이미 그 계약으로 붙어 있습니다.
+
+준비 화면에는 `적용하기` 가 여럿이라(현재 설정 사용 · 이번에만 다르게 · 추가 설정)
+한 버튼이 다른 버튼의 입력을 지우면 안 됩니다. 그래서 여기는 **보낸 것만 바꾸는**
+부분 갱신으로 두고, `delegated` 플래그의 단일 진입점은 `absence` 하나로 모읍니다.
+"""
+from __future__ import annotations
+
+from django.utils import timezone
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+
+from apps.common.display import meeting_when, user_tz
+from apps.common.events import publish
+from apps.common.permissions import meeting_access
+from config.errors import BordoError
+
+from .models import Attendance, MeetingParticipant, MeetingStatus
+
+#: 불참을 등록할 수 있는 회의 상태.
+#
+# 끝난 회의에 대리 참석을 켤 수 있으면 브리핑이 이미 만들어진 뒤에 참석자 상태가
+# 바뀝니다 — 화면은 `Bordo 대리 참석 예정` 이라고 하는데 회의는 어제 끝난 것입니다.
+OPEN_STATUSES = (MeetingStatus.DRAFT, MeetingStatus.SCHEDULED,
+                 MeetingStatus.CONFIRMED, MeetingStatus.ACTIVE)
+
+
+def participant_of(user, meeting_id):
+    """
+    `(meeting, participant)`.
+
+    참석자가 아니면 404 입니다 — 프로젝트 참여자이긴 하나 이 회의에 초대되지
+    않은 사람에게 403 을 주면 "그 회의에 내가 없다" 가 아니라 "권한이 없다" 로
+    읽혀, 초대해 달라고 해야 할 사람이 관리자에게 권한을 달라고 합니다.
+    """
+    meeting = meeting_access(user, meeting_id)
+    p = (MeetingParticipant.objects
+         .filter(meeting=meeting, user=user)
+         # 헤더가 팀 이름까지 씁니다. 조인을 미리 걸어 두지 않으면 응답 하나에
+         # 프로젝트·팀 조회가 두 번 더 나갑니다.
+         .select_related("meeting", "meeting__project", "meeting__project__team")
+         .first())
+    if p is None:
+        raise BordoError("STATE_NOT_FOUND",
+                         "이 회의의 참석자가 아닙니다. 회의를 만든 사람에게 "
+                         "참석자로 추가해 달라고 하십시오.",
+                         details={"meeting_id": str(meeting_id)})
+    return meeting, p
+
+
+def require_open(meeting):
+    if meeting.status not in OPEN_STATUSES:
+        raise BordoError("MEETING_LOCKED",
+                         "이미 끝난 회의에는 불참을 등록할 수 없습니다.",
+                         details={"status": meeting.status})
+
+
+def register_absence(user, meeting_id):
+    """
+    불참 등록 = **대리 참석 켜기**.
+
+    화면 문구는 `회의에 참여하지 않아요` 지만 뱃지는 `Bordo 대리 참석 예정` 입니다.
+    자리를 비우는 것과 대리인을 보내는 것이 이 서비스에서는 같은 행위입니다 —
+    `delegated=False` 로 두면 회의 후 브리핑이 통째로 안 생기고(`briefing.build_all`
+    이 대리 참석자만 돕니다) 사용자는 없는 사이 무슨 일이 있었는지 못 봅니다.
+
+    **`delegate_prompt` 와 `allowed_sources` 는 건드리지 않습니다.** 껐다 켰다 할 때
+    준비 화면에서 적어 둔 것이 사라지면 안 됩니다.
+    """
+    meeting, p = participant_of(user, meeting_id)
+    require_open(meeting)
+
+    changed = not p.delegated or p.attendance != Attendance.DELEGATED
+    if changed:
+        p.delegated = True
+        p.attendance = Attendance.DELEGATED
+        p.save(update_fields=["delegated", "attendance", "updated_at"])
+        publish(meeting.project_id, "meeting.absence.registered",
+                {"meeting_id": str(meeting.id), "user_id": str(user.id)})
+    return meeting, p, changed
+
+
+def cancel_absence(user, meeting_id):
+    """
+    참여로 되돌립니다.
+
+    진행 중인 회의면 `PRESENT`, 아직 안 열렸으면 `PENDING` 입니다. 열리지도 않은
+    회의를 `PRESENT` 로 두면 참석자 목록에 이미 와 있는 사람으로 그려집니다.
+
+    적어 둔 입장과 설정은 지우지 않습니다. 마음을 바꿔 다시 불참을 누르는 일이
+    실제로 있고, 그때 다시 쓰게 하면 화면을 두 번 채우게 됩니다.
+    """
+    meeting, p = participant_of(user, meeting_id)
+    p.delegated = False
+    p.attendance = (Attendance.PRESENT if meeting.status == MeetingStatus.ACTIVE
+                    else Attendance.PENDING)
+    p.save(update_fields=["delegated", "attendance", "updated_at"])
+    publish(meeting.project_id, "meeting.absence.cancelled",
+            {"meeting_id": str(meeting.id), "user_id": str(user.id)})
+    return meeting, p
+
+
+def header_of(meeting, participant, user) -> dict:
+    """
+    화면 헤더.
+
+    문자열을 서버가 완성해 내려줍니다. 브라우저 시간대로 찍으면 시간대가 다른
+    팀원이 같은 회의를 다른 시각으로 봅니다 — 이 서비스의 전제가 그것입니다.
+    """
+    from apps.agent.services.flow import agent_display_name
+
+    tz = user_tz(user)
+    ends_at = meeting.scheduled_at + timezone.timedelta(minutes=meeting.duration_min)
+    delegated = bool(participant and participant.delegated)
+    return {
+        "meeting_id": str(meeting.id),
+        "title": meeting.title,
+        "project_name": meeting.project_name,
+        "team_name": meeting.project.team.name if meeting.project_id else "",
+        "scheduled_at": meeting.scheduled_at,
+        "ends_at": ends_at,
+        # `8월 18일 14:00 - 15:00`
+        "when": meeting_when(meeting.scheduled_at, ends_at, tz),
+        "location": "Discord" if meeting.discord_channel_id else "서비스",
+        "status": meeting.status,
+        "delegated": delegated,
+        # 뱃지 문구. 클라이언트가 필드 조합으로 만들면 `대리 참석 예정` 과
+        # `대리 참석 중` 이 화면마다 갈립니다.
+        "badge": (f"{agent_display_name(user)} 대리 참석 "
+                  + ("중" if meeting.status == MeetingStatus.ACTIVE else "예정")
+                  ) if delegated else "참석 예정",
+    }
+
+
+# ═══════════════════════════════════════════ 엔드포인트
+
+
+@api_view(["POST", "DELETE"])
+def absence(request, meeting_id):
+    """
+    `POST` 불참 등록 · `DELETE` 참여로 되돌리기.
+
+    본문이 필요 없습니다. 홈의 버튼 하나로 눌리고, 세부 설정은 준비 화면에서
+    따로 저장합니다 — 여기서 함께 받으면 버튼 하나가 준비 화면의 입력을 덮습니다.
+    """
+    if request.method == "DELETE":
+        meeting, p = cancel_absence(request.user, meeting_id)
+        body = header_of(meeting, p, request.user)
+        body["prep_url"] = None
+        return Response(body)
+
+    meeting, p, changed = register_absence(request.user, meeting_id)
+    body = header_of(meeting, p, request.user)
+    # 화면이 바로 이어서 열 곳. 클라이언트가 경로를 조립하면 경로가 바뀔 때
+    # 두 곳을 고쳐야 합니다.
+    body["prep_url"] = f"/api/v1/meetings/{meeting.id}/prep"
+    body["created"] = changed
+    return Response(body, status=201 if changed else 200)
