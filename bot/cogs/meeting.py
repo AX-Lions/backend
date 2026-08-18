@@ -14,13 +14,9 @@ log = logging.getLogger("bordo")
 
 class MeetingCog(commands.Cog):
 
-    def __init__(self, bot, backend, delegate_on_users: set[str]):
+    def __init__(self, bot, backend):
         self.bot = bot
         self.backend = backend
-
-        # [기존] _delegate_on_users
-        # DelegateCog와 같은 set을 공유
-        self.delegate_on_users = delegate_on_users
 
         # [기존] _active_meeting_threads
         self.active_meeting_threads: dict[int, dict] = {}

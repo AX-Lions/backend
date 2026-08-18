@@ -48,21 +48,17 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 backend = BackendClient(BACKEND_BASE_URL, SERVICE_TOKEN)
 
-_delegate_on_users: set[str] = set()
-
 
 async def setup_hook():
     meeting_cog = MeetingCog(
         bot,
         backend,
-        _delegate_on_users
     )
 
     delegate_cog = DelegateCog(
         bot,
         backend,
         meeting_cog,
-        _delegate_on_users
     )
 
     bordo_cog = BordoCog(
