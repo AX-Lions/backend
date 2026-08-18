@@ -213,16 +213,3 @@ class MeetingCog(commands.Cog):
         await interaction.channel.send("🔴 **회의가 종료되었습니다.**")
 
         await interaction.followup.send("회의를 종료했습니다.")
-
-    # --------------------------------------------------
-    # /meeting-status
-    # --------------------------------------------------
-
-    # 백엔드 연결 후 수정 필요
-    @app_commands.command(
-        name="meeting-status",
-        description="현재 회의와 대리 참석자를 표시합니다."
-    )
-    async def meeting_status(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        await interaction.followup.send("현재 회의 상태를 조회 중입니다.", ephemeral=True)

@@ -38,7 +38,6 @@ Discord 이벤트를 Backend로 전달하고, Backend가 결정한 내용만 화
 | `/bordo-team` | 현재 연결된 팀 조회 |
 | `/meeting-start` | 회의 스레드 생성 및 참석자 수집 |
 | `/meeting-end` | 회의 종료 (회의 스레드 안에서 실행) |
-| `/meeting-status` | 회의 상태 조회 (스텁) |
 | `/ask-bordo` | 특정 대리인에게 질문 전달 (답변은 비동기) |
 | `/delegate-on` · `/delegate-off` | 내 AI 대리인 자동 참석 전역 토글 |
 
