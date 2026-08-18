@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<style>
+:root{--bg:#fff;--sidebar:#f7f7f8;--text:#111;--muted:#626262;--line:#dedede;--accent:#ff2a2a;--button:#d7d7d7;--progress:#fff052}
+*{box-sizing:border-box}
+body{margin:0;background:var(--sidebar);font-family:Pretendard,'Malgun Gothic',system-ui,sans-serif;color:var(--text);padding:36px 40px;width:1200px}
+h1{font-size:14px;color:var(--muted);font-weight:500;margin:0 0 6px}
+.route{display:inline-block;font:12px ui-monospace,Consolas,monospace;background:#fff;border:1px solid var(--line);border-radius:6px;padding:2px 8px;margin-bottom:24px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:24px}
+.state{font-size:12px;color:var(--muted);margin:0 0 8px}
+.state b{color:var(--text)}
+.account-section{padding:24px;border:1px solid var(--line);border-radius:14px;background:var(--bg)}
+.account-section h2{margin:0;font-size:15px}
+.hint{margin:6px 0 16px;color:var(--muted);font-size:12px;line-height:1.6}
+.btn{display:inline-flex;align-items:center;justify-content:center;height:38px;padding:0 16px;border-radius:8px;border:0;background:var(--text);color:#fff;font-size:13px;font-weight:600}
+.btn.ghost{background:#fff;color:var(--text);border:1px solid var(--line)}
+.btn.danger{background:#fff;color:var(--accent);border:1px solid var(--accent)}
+.row{display:flex;gap:8px;align-items:center}
+.token{display:flex;gap:8px;align-items:center;margin-top:4px}
+.token code{flex:1;height:42px;line-height:40px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--sidebar);font:13px ui-monospace,Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.warn{margin:12px 0 0;padding:12px 14px;border-radius:8px;border:1px solid var(--accent);background:#fff5f5;color:var(--accent);font-size:12px;line-height:1.7}
+.note{margin:14px 0 0;padding:12px 14px;border-radius:8px;border:1px solid var(--line);background:var(--sidebar);color:var(--muted);font-size:12px;line-height:1.7}
+.note strong{color:var(--text)}
+.label{font-size:12px;color:var(--muted);margin:16px 0 6px}
+.cmd{display:flex;gap:8px}
+.cmd code{flex:1;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--sidebar);font:12px/1.5 ui-monospace,Consolas,monospace;word-break:break-all}
+.meta{font-size:13px;margin:0 0 14px}
+.meta span{display:inline-block;margin-left:8px;padding:2px 8px;border-radius:999px;background:var(--progress);font-size:11px;font-weight:600}
+.arrow{position:absolute;color:var(--muted);font-size:12px}
+</style></head><body>
+<h1>개인 설정 · 새 카드 <b style="color:#111">「개인 AI 연결 (MCP)」</b> — 「내 Agent 이름」과 「로그아웃」 사이</h1>
+<span class="route">/account  ·  AccountPage.jsx  ·  .account-section</span>
+<div class="grid">
+
+<div>
+<p class="state"><b>① 미발급</b> — <code>GET /users/me</code> → <code>mcp_token_issued_at: null</code></p>
+<section class="account-section">
+  <h2>개인 AI 연결 (MCP)</h2>
+  <p class="hint">Claude Code · Cursor 같은 개인 AI 가 내 작업과 문서를 Bordo 에 대신 기록하게 합니다.<br>자리를 비운 동안 대리인이 이 기록을 근거로 답합니다.</p>
+  <button class="btn">토큰 발급</button>
+  <p class="note">토큰은 <strong>발급 직후 한 번만</strong> 보여줍니다. 잃어버리면 재발급하십시오.</p>
+</section>
+</div>
+
+<div>
+<p class="state"><b>② 발급 직후</b> — <code>POST /me/mcp-token</code> 201 응답을 그대로</p>
+<section class="account-section">
+  <h2>개인 AI 연결 (MCP)</h2>
+  <p class="hint">토큰이 발급됐습니다. 아래 명령을 터미널에 붙여 넣으면 연결됩니다.</p>
+  <div class="token"><code>brd_Xk3pQ9vT2mLw8rZaBcD4eFgH6jKnMpRsUvWxYz</code><button class="btn ghost">복사</button></div>
+  <p class="warn"><strong>이 토큰은 다시 볼 수 없습니다.</strong> 지금 복사하십시오.<br>.mcp.json 은 저장소에 커밋되는 파일입니다 — 토큰을 거기 적지 마십시오.</p>
+  <p class="label">Claude Code 연결 명령 <span style="color:#999">(response.setup_command)</span></p>
+  <div class="cmd"><code>claude mcp add --transport http bordo https://api.bordo.dev/mcp --header "Authorization: Bearer brd_Xk3p…"</code><button class="btn ghost">복사</button></div>
+  <p class="note">붙여 넣은 뒤 Claude Code 에서 <strong>/mcp</strong> → <strong>bordo · connected</strong> 가 보이면 끝입니다.</p>
+</section>
+</div>
+
+<div>
+<p class="state"><b>③ 발급됨</b> — <code>mcp_token_issued_at</code> 있음 · 새로고침 후</p>
+<section class="account-section">
+  <h2>개인 AI 연결 (MCP)</h2>
+  <p class="hint">Claude Code · Cursor 같은 개인 AI 가 내 작업과 문서를 Bordo 에 대신 기록하게 합니다.</p>
+  <p class="meta">2026년 8월 18일에 발급됨 <span>연결됨</span></p>
+  <div class="row"><button class="btn ghost">재발급</button><button class="btn danger">폐기</button></div>
+  <p class="note"><strong>재발급</strong>하면 이전 토큰은 즉시 무효가 됩니다 (POST) · <strong>폐기</strong>는 DELETE → 204, 카드는 ① 로 돌아갑니다.</p>
+</section>
+</div>
+
+</div>
+</body></html>
