@@ -349,3 +349,75 @@ class AgentSetupTest(Base):
                      format="json")
         row = AgentSettings.objects.get(user=self.me)
         self.assertTrue(row.disclose_work)
+
+
+class PrepEdgeTest(Base):
+    """검토에서 나온 자리들."""
+
+    def setUp(self):
+        super().setUp()
+        self.m = self.meeting()
+        self.api.post(self.url(self.m))
+
+    def test_settings_row_missing_shows_real_defaults(self):
+        """빈 객체를 주면 화면 토글은 다 꺼진 것처럼 그려지는데 대리인은 기본값으로 판정합니다."""
+        from apps.agent.services import policy
+
+        self.assertFalse(AgentSettings.objects.filter(user=self.me).exists())
+        setup = self.api.get(self.url(self.m, "prep")).json()["agent_setup"]
+        for key in ("mention_feasibility", "disclose_work", "disclose_plan",
+                    "disclose_thought", "allow_midmeeting_question"):
+            self.assertEqual(setup["settings"][key], policy.DEFAULTS[key], key)
+
+    def test_ended_meeting_cannot_be_uncancelled(self):
+        """지난 회의의 대리 참석 기록을 지우면 홈 카드가 `참석한 회의` 로 뒤집힙니다."""
+        Meeting.objects.filter(pk=self.m.pk).update(status=MeetingStatus.ENDED)
+        res = self.api.delete(self.url(self.m))
+        self.assertEqual(res.status_code, 409)
+        p = MeetingParticipant.objects.get(meeting=self.m, user=self.me)
+        self.assertTrue(p.delegated)
+
+    def test_prompt_count_is_capped(self):
+        from apps.meetings.prep import PROMPT_MAX
+
+        res = self.api.put(self.url(self.m, "agent-setup"),
+                           {"prompts": [f"지시 {i}" for i in range(20)]}, format="json")
+        self.assertEqual(len(res.json()["prompts"]), PROMPT_MAX)
+
+    def test_stance_length_is_capped(self):
+        from apps.meetings.prep import STANCE_MAX
+
+        point = DebatePoint.objects.create(meeting=self.m, source_key="k1", order=1,
+                                           title="쟁점?")
+        res = self.api.put(f"/api/v1/debate-points/{point.id}/stance",
+                           {"body": "가" * (STANCE_MAX + 1)}, format="json")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.json()["error"]["details"]["max"], STANCE_MAX)
+
+
+class LegacyDisclosureKeyTest(Base):
+    """옛 한 칸과 낱개 스위치를 함께 보낼 때."""
+
+    def setUp(self):
+        super().setUp()
+        self.api.force_authenticate(self.me)
+        AgentSettings.objects.create(user=self.me)
+
+    def test_granular_wins_and_changed_is_honest(self):
+        res = self.api.patch("/api/v1/me/agent/settings",
+                             {"disclose_work_plan_thought": False,
+                              "disclose_work": True}, format="json")
+        body = res.json()
+        row = AgentSettings.objects.get(user=self.me)
+        self.assertTrue(row.disclose_work)          # 낱개가 이깁니다
+        self.assertFalse(row.disclose_plan)
+        # 되돌아온 항목은 바뀐 것이 아니므로 목록에 없어야 합니다
+        self.assertNotIn("disclose_work", body["changed"])
+        self.assertIn("disclose_plan", body["changed"])
+
+    def test_no_real_change_does_not_bump_the_version(self):
+        before = AgentSettings.objects.get(user=self.me).active_version
+        res = self.api.patch("/api/v1/me/agent/settings",
+                             {"disclose_work_plan_thought": True}, format="json")
+        self.assertEqual(res.json()["changed"], {})
+        self.assertEqual(AgentSettings.objects.get(user=self.me).active_version, before)

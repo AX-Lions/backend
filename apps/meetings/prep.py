@@ -44,6 +44,13 @@ from .models import (Attendance, DebatePoint, DebateStance, MeetingParticipant,
 # 초안 저장을 따로 받아야 하는데 화면에 그런 버튼이 없습니다.
 STATUS_LABEL = {"ANSWERED": "답변완료", "NEEDED": "답변필요"}
 
+#: 회의별 프롬프트 개수 상한. 평소 지시(`prompts._STANDING_MAX`)와 맞춥니다.
+PROMPT_MAX = 5
+
+#: 입장 한 건의 길이 상한. 프롬프트에 그대로 실리는 값이라 열어 두면
+#: 한 사람이 적어 둔 글이 규칙보다 길어집니다.
+STANCE_MAX = 2000
+
 #: 이번 회의에만 덮어쓸 수 있는 설정.
 #
 # 화면의 세부 설정 토글 6개와 1:1 입니다. `agent_name` · `active_version` 은
@@ -140,6 +147,10 @@ def cancel_absence(user, meeting_id):
     실제로 있고, 그때 다시 쓰게 하면 화면을 두 번 채우게 됩니다.
     """
     meeting, p = participant_of(user, meeting_id)
+    # 끝난 회의도 막습니다. 지난 회의의 대리 참석 기록을 지우면 홈 카드가
+    # `불참한 회의` 에서 `참석한 회의` 로 뒤집히고, 이미 만들어진 브리핑은
+    # 대리 참석을 전제로 쓰여 있어 화면과 내용이 어긋납니다.
+    require_open(meeting)
     p.delegated = False
     p.attendance = (Attendance.PRESENT if meeting.status == MeetingStatus.ACTIVE
                     else Attendance.PENDING)
@@ -237,10 +248,14 @@ def setup_block(participant, user) -> dict:
     보여주려면 둘 다 있어야 합니다.
     """
     from apps.agent.models import AgentPrompt, AgentSettings
+    from apps.agent.services import policy
     from apps.agent.services.prompts import standing_prompts_for
 
+    # 설정 화면에 한 번도 안 들어간 사람은 행이 없습니다. 빈 객체를 내려주면
+    # **화면 토글이 전부 꺼진 것처럼 그려지는데 대리인은 기본값(대부분 켜짐)으로
+    # 판정합니다.** 사용자가 보는 것과 실제가 정반대가 됩니다.
     row = AgentSettings.objects.filter(user=user).first()
-    standing = row.as_snapshot() if row else {}
+    standing = row.as_snapshot() if row else dict(policy.DEFAULTS)
     effective = participant.effective_settings(standing)
 
     cards = list(AgentPrompt.objects.filter(user=user)
@@ -314,7 +329,10 @@ def clean_prompts(raw) -> list[str]:
         body = str(item or "").strip()
         if body:
             out.append(body[:2000])
-    return out
+    # 개수 상한. 평소 지시는 `_STANDING_MAX`(5개)로 잘리는데 회의별 목록에만
+    # 상한이 없으면, 여기 스무 개를 넣은 사람의 프롬프트가 **매 실행마다**
+    # 통째로 실려 규칙보다 길어집니다 — 모델이 앞쪽 규칙을 흘립니다.
+    return out[:PROMPT_MAX]
 
 
 def load_point(user, point_id):
@@ -350,6 +368,11 @@ def stance(request, point_id):
     if not body:
         raise BordoError("VALIDATION_ERROR",
                          "입장을 적어 주십시오. 비워 두려면 삭제하십시오.")
+    if len(body) > STANCE_MAX:
+        raise BordoError("VALIDATION_ERROR",
+                         f"입장은 {STANCE_MAX}자 이내로 적어 주십시오. "
+                         "대리인 프롬프트에 그대로 실리는 값입니다.",
+                         details={"length": len(body), "max": STANCE_MAX})
 
     option_key = str(request.data.get("option_key") or "").strip()
     if option_key:

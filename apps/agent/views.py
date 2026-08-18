@@ -52,12 +52,15 @@ def settings_view(request):
         if f in request.data:
             new = bool(request.data[f])
             old = getattr(obj, f)
-            if new != old:
-                # 옛 키가 먼저 건드렸으면 `from` 은 그때 값을 유지합니다.
-                changed[f] = {"from": changed.get(f, {}).get("from", old), "to": new}
-                setattr(obj, f, new)
-            elif f in changed and changed[f]["to"] != new:
-                changed[f]["to"] = new
+            # 옛 키가 먼저 건드렸으면 `from` 은 **그때 값**을 유지합니다.
+            before = changed[f]["from"] if f in changed else old
+            if new != before:
+                changed[f] = {"from": before, "to": new}
+            else:
+                # 옛 키가 옮겨 놓은 것을 낱개가 되돌린 경우입니다. 바뀐 것이
+                # 없는데 목록에 남겨 두면 설정 버전이 헛되이 오릅니다.
+                changed.pop(f, None)
+            setattr(obj, f, new)
 
     if "agent_name" in request.data:
         # 길이만 봅니다. 빈 값은 "기본 호칭으로 되돌린다" 는 뜻이라 허용합니다 —
