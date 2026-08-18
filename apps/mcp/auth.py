@@ -14,8 +14,8 @@ from functools import wraps
 from urllib.parse import urlsplit
 
 from django.conf import settings
-from django.core.cache import cache
 
+from apps.common.throttle import check_rate as throttle
 from config.errors import BordoError
 
 from .models import McpToken
@@ -55,17 +55,7 @@ def check_rate(user_id) -> None:
     개인 AI 가 루프에 빠지면 순식간에 수백 건이 들어옵니다. 상한을 두지 않으면
     한 사람의 잘못된 프롬프트가 팀 전체 응답 시간을 잡아먹습니다.
     """
-    key = f"mcp:rate:{user_id}"
-    if cache.add(key, 1, timeout=60):
-        return
-    try:
-        count = cache.incr(key)
-    except ValueError:            # 만료 직후 경합 — 새로 시작합니다
-        cache.add(key, 1, timeout=60)
-        return
-    if count > RATE_LIMIT_PER_MINUTE:
-        raise BordoError("MCP_RATE_LIMITED",
-                         details={"limit_per_minute": RATE_LIMIT_PER_MINUTE})
+    throttle(f"mcp:{user_id}", RATE_LIMIT_PER_MINUTE, code="MCP_RATE_LIMITED")
 
 
 def mcp_token_required(view):

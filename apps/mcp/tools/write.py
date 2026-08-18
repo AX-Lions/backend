@@ -17,6 +17,7 @@ from apps.documents.models import Document, DocumentVersion, Visibility as DocVi
 from apps.documents.models import content_hash, mask_secrets
 from apps.documents.views import _snapshot as snapshot_document
 from apps.documents.views import _summarize as summarize_document
+from apps.orgs.models import Project
 from apps.states.models import Source, Visibility, WorkItem, WorkStatus
 from apps.states.services import RULES, apply_fields, log_activity, validate
 from config.errors import BordoError
@@ -65,8 +66,13 @@ class RecordWork(McpTool):
         validate(rules, data)
 
         with transaction.atomic():
-            obj = (WorkItem.objects.select_for_update()
-                   .filter(project=project, owner=ctx.user, title=title).first())
+            # 같은 제목의 재시도 둘이 동시에 오면 둘 다 "없음" 을 보고 둘 다 만듭니다 —
+            # 없는 행은 잠글 수 없어서입니다. 프로젝트 행을 잠가 프로젝트 단위로
+            # 줄을 세웁니다. (PostgreSQL 에서만 실제로 걸립니다. SQLite 는 조용히 무시)
+            Project.objects.select_for_update().filter(pk=project.pk).exists()
+            obj = (WorkItem.objects
+                   .filter(project=project, owner=ctx.user, title=title)
+                   .order_by("-updated_at").first())
             if obj is None:
                 data.setdefault("status", WorkStatus.IN_PROGRESS)
                 obj = WorkItem.objects.create(project=project, owner=ctx.user, title=title,
