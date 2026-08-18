@@ -10,18 +10,23 @@ from .models import User
 class UserSerializer(serializers.ModelSerializer):
     # 활성 MCP 토큰의 발급 시각. null 이면 미발급 — 설정 화면이 `[토큰 발급]` 을 그립니다.
     mcp_token_issued_at = serializers.SerializerMethodField()
+    # 설정 화면이 「Discord 연결됨 / 코드 입력」 중 무엇을 그릴지 이 값으로 정합니다.
+    discord_linked = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = ("id", "email", "name", "avatar_url", "locale", "timezone",
                   "project_role", "notification", "always_open_briefing",
-                  "dismissed_tooltips", "mcp_token_issued_at")
-        read_only_fields = ("id", "email", "mcp_token_issued_at")
+                  "dismissed_tooltips", "mcp_token_issued_at", "discord_linked")
+        read_only_fields = ("id", "email", "mcp_token_issued_at", "discord_linked")
 
     def get_mcp_token_issued_at(self, obj):
         from apps.mcp.models import McpToken
         row = McpToken.active_for(obj)
         return row.created_at if row else None
+
+    def get_discord_linked(self, obj):
+        return bool(obj.discord_user_id)
 
 
 class SignupSerializer(serializers.Serializer):

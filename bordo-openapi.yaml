@@ -923,6 +923,68 @@ paths:
           $ref: '#/components/responses/E401'
       security:
       - bearerAuth: []
+  /api/v1/me/discord/link:
+    post:
+      tags:
+      - 12. Discord 연동 (웹)
+      summary: 내 Discord 계정 연결 (코드 입력)
+      description: |-
+        Discord 에서 `/bordo-connect` 로 DM 받은 6자리 코드를 넣는다. 설정 화면(`/account`)이 부른다.
+        `GET /users/me` 의 `discord_linked` 가 `true` 로 바뀐다.
+
+        같은 Discord 계정이 다른 Bordo 계정에 이어져 있었다면 그쪽에서 떼어 이 계정에 붙인다 —
+        한 Discord 계정이 두 사람에게 이어지면 봇의 발언이 누구 것인지 정할 수 없다.
+
+        오류 — `DISCORD_CODE_INVALID`(400) · `DISCORD_CODE_EXPIRED`(410, 10분) · `DISCORD_CODE_ALREADY_USED`(409)
+      operationId: linkMyDiscord
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                connect_code:
+                  type: string
+              required:
+              - connect_code
+            example:
+              connect_code: 4F2A91
+      responses:
+        '200':
+          description: 연결됨
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  linked: {type: boolean}
+                  user_id: {type: string}
+                  discord_user_id: {type: string, nullable: true}
+              example:
+                linked: true
+                user_id: usr_backend_01
+                discord_user_id: '111'
+        '400':
+          $ref: '#/components/responses/E400'
+        '401':
+          $ref: '#/components/responses/E401'
+        '409':
+          $ref: '#/components/responses/E409'
+      security:
+      - bearerAuth: []
+    delete:
+      tags:
+      - 12. Discord 연동 (웹)
+      summary: 내 Discord 계정 연결 해제
+      operationId: unlinkMyDiscord
+      responses:
+        '200':
+          description: '해제됨 (`linked: false`)'
+        '401':
+          $ref: '#/components/responses/E401'
+      security:
+      - bearerAuth: []
   /api/v1/teams:
     post:
       tags:
@@ -4909,6 +4971,11 @@ paths:
         5. 관리자가 Guild·채널을 팀에 연결
 
         코드는 만료·재사용 방지가 적용된다 → `DISCORD_CODE_EXPIRED`, `DISCORD_CODE_ALREADY_USED`
+
+        **구현 메모.** 계정 연결(코드)은 팀 멤버 누구나, `guild_id` 로 서버까지 붙이는 것은 OWNER·ADMIN 만이다.
+        일반 멤버가 `guild_id` 를 같이 보내면 계정 연결은 되고 서버 연결만 `403` 이다.
+        `channels` 는 아직 저장하지 않는다 — 봇이 회의 스레드를 스스로 만들므로 채널 지정이 필요 없다.
+        설정 화면에서 계정만 잇는다면 `POST /me/discord/link` 가 짧다.
       operationId: linkDiscord
       responses:
         '200':
@@ -5329,8 +5396,14 @@ paths:
     post:
       tags:
       - 13. Internal API (Discord Bot)
-      summary: Bot Presence 보고
-      description: '`READY` / `RESUMED` 시 연결 상태를 갱신한다. Gateway 종료 시 Bot 은 **Resume 우선, 실패하면 Identify** 로 재연결한다.'
+      summary: Bot Presence 보고 · 사람 접속 상태
+      description: |-
+        두 용도를 한 경로로 받는다.
+
+        - **봇 생존 신호** — `discord_user_id` 없이 `{status, at}` 만 보내면 (`on_ready` · `on_resumed`) 서버 캐시에 남고 `GET /teams/{id}/discord/status` 의 `bot_status` 가 `READY` 가 된다. 응답 `202`.
+        - **사람 접속 상태** — `discord_user_id` + `status`(online·idle·dnd·offline·invisible). 진행 중 회의의 참석 상태를 갱신한다. 대리 참석을 켠 사람은 건드리지 않는다.
+
+        Gateway 종료 시 Bot 은 **Resume 우선, 실패하면 Identify** 로 재연결한다.
       operationId: internalDiscordPresence
       responses:
         '200':
@@ -12959,17 +13032,30 @@ components:
           type: string
           enum:
           - READY
-          - RESUMING
-          - DISCONNECTED
+          - UNKNOWN
+          description: 봇이 15분 안에 `/internal/v1/discord/presence` 로 생존 신호를 보냈으면 `READY`. Intent·권한은 봇만 알므로 서버는 그 이상 판정하지 않는다.
         gateway:
           type: object
           properties:
-            resumed:
-              type: boolean
-            last_heartbeat_at:
+            status:
+              type: string
+              description: 봇이 마지막으로 보낸 값 (`online` · `resumed`)
+            last_seen_at:
               type: string
               format: date-time
               description: RFC3339 (오프셋 포함)
+        members:
+          type: object
+          description: 계정을 연결한 팀원 수. 안 이은 사람은 회의 참석자로 잡히지 않는다.
+          properties:
+            total:
+              type: integer
+            linked:
+              type: integer
+            unlinked_names:
+              type: array
+              items:
+                type: string
         intents:
           type: object
           properties:

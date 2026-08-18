@@ -32,6 +32,11 @@ ERROR_CODES = {
     "USER_NOT_FOUND":                (404, "연결된 계정을 찾을 수 없습니다.", False),
     "TEAM_NOT_FOUND":                (404, "연결된 팀을 찾을 수 없습니다.", False),
     "TEAM_AMBIGUOUS":                (409, "연결할 팀을 골라 주십시오.", False),
+    # Discord 연동 (웹) — 연결 코드 입력
+    "DISCORD_CODE_INVALID":          (400, "연결 코드가 올바르지 않습니다. DM 으로 받은 6자리를 확인하십시오.", False),
+    "DISCORD_CODE_EXPIRED":          (410, "연결 코드가 만료됐습니다. Discord 에서 /bordo-connect 를 다시 실행하십시오.", False),
+    "DISCORD_CODE_ALREADY_USED":     (409, "이미 사용된 연결 코드입니다.", False),
+    "DISCORD_NOT_LINKED":            (404, "연결된 Discord 서버가 없습니다.", False),
     # 문서 / 상태
     "DOCUMENT_NOT_FOUND":            (404, "문서를 찾을 수 없습니다.", False),
     "DOCUMENT_ACCESS_DENIED":        (403, "문서에 접근할 수 없습니다.", False),

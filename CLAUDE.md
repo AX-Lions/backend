@@ -225,7 +225,7 @@ publish(project_id, "task.completed", {"task_id": str(task.id)})
 | `apps/tasks` | 태스크 · 상태 전이 · 진행률 | **D** |
 | `apps/calendars` | 일정 · 리마인더 · 공지 **요청**(발송 아님) | **D** |
 | `apps/documents` | 문서 · 버전 · 비밀키 마스킹 | **D** |
-| `apps/discord` | 봇 연동 · 스킬 | **A** (예정) |
+| `apps/discord` | 봇 연동(`views.py`, 서비스 토큰) · **웹 쪽 연결 코드 입력·상태 진단**(`web_views.py`, JWT) | **A** / 웹 쪽은 기반 |
 | `apps/mcp` | `/mcp` (개인 AI 클라이언트) · `brd_` 토큰 · 쓰기 도구 3종 | 재민 |
 
 ### 남의 앱을 건드릴 때
@@ -514,6 +514,8 @@ A 가 발송함을 붙이면 그 이벤트를 받아 큐에 넣습니다. 페이
 | 채팅 날짜를 서버 시간대로 | **요청자 `User.timezone`** 으로 자름 (`active-dates` · `?date=` · `search.date` · `daily-summary`) | 서버는 UTC 라 한국에서 자정 넘어 보낸 말이 전날로 묶였습니다. 화면은 브라우저 시간대로 구분선을 그리므로 그 구분선을 눌러도 그 메시지가 안 나옵니다 |
 | 대리인 방 제목이 저장값 | 조회 시점에 `agent_display_name()` 으로 조립 | 개인 설정에서 이름을 바꿨는데 방 제목만 옛 이름이면 저장이 안 된 줄 압니다. 어차피 이름을 못 바꾸는 방입니다 |
 | `indexes` 가 회의 스코프 | `category=WORK` 은 **프로젝트 + 기간**, 묶는 값은 `FlowEdge.work_document` | 작업 엣지에는 회의가 없어 회의로 좁히면 언제나 빈 배열입니다. 기존 `document` 는 회의 문서 스냅샷이라 작업 엣지에 못 씁니다 |
+| `/internal/v1/discord/presence` 는 사람 상태만 | `discord_user_id` 없이 오면 **봇 생존 신호**로 캐시(202) | 봇의 `on_ready` 가 `{status, at}` 만 보내 매번 400 이었습니다. 이 신호로 `GET /teams/{id}/discord/status` 가 봇이 살아 있는지 보여줍니다 |
+| `discord/status` 가 Intent·권한 진단 | 서버 연결 · 봇 생존 · 계정 이은 팀원 수 · warnings | Intent·권한은 봇만 압니다. 서버가 아는 것만 정직하게 냅니다 |
 | `ai-briefing` 조회 = 읽음 | `?mark_read=false` 로 끌 수 있음 (기본은 읽음) | 플로우 화면이 패널을 열든 말든 부르므로, 회의에 잠깐 들른 것만으로 홈 브리핑 버튼이 사라졌습니다 |
 | `/mcp` 도구 13종 · `initialize` 만 | **쓰기 3종** (`bordo_record_work` · `bordo_upload_document` · `bordo_complete_work`) · **dual-era** (legacy `initialize` + modern `server/discover`) · 도구 실행 오류는 `result.isError` | 읽기 도구가 없어야 장기 토큰이 새도 가져갈 게 없습니다. 한쪽 세대만 받으면 클라이언트에 따라 연결이 안 됩니다. `docs/decisions/2026-08-18-mcp-범위.md` |
 | MCP Tool 인자가 `team_id` | `project_id` (생략 시 최근 프로젝트, 결과에 `resolved_by`) | 문서·work 는 프로젝트에 매달립니다. 팀만으로는 어디에 쓸지 정할 수 없습니다 |
