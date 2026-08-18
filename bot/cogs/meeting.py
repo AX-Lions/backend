@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from datetime import datetime, timezone
 
@@ -107,13 +108,39 @@ class MeetingCog(commands.Cog):
 
         return choices[:25]  # Discord 자동완성 후보 상한
 
-    @app_commands.command(name="meeting-start", description="예정된 회의의 스레드를 엽니다.")
-    @app_commands.describe(meeting_id="열 회의를 고르세요. 입력하면 예정된 회의가 자동완성됩니다.")
+    _MENTION_RE = re.compile(r"<@!?(\d+)>")
+
+    @app_commands.command(
+        name="meeting-start",
+        description="회의 스레드를 엽니다 — 예정된 회의를 고르거나 즉석으로 새로 만듭니다.",
+    )
+    @app_commands.describe(
+        meeting_id="예정된 회의를 고르세요(자동완성). 즉석 회의라면 비워두고 agenda를 입력하세요.",
+        agenda="즉석 회의 안건. meeting_id를 골랐다면 비워두세요.",
+        members=(
+            "즉석 회의 참가자 멘션. 비우면 본인만 등록됩니다. "
+            "/delegate-on 해둔 사람은 자동으로 대리 참석 처리됩니다."
+        ),
+    )
     @app_commands.autocomplete(meeting_id=_meeting_id_autocomplete)
     @app_commands.guild_only()
-    async def meeting_start(self, interaction: discord.Interaction, meeting_id: str):
+    async def meeting_start(
+        self, interaction: discord.Interaction,
+        meeting_id: str = "", agenda: str = "", members: str = "",
+    ):
         await interaction.response.defer()
 
+        if meeting_id:
+            await self._start_scheduled(interaction, meeting_id)
+        elif agenda:
+            await self._start_adhoc(interaction, agenda, members)
+        else:
+            await interaction.followup.send(
+                "예정된 회의를 열려면 meeting_id를, 즉석 회의를 시작하려면 agenda를 입력하세요.",
+                ephemeral=True,
+            )
+
+    async def _start_scheduled(self, interaction: discord.Interaction, meeting_id: str):
         # 제목은 Backend가 갖고 있는 예정된 회의에서 나온다 — 이 시점엔 아직 모르니
         # 임시 이름으로 스레드부터 만들고, 응답을 받은 뒤 실제 제목으로 바꾼다.
         thread = await interaction.channel.create_thread(
@@ -178,6 +205,79 @@ class MeetingCog(commands.Cog):
             announcement += f"\n🤖 대리 참석이 켜져 있어 AI 대리인이 대신 참석합니다: {mentions}"
 
         await thread.send(announcement)
+
+        await interaction.followup.send(f"회의 스레드를 만들었습니다: {thread.mention}")
+
+    async def _start_adhoc(self, interaction: discord.Interaction, agenda: str, members: str):
+        """웹에 미리 잡아두지 않은 즉석 회의. 참가자를 멘션으로 모아 그 자리에서
+        Backend에 새 회의를 만들어달라고 요청한다 — meeting_id 경로와 달리
+        Backend가 이미 지원하는 옛 계약을 그대로 쓴다."""
+        thread = await interaction.channel.create_thread(
+            name=(f"[회의] {datetime.now().strftime('%Y%m%d')} | {agenda}")[:100],
+            type=discord.ChannelType.public_thread,
+        )
+
+        invited_ids = {interaction.user.id}
+        invited_ids.update(int(m) for m in self._MENTION_RE.findall(members))
+
+        participants: dict[str, str] = {
+            str(user_id): ("delegated" if str(user_id) in self.delegate_on_users else "present")
+            for user_id in invited_ids
+        }
+
+        self.active_meeting_threads[thread.id] = {
+            "agenda": agenda,
+            "started_at": self._now_iso(),
+            "channel_id": interaction.channel_id,
+            "starter_id": interaction.user.id,
+            "participants": participants,
+        }
+
+        announcement = (
+            f"🟢 **회의가 시작되었습니다** · 안건: {agenda}\n"
+            f"대화는 이 스레드에 남겨주세요. 끝나면 이 스레드 안에서 "
+            f"`/meeting-end`를 실행하면 Backend가 요약을 정리합니다."
+        )
+
+        delegated = [uid for uid, status in participants.items() if status == "delegated"]
+
+        if delegated:
+            mentions = ", ".join(f"<@{uid}>" for uid in delegated)
+            announcement += f"\n🤖 대리 참석이 켜져 있어 AI 대리인이 대신 참석합니다: {mentions}"
+
+        await thread.send(announcement)
+
+        result = await self.backend.post("/internal/v1/meetings/start",
+            json={
+                "guild_id": str(interaction.guild_id),
+                "text_channel_id": str(interaction.channel_id),
+                "thread_id": str(thread.id),
+                "agenda": agenda,
+                "participants": [
+                    {
+                        "discord_user_id": uid,
+                        "status": status
+                    }
+                    for uid, status in participants.items()
+                ],
+            }
+        )
+
+        if result is None:
+            await interaction.followup.send(
+                f"회의 스레드는 만들었지만 Backend 연결에 실패했습니다: {thread.mention}\n"
+                "대화는 이 스레드에서 계속하되, 회의 기록은 동기화되지 않을 수 있습니다.",
+                ephemeral=True,
+            )
+            return
+
+        error = get_error(result)
+        if error:
+            await interaction.followup.send(
+                f"회의 스레드는 만들었지만 Backend 연결에 실패했습니다: {thread.mention}\n"
+                f"{error.get('message', '')}", ephemeral=True
+            )
+            return
 
         await interaction.followup.send(f"회의 스레드를 만들었습니다: {thread.mention}")
 
