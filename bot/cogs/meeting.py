@@ -31,6 +31,18 @@ class MeetingCog(commands.Cog):
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
 
+    @staticmethod
+    def _fmt_time(iso_str: str) -> str:
+        """자동완성 후보 라벨에 쓸 짧은 시각 표기. 파싱 실패하면 원문을 그대로 보여준다 —
+        후보가 안 보이는 것보다 못생긴 시각이라도 보이는 게 낫다."""
+        if not iso_str:
+            return ""
+        try:
+            dt = datetime.fromisoformat(iso_str)
+        except ValueError:
+            return iso_str
+        return dt.strftime("%m/%d %H:%M")
+
     async def announce_to_thread(self, thread_id: int, text: str) -> None:
         """[TEMP]
         회의 스레드에 상태 변경 등을 안내하는 메시지를 게시한다.
@@ -44,6 +56,41 @@ class MeetingCog(commands.Cog):
             await channel.send(text)
         except discord.HTTPException as exc:
             log.warning("스레드(%s) 안내 메시지 게시 실패: %s", thread_id, exc)
+
+    # --------------------------------------------------
+    # /meeting-start용 예정 회의 자동완성
+    #
+    # 아직 meeting_start 명령에는 안 물려 있다 — Backend에
+    # GET /internal/v1/meetings/scheduled가 없어서 지금 연결하면 늘 빈
+    # 목록만 돈다. 엔드포인트가 붙으면 다음 커밋에서 명령을 이 방식으로
+    # 바꾼다.
+    # --------------------------------------------------
+
+    async def _meeting_id_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        if interaction.guild_id is None:
+            return []
+
+        result = await self.backend.get(
+            "/internal/v1/meetings/scheduled", params={"guild_id": str(interaction.guild_id)}
+        )
+        if not isinstance(result, dict):
+            return []
+
+        current = current.lower()
+        choices = []
+        for m in result.get("meetings", []):
+            meeting_id = m.get("meeting_id")
+            if not meeting_id:
+                continue
+            label = (f"{m.get('project_name', '')} · {m.get('title', '')} · "
+                    f"{self._fmt_time(m.get('scheduled_at'))}")
+            if current and current not in label.lower():
+                continue
+            choices.append(app_commands.Choice(name=label[:100], value=meeting_id))
+
+        return choices[:25]  # Discord 자동완성 후보 상한
 
     # --------------------------------------------------
     # /meeting-start
@@ -92,7 +139,7 @@ class MeetingCog(commands.Cog):
         )
 
         delegated = [uid for uid, status in participants.items() if status == "delegated"]
-        
+
         if delegated:
             mentions = ", ".join(f"<@{uid}>" for uid in delegated)
             announcement += f"\n🤖 대리 참석이 켜져 있어 AI 대리인이 대신 참석합니다: {mentions}"
