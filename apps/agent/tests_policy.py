@@ -100,3 +100,29 @@ class DiscloseTest(SimpleTestCase):
         """회의록은 이미 참석자가 함께 들은 내용이라 공개 스위치 대상이 아닙니다."""
         item = {"source_type": "meeting", "visibility": "team"}
         self.assertTrue(policy.can_disclose(item, ALL_OFF))
+
+
+class DisclosureSplitTest(SimpleTestCase):
+    """
+    공개를 셋으로 쪼갠 뒤에도 옛 스냅샷으로 판정이 재현되는가.
+
+    지난 실행의 `settings_snapshot` 에는 낱개 키가 없고 옛 한 칸만 있습니다.
+    그때 껐던 사람의 기록이 지금 판정에서 열리면 **과거 발언을 재현할 수 없습니다.**
+    """
+
+    def test_legacy_snapshot_still_blocks(self):
+        old = {"disclose_work_plan_thought": False}
+        for kind in ("work", "plan", "thought"):
+            self.assertFalse(
+                policy.can_disclose({"source_type": kind}, old), kind)
+
+    def test_new_snapshot_is_per_kind(self):
+        snap = {"disclose_work": False, "disclose_plan": True,
+                "disclose_thought": False, "disclose_work_plan_thought": True}
+        self.assertFalse(policy.can_disclose({"source_type": "work"}, snap))
+        self.assertTrue(policy.can_disclose({"source_type": "plan"}, snap))
+        self.assertFalse(policy.can_disclose({"source_type": "thought"}, snap))
+
+    def test_new_key_wins_over_legacy(self):
+        snap = {"disclose_work": True, "disclose_work_plan_thought": False}
+        self.assertTrue(policy.can_disclose({"source_type": "work"}, snap))

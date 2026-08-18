@@ -57,11 +57,18 @@ MESSAGES = {
     Reason.CLARIFY: "회의 중 되묻지 않도록 설정하셨습니다.",
 }
 
+#: 옛 이름. 낱개 셋 중 하나라도 켜져 있으면 참인 파생값입니다.
+#: 지난 스냅샷에는 이 키만 있어, 그때 판정을 재현하려면 계속 읽어야 합니다.
+LEGACY_DISCLOSURE = "disclose_work_plan_thought"
+
 #: 의도 → 검사할 스위치.
 _SWITCH = {
     Intent.FEASIBILITY: ("mention_feasibility", Reason.FEASIBILITY),
     Intent.SCHEDULE: ("allow_schedule_change", Reason.SCHEDULE),
-    Intent.STATUS: ("disclose_work_plan_thought", Reason.DISCLOSURE),
+    # 관문은 옛 한 칸(셋 중 하나라도 켜짐)으로 봅니다. 낱개로 막으면 작업만 끈
+    # 사람의 대리인이 진행 상황 질문에 통째로 유보합니다 — 무엇을 인용할지는
+    # 근거 단위로 `can_disclose` 가 다시 봅니다.
+    Intent.STATUS: (LEGACY_DISCLOSURE, Reason.DISCLOSURE),
     Intent.CLARIFY: ("allow_midmeeting_question", Reason.CLARIFY),
 }
 
@@ -70,7 +77,10 @@ DEFAULTS = {
     "mention_feasibility": True,
     "allow_schedule_change": True,
     "allow_midmeeting_question": False,
-    "disclose_work_plan_thought": True,
+    "disclose_work": True,
+    "disclose_plan": True,
+    "disclose_thought": True,
+    LEGACY_DISCLOSURE: True,
 }
 
 
@@ -133,8 +143,20 @@ def can_disclose(evidence_item: dict, snapshot: dict | None) -> bool:
     if evidence_item.get("visibility") == "private":
         return False
 
-    if evidence_item.get("source_type") in ("work", "plan", "thought"):
-        s = {**DEFAULTS, **(snapshot or {})}
-        return bool(s.get("disclose_work_plan_thought"))
+    kind = evidence_item.get("source_type")
+    if kind in ("work", "plan", "thought"):
+        # 낱개 키를 먼저 봅니다.
+        #
+        # **DEFAULTS 와 합친 dict 를 보면 안 됩니다.** 지난 실행의 스냅샷에는
+        # 낱개 키가 아예 없는데, 합친 dict 에는 기본값 True 가 들어가 있어
+        # 그때 공개를 꺼 뒀던 사람의 기록이 지금 판정에서 열립니다. 원본
+        # 스냅샷에 그 키가 실제로 있었는지부터 봅니다.
+        raw = snapshot or {}
+        key = f"disclose_{kind}"
+        if key in raw:
+            return bool(raw[key])
+        if LEGACY_DISCLOSURE in raw:
+            return bool(raw[LEGACY_DISCLOSURE])
+        return bool(DEFAULTS[key])
 
     return True
