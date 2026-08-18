@@ -196,6 +196,9 @@ urlpatterns = [
     path(f"{INTERNAL}/deputy/ask", discord_internal.deputy_ask),
     path(f"{INTERNAL}/meetings/start", discord_internal.meeting_start),
     path(f"{INTERNAL}/meetings/end", discord_internal.meeting_end),
+    # 봇이 재시작해도 대리 참석자를 되물을 수 있게 (인메모리 set 을 대신합니다)
+    path(f"{INTERNAL}/meetings/participants", discord_internal.meeting_participants),
+    path(f"{INTERNAL}/meetings/absence", discord_internal.meeting_absence),
     path(f"{INTERNAL}/discord/messages", discord_internal.discord_messages),
     path(f"{INTERNAL}/discord/presence", discord_internal.discord_presence),
 
