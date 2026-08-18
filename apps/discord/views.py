@@ -216,6 +216,22 @@ def teams_link(request):
 
 # ═══════════════════════════════════════════ 대리 참석
 
+def _queue_debate_points(meeting_ids) -> None:
+    """
+    논쟁점 예측을 걸어 둡니다. **기다리지 않습니다.**
+
+    여기서 터지면 대리 참석 토글 자체가 실패한 것으로 읽히는데, 상태는 이미
+    저장돼 있습니다. 봇은 "안 켜졌다" 로 읽고 사용자에게 다시 하라고 합니다.
+    """
+    from apps.agent.tasks import build_debate_points
+
+    for meeting_id in meeting_ids:
+        try:
+            build_debate_points.delay(str(meeting_id))
+        except Exception:                                      # noqa: BLE001
+            logger.exception("논쟁점 생성 호출 실패 meeting=%s", meeting_id)
+
+
 def _set_delegate(request, on: bool):
     from apps.meetings.models import Attendance, MeetingParticipant, MeetingStatus
 
@@ -235,7 +251,13 @@ def _set_delegate(request, on: bool):
         # 웹 경로(`/meetings/{id}/absence`)와 같은 값을 씁니다. 같은 행위가
         # 경로에 따라 `ABSENT` 와 `DELEGATED` 로 갈리면, 어디서 눌렀느냐에 따라
         # 화면 뱃지가 `불참` 과 `Bordo 대리 참석 예정` 으로 달라집니다.
+        meeting_ids = list(qs.values_list("meeting_id", flat=True))
         changed = qs.update(delegated=True, attendance=Attendance.DELEGATED)
+
+        # 예측도 같이 겁니다. 상태만 맞추고 파이프라인을 웹 경로에만 걸어 두면,
+        # **Discord 로 대리 참석을 켠 사람은 준비 화면이 언제까지나 빈 칸**입니다.
+        # 지금 살아 있는 대리 참석 경로가 대부분 이쪽입니다.
+        _queue_debate_points(meeting_ids)
     else:
         # 되돌릴 때는 회의 상태로 나눕니다. 열리지도 않은 회의를 `PRESENT` 로
         # 두면 참석자 목록에 이미 와 있는 사람으로 그려집니다.
