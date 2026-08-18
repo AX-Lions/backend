@@ -83,6 +83,7 @@ urlpatterns = [
     path(f"{API}/meetings/<uuid:meeting_id>/delegate", meetings.delegate),
     # 회의 대리 참석 준비 — 홈의 `회의에 참여하지 않아요` 가 여기로 들어옵니다
     path(f"{API}/meetings/<uuid:meeting_id>/absence", meetings_prep.absence),
+    path(f"{API}/meetings/<uuid:meeting_id>/prep", meetings_prep.prep),
     path(f"{API}/meetings/<uuid:meeting_id>/flow", meetings.flow),
     # 작업 플로우는 기간이 스코프라 회의 경로를 쓸 수 없습니다 (이슈 #54)
     path(f"{API}/projects/<uuid:project_id>/flow", meetings.project_flow),

@@ -9,8 +9,8 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import User
-from apps.meetings.models import (Attendance, Meeting, MeetingParticipant,
-                                  MeetingStatus)
+from apps.meetings.models import (Attendance, DebatePoint, DebateStance, Meeting,
+                                  MeetingParticipant, MeetingStatus)
 from apps.orgs.models import Project, ProjectMember, Team, TeamMember
 
 
@@ -128,3 +128,83 @@ class AbsenceTest(Base):
                                             name="남")
         self.api.force_authenticate(stranger)
         self.assertEqual(self.api.post(self.url(m)).status_code, 403)
+
+
+class PrepReadTest(Base):
+
+    def setUp(self):
+        super().setUp()
+        self.m = self.meeting()
+        self.api.post(self.url(self.m))
+
+    def point(self, order=1, title="개발 범위를 축소할 것인가, 기존 범위를 유지할 것인가?"):
+        return DebatePoint.objects.create(
+            meeting=self.m, source_key=f"k{order}", order=order, title=title,
+            options=[{"key": "A", "title": "핵심 기능만 구현", "description": "범위를 축소"},
+                     {"key": "B", "title": "기존 기획 범위 유지", "description": "최대한 구현"}],
+            rationale="이전 회의에서 범위를 축소하자는 의견이 있었어요.",
+            evidence=[{"kind": "meeting", "title": "8월 15일 · 기능 구현 범위 논의"}])
+
+    def test_one_call_fills_the_page(self):
+        self.point()
+        res = self.api.get(self.url(self.m, "prep"))
+        self.assertEqual(res.status_code, 200, res.content)
+        body = res.json()
+        self.assertEqual(set(body), {"header", "debate", "agent_setup"})
+        self.assertTrue(body["header"]["delegated"])
+        self.assertEqual(body["debate"]["count"], 1)
+        self.assertIn("1개의 논쟁점", body["debate"]["notice"])
+
+    def test_point_row_shape(self):
+        self.point(order=2)
+        row = self.api.get(self.url(self.m, "prep")).json()["debate"]["points"][0]
+        self.assertEqual(row["label"], "논쟁점 02")
+        self.assertEqual(row["status_label"], "답변필요")
+        self.assertIsNone(row["stance"])
+        self.assertEqual(len(row["options"]), 2)
+        self.assertEqual(row["evidence"][0]["kind"], "meeting")
+
+    def test_my_stance_marks_answered(self):
+        p = self.point()
+        DebateStance.objects.create(point=p, user=self.me, option_key="A", body="축소가 맞아요")
+        body = self.api.get(self.url(self.m, "prep")).json()
+        row = body["debate"]["points"][0]
+        self.assertEqual(row["status_label"], "답변완료")
+        self.assertEqual(row["stance"]["body"], "축소가 맞아요")
+        self.assertEqual(body["debate"]["answered_count"], 1)
+
+    def test_other_persons_stance_is_not_mine(self):
+        """입장은 사람마다 갈립니다. 남의 것이 내 화면에 뜨면 대리인이 남의 말을 합니다."""
+        p = self.point()
+        DebateStance.objects.create(point=p, user=self.mate, body="유지가 맞아요")
+        row = self.api.get(self.url(self.m, "prep")).json()["debate"]["points"][0]
+        self.assertIsNone(row["stance"])
+        self.assertEqual(row["status_label"], "답변필요")
+
+    def test_empty_notice_when_nothing_predicted(self):
+        body = self.api.get(self.url(self.m, "prep")).json()
+        self.assertEqual(body["debate"]["count"], 0)
+        self.assertIn("아직", body["debate"]["notice"])
+
+    def test_setup_defaults_to_standing(self):
+        setup = self.api.get(self.url(self.m, "prep")).json()["agent_setup"]
+        self.assertEqual(setup["mode"], "STANDING")
+        self.assertEqual(setup["mode_label"], "현재 설정 사용")
+        self.assertEqual(setup["overridden_keys"], [])
+        # 설정 행이 없는 사용자도 화면이 서야 합니다
+        self.assertIn("settings", setup)
+
+    def test_setup_shows_override_and_standing_side_by_side(self):
+        from apps.agent.models import AgentSettings
+        AgentSettings.objects.create(user=self.me, disclose_work=True)
+        p = MeetingParticipant.objects.get(meeting=self.m, user=self.me)
+        p.settings_override = {"disclose_work": False}
+        p.delegate_prompt = "이번엔 일정 얘기 하지 마"
+        p.save()
+
+        setup = self.api.get(self.url(self.m, "prep")).json()["agent_setup"]
+        self.assertEqual(setup["mode"], "ONCE")
+        self.assertFalse(setup["settings"]["disclose_work"])
+        self.assertTrue(setup["standing_settings"]["disclose_work"])
+        self.assertEqual(setup["overridden_keys"], ["disclose_work"])
+        self.assertEqual(setup["extra_note"], "이번엔 일정 얘기 하지 마")

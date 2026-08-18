@@ -31,7 +31,15 @@ from apps.common.events import publish
 from apps.common.permissions import meeting_access
 from config.errors import BordoError
 
-from .models import Attendance, MeetingParticipant, MeetingStatus
+from .models import (Attendance, DebatePoint, DebateStance, MeetingParticipant,
+                     MeetingStatus)
+
+#: 논쟁점 상태. 화면 뱃지와 1:1 입니다.
+#
+# `답변중...` 은 여기 없습니다 — 그건 지금 펼쳐 놓고 타이핑 중이라는 뜻이라
+# 서버가 알 수 없고, 저장되면 곧바로 `답변완료` 입니다. 서버가 흉내 내려면
+# 초안 저장을 따로 받아야 하는데 화면에 그런 버튼이 없습니다.
+STATUS_LABEL = {"ANSWERED": "답변완료", "NEEDED": "답변필요"}
 
 #: 불참을 등록할 수 있는 회의 상태.
 #
@@ -148,7 +156,111 @@ def header_of(meeting, participant, user) -> dict:
     }
 
 
+def point_row(point, stance) -> dict:
+    """논쟁점 하나 + 내 입장."""
+    status = "ANSWERED" if stance else "NEEDED"
+    return {
+        "id": str(point.id),
+        "order": point.order,
+        # `논쟁점 01`. 두 자리 맞춤을 클라이언트가 하면 10번째에서 갈립니다.
+        "label": f"논쟁점 {point.order:02d}",
+        "title": point.title,
+        "options": point.options or [],
+        "rationale": point.rationale,
+        "evidence": point.evidence or [],
+        "created_by_agent": point.created_by_agent,
+        "status": status,
+        "status_label": STATUS_LABEL[status],
+        "stance": ({
+            "id": str(stance.id),
+            "option_key": stance.option_key or None,
+            "body": stance.body,
+            "updated_at": stance.updated_at,
+        } if stance else None),
+    }
+
+
+def debate_block(meeting, user) -> dict:
+    """
+    예상 논쟁점과 내 입장.
+
+    입장을 논쟁점마다 따로 조회하지 않습니다. 세 개짜리 목록에 쿼리가 세 번 더
+    나가는 것을 막는 것이 아니라, 재예측으로 개수가 늘면 그만큼 늘기 때문입니다.
+    """
+    points = list(DebatePoint.objects.filter(meeting=meeting))
+    mine = {str(s.point_id): s
+            for s in DebateStance.objects.filter(point__in=points, user=user)}
+    rows = [point_row(p, mine.get(str(p.id))) for p in points]
+    answered = sum(1 for r in rows if r["status"] == "ANSWERED")
+    return {
+        # 화면 부제. 개수가 들어가므로 서버가 완성합니다.
+        "notice": (f"Bordo가 회의 자료와 이전 논의를 바탕으로 {len(rows)}개의 "
+                   f"논쟁점을 예상했어요." if rows else
+                   "아직 예상된 논쟁점이 없어요. 회의 자료가 쌓이면 Bordo가 예상해 드려요."),
+        "count": len(rows),
+        "answered_count": answered,
+        "points": rows,
+    }
+
+
+def setup_block(participant, user) -> dict:
+    """
+    「Bordo 활동 설정」.
+
+    **실제로 적용될 값과 평소 값을 함께 내려줍니다.** 화면에 `현재 설정 사용` 과
+    `이번에만 다르게 사용` 이 나란히 있어, 되돌렸을 때 무엇으로 돌아가는지
+    보여주려면 둘 다 있어야 합니다.
+    """
+    from apps.agent.models import AgentPrompt, AgentSettings
+    from apps.agent.services.prompts import standing_prompts_for
+
+    row = AgentSettings.objects.filter(user=user).first()
+    standing = row.as_snapshot() if row else {}
+    effective = participant.effective_settings(standing)
+
+    cards = list(AgentPrompt.objects.filter(user=user)
+                 .values("id", "body", "created_at"))
+    standing_bodies = standing_prompts_for(user)
+    override = participant.prompt_override
+    return {
+        "mode": "STANDING" if participant.uses_standing_settings else "ONCE",
+        "mode_label": ("현재 설정 사용" if participant.uses_standing_settings
+                       else "이번에만 다르게 사용"),
+        # 이번 회의에서 실제로 판정에 쓰일 값.
+        "settings": effective,
+        # 평소 설정. `현재 설정 사용` 을 눌렀을 때 돌아갈 자리입니다.
+        "standing_settings": standing,
+        "overridden_keys": sorted(participant.settings_override or {}),
+        "prompts": (list(override) if override is not None else standing_bodies),
+        "standing_prompts": [{"id": str(c["id"]), "body": c["body"]} for c in cards],
+        # 평소 지시는 최근 다섯 개만 실립니다. 화면이 이 수를 모르면 여섯 번째
+        # 카드가 조용히 무시되고 사용자는 적어 둔 것이 지켜진다고 믿습니다.
+        "standing_prompt_limit": len(standing_bodies),
+        # 「추가 설정」 자유 입력. 평소 지시보다 뒤에 실려 우선합니다.
+        "extra_note": participant.delegate_prompt,
+        # `null` 이면 고른 적 없음(제한 없음), `[]` 면 아무것도 안 봄.
+        "sources": participant.allowed_sources,
+    }
+
+
 # ═══════════════════════════════════════════ 엔드포인트
+
+
+@api_view(["GET"])
+def prep(request, meeting_id):
+    """
+    준비 화면 한 번에.
+
+    헤더·논쟁점·입장·설정을 한 응답으로 내려줍니다. 화면이 네 번 부르면 그 사이
+    불참을 취소한 경우 헤더는 `참석 예정` 인데 아래는 대리인 설정을 그리고 있는
+    상태가 나옵니다.
+    """
+    meeting, p = participant_of(request.user, meeting_id)
+    return Response({
+        "header": header_of(meeting, p, request.user),
+        "debate": debate_block(meeting, request.user),
+        "agent_setup": setup_block(p, request.user),
+    })
 
 
 @api_view(["POST", "DELETE"])
