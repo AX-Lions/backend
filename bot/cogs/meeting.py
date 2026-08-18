@@ -1,4 +1,3 @@
-import re
 import logging
 from datetime import datetime, timezone
 
@@ -58,12 +57,7 @@ class MeetingCog(commands.Cog):
             log.warning("스레드(%s) 안내 메시지 게시 실패: %s", thread_id, exc)
 
     # --------------------------------------------------
-    # /meeting-start용 예정 회의 자동완성
-    #
-    # 아직 meeting_start 명령에는 안 물려 있다 — Backend에
-    # GET /internal/v1/meetings/scheduled가 없어서 지금 연결하면 늘 빈
-    # 목록만 돈다. 엔드포인트가 붙으면 다음 커밋에서 명령을 이 방식으로
-    # 바꾼다.
+    # /meeting-start
     # --------------------------------------------------
 
     async def _meeting_id_autocomplete(
@@ -92,75 +86,77 @@ class MeetingCog(commands.Cog):
 
         return choices[:25]  # Discord 자동완성 후보 상한
 
-    # --------------------------------------------------
-    # /meeting-start
-    # --------------------------------------------------
-
-    _MENTION_RE = re.compile(r"<@!?(\d+)>")
-
-    @app_commands.command(name="meeting-start", description="회의 스레드를 만들고 참석자를 수집합니다.")
-    @app_commands.describe(
-        agenda="회의 안건",
-        members=(
-            "참석자 멘션. 비우면 본인만 등록됩니다. "
-            "/delegate-on 해둔 사람은 자동으로 대리 참석 처리됩니다."
-        ),
-    )
-    async def meeting_start(self, interaction: discord.Interaction, agenda: str, members: str = ""):
+    @app_commands.command(name="meeting-start", description="예정된 회의의 스레드를 엽니다.")
+    @app_commands.describe(meeting_id="열 회의를 고르세요. 입력하면 예정된 회의가 자동완성됩니다.")
+    @app_commands.autocomplete(meeting_id=_meeting_id_autocomplete)
+    @app_commands.guild_only()
+    async def meeting_start(self, interaction: discord.Interaction, meeting_id: str):
         await interaction.response.defer()
 
-        # thread 생성
+        # 제목은 Backend가 갖고 있는 예정된 회의에서 나온다 — 이 시점엔 아직 모르니
+        # 임시 이름으로 스레드부터 만들고, 응답을 받은 뒤 실제 제목으로 바꾼다.
         thread = await interaction.channel.create_thread(
-            name=(f"[회의] "f"{datetime.now().strftime('%Y%m%d')} | {agenda}")[:100],
+            name=f"[회의] {datetime.now().strftime('%Y%m%d')}",
             type=discord.ChannelType.public_thread,
         )
 
-        invited_ids = {interaction.user.id}
+        result = await self.backend.post("/internal/v1/meetings/start",
+            json={
+                "guild_id": str(interaction.guild_id),
+                "meeting_id": meeting_id,
+                "thread_id": str(thread.id),
+            }
+        )
 
-        invited_ids.update(int(m) for m in self._MENTION_RE.findall(members))
+        if result is None:
+            await interaction.followup.send(
+                f"스레드는 만들었지만 회의 연결에 실패했습니다: {thread.mention}\n"
+                "잠시 후 다시 시도하거나, 안 쓰는 스레드는 정리해주세요.", ephemeral=True
+            )
+            return
 
-        participants: dict[str, str] = {
-            str(user_id): ("delegated" if str(user_id) in self.delegate_on_users else "present")
-            for user_id in invited_ids
-        }
+        error = get_error(result)
+        if error:
+            await interaction.followup.send(
+                f"스레드는 만들었지만 회의 연결에 실패했습니다: {thread.mention}\n"
+                f"{error.get('message', '')}", ephemeral=True
+            )
+            return
 
+        title = result.get("title", "회의")
+
+        try:
+            await thread.edit(name=(f"[회의] {datetime.now().strftime('%Y%m%d')} | {title}")[:100])
+        except discord.HTTPException as exc:
+            log.warning("스레드(%s) 이름 변경 실패: %s", thread.id, exc)
+
+        participants = result.get("participants", [])
         self.active_meeting_threads[thread.id] = {
-            "agenda": agenda,
+            "agenda": title,
             "started_at": self._now_iso(),
             "channel_id": interaction.channel_id,
             "starter_id": interaction.user.id,
-            "participants": participants,
+            "meeting_id": meeting_id,
+            "participants": {
+                p["discord_user_id"]: ("delegated" if p.get("delegated") else "present")
+                for p in participants if p.get("discord_user_id")
+            },
         }
 
         announcement = (
-            f"🟢 **회의가 시작되었습니다** · 안건: {agenda}\n"
+            f"🟢 **회의가 시작되었습니다** · 안건: {title}\n"
             f"대화는 이 스레드에 남겨주세요. 끝나면 이 스레드 안에서 "
             f"`/meeting-end`를 실행하면 Backend가 요약을 정리합니다."
         )
 
-        delegated = [uid for uid, status in participants.items() if status == "delegated"]
+        delegated = [p["discord_user_id"] for p in participants
+                    if p.get("delegated") and p.get("discord_user_id")]
 
         if delegated:
             mentions = ", ".join(f"<@{uid}>" for uid in delegated)
             announcement += f"\n🤖 대리 참석이 켜져 있어 AI 대리인이 대신 참석합니다: {mentions}"
 
         await thread.send(announcement)
-
-        result = await self.backend.post("/internal/v1/meetings/start",
-            json={
-                "guild_id": str(interaction.guild_id),
-                "text_channel_id": str(interaction.channel_id),
-                "thread_id": str(thread.id),
-                "agenda": agenda,
-                "participants": [
-                    {
-                        "discord_user_id": uid,
-                        "status": status
-                    }
-                    for uid, status in participants.items()
-                ],
-            }
-        )
 
         await interaction.followup.send(f"회의 스레드를 만들었습니다: {thread.mention}")
 
