@@ -8,6 +8,7 @@
 from datetime import timedelta
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -20,11 +21,11 @@ from apps.common.permissions import meeting_access, project_membership
 from apps.common.views import listing
 from config.errors import BordoError
 
-from .models import (Agenda, AiBriefing, Attendance, BriefingConfirmation,
-                     BriefingRequest, FlowCategory, FlowContentType, FlowEdge, FlowSource,
-                     FlowFilterPreset, Meeting, MeetingDocumentRef,
-                     MeetingParticipant, MeetingStatus, MeetingSummary, Surface,
-                     Utterance)
+from .models import (DELEGATE_SOURCES, Agenda, AiBriefing, Attendance,
+                     BriefingConfirmation, BriefingRequest, FlowCategory,
+                     FlowContentType, FlowEdge, FlowFilterPreset, FlowSource,
+                     Meeting, MeetingParticipant, MeetingStatus, MeetingSummary,
+                     Surface, Utterance)
 from .serializers import (AgendaSerializer, AiBriefingSerializer,
                           BriefingConfirmationSerializer, BriefingRequestSerializer,
                           DocumentRefSerializer, FlowEdgeSerializer,
@@ -112,6 +113,48 @@ def meeting_detail(request, meeting_id):
                      "restorable_until": timezone.now() + timedelta(days=30)})
 
 
+def _parse_sources(data):
+    """
+    불참 팝업이 고른 자료 범위.
+
+    키가 아예 없으면 `None` 을 돌려 **직전 값을 그대로 둡니다.** 빈 배열로
+    덮으면 Discord 등 다른 경로로 켜 둔 범위가 저장 한 번에 전부 꺼집니다.
+
+    빈 배열은 그대로 저장합니다 — "대리인은 보내되 내 기록은 쓰지 마라" 는
+    성립하는 선택이라 `아무것도 안 고름` 을 오류로 막지 않습니다.
+    """
+    if "sources" not in data:
+        return None
+    raw = data.get("sources")
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        raise BordoError("VALIDATION_ERROR", "sources 는 배열이어야 합니다.",
+                         details={"allowed": list(DELEGATE_SOURCES)})
+    picked = [str(v).strip().lower() for v in raw if str(v).strip()]
+    bad = [v for v in picked if v not in DELEGATE_SOURCES]
+    if bad:
+        raise BordoError("VALIDATION_ERROR", "쓸 수 없는 자료 종류입니다.",
+                         details={"invalid": bad, "allowed": list(DELEGATE_SOURCES)})
+    # 화면 순서로 맞춰 둡니다. 고른 순서대로 저장하면 같은 조합인데 응답이
+    # 매번 다른 순서로 나가 팝업을 다시 열 때 칸 순서가 흔들립니다.
+    return [s for s in DELEGATE_SOURCES if s in picked]
+
+
+def delegation_of(participant):
+    """
+    홈 · 불참 팝업이 읽는 대리 참석 상태.
+
+    참석자가 아니면 `None` 입니다 — 화면은 이 값으로 `불참 등록` 버튼을 낼지
+    회의로 가는 링크만 낼지 가릅니다. 빈 객체를 주면 남의 회의에도 버튼이 뜹니다.
+    """
+    if participant is None:
+        return None
+    return {"delegated": participant.delegated,
+            "prompt": participant.delegate_prompt,
+            "sources": participant.delegate_sources}
+
+
 @api_view(["POST"])
 def delegate(request, meeting_id):
     """
@@ -125,13 +168,21 @@ def delegate(request, meeting_id):
     if not p:
         raise BordoError("STATE_NOT_FOUND", "이 회의의 참석자가 아닙니다.")
     enabled = bool(request.data.get("enabled", True))
+    sources = _parse_sources(request.data)
     p.delegated = enabled
     p.delegate_prompt = request.data.get("prompt", "") or ""
+    if sources is not None:
+        p.delegate_sources = sources
     p.attendance = Attendance.DELEGATED if enabled else Attendance.PENDING
-    p.save(update_fields=["delegated", "delegate_prompt", "attendance", "updated_at"])
+    p.save(update_fields=["delegated", "delegate_prompt", "delegate_sources",
+                          "attendance", "updated_at"])
     return Response({"meeting_id": str(meeting.id), "user_id": str(request.user.id),
                      "delegated": p.delegated, "attendance": p.attendance,
-                     "prompt": p.delegate_prompt})
+                     "prompt": p.delegate_prompt,
+                     # 보낸 것을 그대로 돌려줍니다. 화면이 응답으로 목록을 갱신하는데
+                     # 이 키가 없으면 방금 고른 범위가 `undefined` 로 덮여, 팝업을
+                     # 다시 열었을 때 전부 켜진 것으로 보입니다.
+                     "sources": p.delegate_sources})
 
 
 # ─────────────────────────────────────────── 플로우
@@ -329,9 +380,9 @@ def project_flow(request, project_id):
     """
     project, _ = project_membership(request.user, project_id)
 
-    to_at = parse_dt(request.query_params.get("to"), "to") or timezone.now()
-    from_at = (parse_dt(request.query_params.get("from"), "from")
-               or to_at - timedelta(days=7))
+    # 기본 구간은 좌측 인덱스와 한 곳에서 정합니다. 따로 두면 한쪽만 고쳤을 때
+    # 인덱스의 문서를 눌러도 강조될 화살표가 판에 없습니다.
+    from_at, to_at = _work_period(request.query_params)
     if from_at > to_at:
         raise BordoError("VALIDATION_ERROR", "from 이 to 보다 뒤입니다.")
 
@@ -377,16 +428,43 @@ def project_flow(request, project_id):
     })
 
 
+def _flag(raw, default):
+    """쿼리의 불리언. 안 오면 기본값이고, `false` · `0` · `no` 만 거짓입니다."""
+    if raw is None or raw == "":
+        return default
+    return str(raw).strip().lower() not in ("false", "0", "no")
+
+
+def _work_period(params):
+    """
+    작업 플로우의 조회 구간. `project_flow` 와 **같은 기본값**이어야 합니다.
+
+    좌측 인덱스와 캔버스가 다른 구간을 보면, 인덱스에 있는 문서를 눌러도
+    강조될 화살표가 판에 없습니다.
+    """
+    to_at = parse_dt(params.get("to"), "to") or timezone.now()
+    from_at = parse_dt(params.get("from"), "from") or to_at - timedelta(days=7)
+    return from_at, to_at
+
+
 @api_view(["GET"])
 def indexes(request, meeting_id):
-    """좌측 인덱스. 작업 모드는 문서, 회의 모드는 안건."""
+    """
+    좌측 인덱스. 작업 모드는 문서, 회의 모드는 안건.
+
+    ## 작업 모드는 회의가 아니라 프로젝트·기간으로 봅니다
+
+    경로에 회의 id 가 붙어 있지만 **작업 엣지에는 회의가 없습니다**
+    (`project_flow` 참고 — 작업 플로우의 스코프는 기간입니다). 회의로 좁히면
+    조건에 맞는 행이 하나도 없어 이 목록은 언제나 빈 배열이었습니다.
+    회의 id 는 어느 프로젝트인지를 알아내는 데만 씁니다.
+    """
     meeting = meeting_access(request.user, meeting_id)
     cat = _resolve_category(request.query_params.get("category"))
-    edges = FlowEdge.objects.filter(meeting=meeting, category=cat)
 
     if cat == FlowCategory.MEETING:
         edge_map = {}
-        for e in edges:
+        for e in FlowEdge.objects.filter(meeting=meeting, category=cat):
             if e.agenda_id:
                 edge_map.setdefault(e.agenda_id, []).append(e.id)
         rows = Agenda.objects.filter(meeting=meeting)
@@ -395,11 +473,19 @@ def indexes(request, meeting_id):
             "related_edge_ids": [str(i) for i in edge_map.get(a.id, [])],
         } for a in rows]))
 
+    from_at, to_at = _work_period(request.query_params)
     edge_map = {}
-    for e in edges:
-        if e.document_id:
-            edge_map.setdefault(e.document_id, []).append(e.id)
-    docs = MeetingDocumentRef.objects.filter(id__in=list(edge_map.keys()))
+    for e in FlowEdge.objects.filter(project_id=meeting.project_id, category=cat,
+                                     occurred_at__range=(from_at, to_at)):
+        if e.work_document_id:
+            edge_map.setdefault(e.work_document_id, []).append(e.id)
+
+    from apps.documents.models import Document, Visibility
+
+    # 비공개 문서는 목록에서 뺍니다. 작업 플로우는 팀 관점 화면이라 제목만
+    # 스쳐도 비공개로 둔 뜻이 사라집니다 — 남의 것이면 존재도 알리지 않습니다.
+    docs = Document.objects.filter(id__in=list(edge_map.keys())).filter(
+        Q(visibility=Visibility.TEAM) | Q(owner=request.user))
     return Response(listing([{
         "id": str(d.id), "label": d.title, "kind": "DOCUMENT",
         "related_edge_ids": [str(i) for i in edge_map.get(d.id, [])],
@@ -526,7 +612,16 @@ def ai_briefing(request, meeting_id):
     requests_to_me = BriefingRequest.objects.filter(meeting=meeting, user=request.user,
                                                     accepted_at__isnull=True)
 
-    if briefing.read_at is None:
+    # `mark_read=false` 로 읽음 처리를 끕니다.
+    #
+    # 플로우 화면은 브리핑 패널을 열든 말든 회의를 열 때 이것을 부릅니다. 그래서
+    # 회의 화면에 잠깐 들른 것만으로 홈의 `Bordo 브리핑 보러가기` 가 사라졌습니다 —
+    # 사용자는 읽은 적이 없는데 읽은 것이 됩니다. 서버는 패널을 열었는지 알 수
+    # 없으므로 **부르는 쪽이 알려 줘야 합니다.**
+    #
+    # 기본은 여전히 읽음입니다. 기본을 끄면 이 값을 안 보내는 쪽에서는 브리핑이
+    # 영영 안 읽힌 상태로 남아 홈 팝업이 매번 뜹니다.
+    if briefing.read_at is None and _flag(request.query_params.get("mark_read"), True):
         briefing.read_at = timezone.now()
         briefing.save(update_fields=["read_at"])
     return Response(AiBriefingSerializer(briefing, context={

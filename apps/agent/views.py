@@ -8,10 +8,12 @@ from apps.common.views import listing
 from config.errors import BordoError
 
 from .models import (AgentConversation, AgentMessage, AgentPrompt, AgentSettings,
-                     AgentSettingsVersion, PendingQuestion)
+                     AgentSettingsVersion, AgentTone, PendingQuestion,
+                     agent_display_names)
 from .serializers import (AgentConversationSerializer, AgentPromptSerializer,
                           AgentSettingsSerializer)
 
+#: 판정 스위치. 이것만 `active_version` 을 올립니다.
 BOOL_FIELDS = ("mention_feasibility", "allow_schedule_change",
                "allow_midmeeting_question", "disclose_work_plan_thought")
 
@@ -19,6 +21,23 @@ BOOL_FIELDS = ("mention_feasibility", "allow_schedule_change",
 def get_settings(user):
     obj, _ = AgentSettings.objects.get_or_create(user=user)
     return obj
+
+
+def _read_plain(data, obj):
+    """말투·호칭. 값 검증까지 여기서 끝냅니다."""
+    out = {}
+    if "tone" in data:
+        tone = str(data["tone"] or "").strip().upper()
+        if tone not in AgentTone.values:
+            raise BordoError("VALIDATION_ERROR", "쓸 수 없는 말투입니다.",
+                             details={"allowed": list(AgentTone.values)})
+        out["tone"] = tone
+    if "agent_name" in data:
+        # 저장 전에 자릅니다. 넘겨 놓고 DB 에서 터지면 화면은 200 을 못 받고,
+        # 사용자는 이름을 왜 못 바꿨는지 알 수 없습니다.
+        name = str(data["agent_name"] or "").strip()[:40]
+        out["agent_name"] = name
+    return {k: v for k, v in out.items() if v != getattr(obj, k)}
 
 
 @api_view(["GET", "PATCH"])
@@ -35,17 +54,30 @@ def settings_view(request):
             if new != old:
                 changed[f] = {"from": old, "to": new}
                 setattr(obj, f, new)
+
+    plain = _read_plain(request.data, obj)
+    for f, new in plain.items():
+        changed[f] = {"from": getattr(obj, f), "to": new}
+        setattr(obj, f, new)
+
     if not changed:
         # 바뀐 게 없으면 버전을 올리지 않습니다. 판정 이력이 의미 없이 불어납니다.
         return Response({"settings": AgentSettingsSerializer(obj).data,
                          "previous_version": obj.active_version, "changed": {}})
 
+    previous = obj.active_version
+    # 말투·호칭만 바뀐 저장은 버전을 올리지 않습니다. 올리면 실제로는 아무
+    # 판정 기준도 안 바뀐 버전이 이력 사이사이에 끼어, `그때 그 기준으로
+    # 판정했다` 를 되짚을 때 잡음이 됩니다.
+    bumps = any(f in changed for f in BOOL_FIELDS)
     with transaction.atomic():
-        previous = obj.active_version
-        obj.active_version += 1
+        if bumps:
+            obj.active_version += 1
         obj.save()
-        AgentSettingsVersion.objects.create(
-            user=request.user, version=obj.active_version, snapshot=obj.as_snapshot())
+        if bumps:
+            AgentSettingsVersion.objects.create(
+                user=request.user, version=obj.active_version,
+                snapshot=obj.as_snapshot())
     return Response({"settings": AgentSettingsSerializer(obj).data,
                      "previous_version": previous, "changed": changed})
 
@@ -185,11 +217,14 @@ def agent_lookup_detail(request, lookup_id):
         raise BordoError("STATE_NOT_FOUND", "조회 기록을 찾을 수 없습니다.")
     project_membership(request.user, row.project_id)
 
+    names = agent_display_names({row.asker_id, row.target_id})
     return Response({
         "id": str(row.id),
         "topic": row.topic,
-        "asker": {"user_id": str(row.asker_id), "name": f"{row.asker.name}의 Bordo"},
-        "target": {"user_id": str(row.target_id), "name": f"{row.target.name}의 Bordo"},
+        # 호칭 조립은 한 곳에서만 합니다. 여기서 따로 만들면 본인이 정해 둔
+        # 대리인 이름이 이 화면에서만 기본 호칭으로 보입니다.
+        "asker": {"user_id": str(row.asker_id), "name": names[row.asker_id]},
+        "target": {"user_id": str(row.target_id), "name": names[row.target_id]},
         "reason": row.reason,
         "question": row.question,
         # 유보하면 빕니다. 화면은 "확인된 내용" 자리를 비워 두고 안내를 띄웁니다.

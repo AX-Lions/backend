@@ -15,6 +15,7 @@ from rest_framework.response import Response
 from apps.common.display import full_stamp, short_stamp, time_range, user_tz
 from apps.meetings.models import (AiBriefing, Attendance, Meeting, MeetingParticipant,
                                   MeetingStatus, MeetingSummary)
+from apps.meetings.views import delegation_of
 from apps.orgs.models import Favorite, Project, ProjectMember, RecentProject, TeamMember
 from apps.orgs.serializers import ProjectSummarySerializer
 from apps.orgs.views import project_context
@@ -103,10 +104,13 @@ def home(request):
     # ── 오늘 일정 — 회의가 Discord 에서 열리므로 채널 정보를 같이 내려줍니다
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     end = start + timezone.timedelta(days=1)
-    today = (Meeting.objects
-             .filter(project_id__in=project_ids, scheduled_at__range=(start, end))
-             .exclude(status=MeetingStatus.ENDED)
-             .order_by("scheduled_at")[:20])
+    today = list(Meeting.objects
+                 .filter(project_id__in=project_ids, scheduled_at__range=(start, end))
+                 .exclude(status=MeetingStatus.ENDED)
+                 .order_by("scheduled_at")[:20])
+    # 일정 행마다 참석 정보를 다시 물으면 스무 번 조회합니다. 한 번에 모읍니다.
+    my_rows = {p.meeting_id: p for p in MeetingParticipant.objects
+               .filter(meeting_id__in=[m.id for m in today], user=user)}
     today_schedule = [{
         "at": m.scheduled_at,
         "ends_at": m.scheduled_at + timezone.timedelta(minutes=m.duration_min),
@@ -128,6 +132,13 @@ def home(request):
                     "url": f"https://discord.com/channels/{m.discord_channel_id}"}
                    if m.discord_channel_id
                    else {"kind": "OPEN_MEETING", "label": "보러가기", "url": None}),
+        # 행의 `회의에 참여하지 않아요` 버튼. **이 서비스의 시작점입니다** —
+        # "내가 없는 동안 무슨 일이 있었지" 에 답하려면 없을 것을 먼저 등록해야
+        # 하고, 그 자리가 첫 화면의 오늘 일정입니다.
+        #
+        # 참석자가 아니면 `null` 입니다. 빈 객체를 주면 남의 회의에도 버튼이 떠서,
+        # 눌러 봐야 `이 회의의 참석자가 아닙니다` 로 막힙니다.
+        "delegation": delegation_of(my_rows.get(m.id)),
     } for m in today]
 
     # ── 최근 회의 요약 카드
@@ -176,6 +187,9 @@ def home(request):
 
     return Response({
         "user_name": user.name,
+        # 사이드바 하단 프로필. 없으면 화면이 이름 첫 글자로 원을 그립니다 —
+        # 그 판단을 하려면 값이 오기는 해야 합니다.
+        "user_avatar_url": user.avatar_url or None,
         # 문구는 그대로 두고 `Zero 브리핑 보러가기` 버튼이 함께 뜹니다.
         # 문구를 갈아끼우면 이름으로 맞이하는 인사가 사라집니다.
         "greeting_mode": "BRIEFING_AVAILABLE" if briefing["exists"] else "WELCOME",

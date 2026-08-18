@@ -293,11 +293,43 @@ if MTG:
 
 home = call("GET", "/home", label="홈")
 assert "shortcuts" in home, "shortcuts (Zero/Discord 바로가기) 가 없습니다"
+assert "user_avatar_url" in home, "사이드바 프로필 아바타 자리가 없습니다"
 print(f"     Zero 방 = {home['shortcuts']['agent_room_id']}, "
       f"Discord 연결 = {home['shortcuts']['discord']['connected']}")
 if home["today_schedule"]:
-    a = home["today_schedule"][0]["action"]
+    row = home["today_schedule"][0]
+    a = row["action"]
     print(f"     오늘 일정 버튼 = {a['label']} ({a['kind']})")
+    # 이 키가 없으면 홈의 `회의에 참여하지 않아요` 버튼이 **절대 안 뜹니다.**
+    # 화면은 이 값의 유무로 불참 등록 버튼과 회의 링크를 가릅니다.
+    assert "delegation" in row, "today_schedule 에 delegation 이 없습니다"
+
+    if row["delegation"] is not None:
+        mid = row["meeting_id"]
+        saved = call("POST", f"/meetings/{mid}/delegate",
+                     {"enabled": True, "sources": ["thought", "work"], "prompt": "테스트"},
+                     label="불참 등록 (자료 범위 포함)")
+        # 고른 범위가 응답에 그대로 실려야 화면이 목록을 갱신할 수 있습니다.
+        # 없으면 방금 고른 것이 undefined 로 덮여 전부 켜진 것처럼 보입니다.
+        assert saved["sources"] == ["work", "thought"], \
+            f"자료 범위가 화면 순서로 안 돌아옵니다: {saved.get('sources')}"
+        again = call("GET", "/home", label="홈 (불참 등록 반영 확인)")
+        row2 = next(r for r in again["today_schedule"] if r["meeting_id"] == mid)
+        assert row2["delegation"]["sources"] == ["work", "thought"], "홈에 반영이 안 됩니다"
+        call("POST", f"/meetings/{mid}/delegate",
+             {"enabled": True, "sources": ["secret"]}, expect=400,
+             label="없는 자료 종류 → 400")
+        call("POST", f"/meetings/{mid}/delegate",
+             {"enabled": False, "prompt": ""}, label="대리 참석 취소")
+
+call("PATCH", "/me/agent/settings", {"tone": "SHOUTY"}, expect=400,
+     label="없는 말투 → 400")
+tone = call("PATCH", "/me/agent/settings", {"tone": "CONCISE", "agent_name": ""},
+            label="말투 저장")["settings"]
+assert tone["tone"] == "CONCISE", "말투가 저장되지 않았습니다"
+# 비워 두면 서버가 `{이름}의 Bordo` 를 만들어 줍니다. 화면이 직접 조립하면
+# 서버가 형식을 바꿨을 때 그 화면만 옛 형식으로 남습니다.
+assert tone["agent_display_name"].endswith("Bordo"), "기본 호칭을 서버가 안 만듭니다"
 if home["recent_meeting_summary"]:
     s = home["recent_meeting_summary"]
     print(f"     최근 회의 = {s['team_name']} / {s['title']} / 불참={s['missed']}")

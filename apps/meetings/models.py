@@ -138,6 +138,17 @@ class Attendance(models.TextChoices):
     DELEGATED = "DELEGATED", "대리 참석"
 
 
+#: 불참 팝업의 `대리인이 근거로 쓸 자료` 체크박스 4칸.
+#:
+#: 값이 검색 근거의 `source_type` 과 **글자 그대로 같아야** 합니다
+#: (`apps/agent/services/skills/search_records.py`). 다르면 저장은 되는데
+#: 걸러지지 않아, 사용자는 껐다고 믿는 자료가 그대로 나갑니다.
+#:
+#: `meeting`(회의 발언)은 여기 없습니다. 회의에서 오간 말은 그 자리에 있던
+#: 사람이 모두 들은 것이라 대리인이 인용해도 새로 공개되는 것이 없습니다.
+DELEGATE_SOURCES = ("work", "plan", "thought", "document")
+
+
 class MeetingParticipant(TimeStamped):
     meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE,
                                 related_name="participants")
@@ -149,6 +160,13 @@ class MeetingParticipant(TimeStamped):
     delegated = models.BooleanField(default=False, help_text="대리 참석 활성화 여부")
     delegate_prompt = models.TextField(
         blank=True, default="", help_text="이 회의에 한정된 지시. 비면 기본 프롬프트를 씁니다.")
+    #: 이 회의에서 대리인이 근거로 쓸 자료 종류. `work` · `plan` · `thought` · `document`.
+    #:
+    #: **`None` 과 `[]` 는 다릅니다.** `None` 은 고른 적이 없다(제한 없음)이고
+    #: `[]` 는 아무것도 쓰지 말라는 뜻입니다. 둘을 합치면 "대리인은 보내되 내
+    #: 기록은 쓰지 마라" 를 표현할 자리가 없어집니다 — 불참 팝업이 그 상태를
+    #: 실제로 만들 수 있게 열어 둔 조합입니다.
+    delegate_sources = models.JSONField(null=True, blank=True, default=None)
 
     class Meta:
         db_table = "meeting_participant"
@@ -242,6 +260,15 @@ class FlowEdge(UUIDModel, TimeStamped):
 
     document = models.ForeignKey("meetings.MeetingDocumentRef", on_delete=models.SET_NULL,
                                  null=True, blank=True)
+    #: 작업 모드 좌측 인덱스가 묶는 문서.
+    #:
+    #: 위 `document` 와 **다른 것**입니다. 저쪽은 회의에서 오간 문서의 스냅샷
+    #: (`MeetingDocumentRef`)이고, 이쪽은 프로젝트에 실제로 있는 문서입니다.
+    #: 작업 엣지에는 회의가 없어 스냅샷을 만들 자리가 없습니다 — 이 칸이 없으면
+    #: 작업 모드 인덱스는 무엇으로도 묶이지 않아 언제나 빈 목록입니다.
+    work_document = models.ForeignKey("documents.Document", on_delete=models.SET_NULL,
+                                      null=True, blank=True,
+                                      related_name="flow_edges")
     agenda = models.ForeignKey(Agenda, on_delete=models.SET_NULL, null=True, blank=True,
                                related_name="flow_edges")
     occurred_at = models.DateTimeField()

@@ -202,6 +202,28 @@ class EntrypointTest(Base):
         self.assertTrue(any("DB 질문" in s for s in seen),
                         "사전 지시가 프롬프트에 실리지 않았습니다")
 
+    def test_meeting_scoped_sources_reach_the_run(self):
+        """
+        불참 팝업에서 고른 자료 범위가 실행 스냅샷까지 가야 합니다.
+
+        저장만 하고 안 넘기면 사용자는 껐다고 믿는 기록이 그대로 회의에
+        나갑니다. 스냅샷에 남아야 나중에 "그때 이 범위로 판정했다" 도 됩니다.
+        """
+        MeetingParticipant.objects.filter(user=self.absent).update(
+            delegate_sources=["work"])
+        self._run(FakeLLM(LLMResponse(text="STATUS")))
+        run = AgentRun.objects.get()
+        self.assertEqual(run.settings_snapshot.get("delegate_sources"), ["work"])
+
+    def test_unset_sources_leave_the_snapshot_alone(self):
+        """
+        고른 적이 없으면(`None`) 제한이 없습니다. 빈 목록을 넣어 두면 불참
+        등록을 안 한 회의에서 대리인이 아무 기록도 못 씁니다.
+        """
+        self._run(FakeLLM(LLMResponse(text="STATUS")))
+        run = AgentRun.objects.get()
+        self.assertNotIn("delegate_sources", run.settings_snapshot)
+
     def test_nobody_targeted_does_nothing(self):
         MeetingParticipant.objects.update(delegated=False)
         self._run(FakeLLM())

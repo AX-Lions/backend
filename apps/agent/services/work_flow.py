@@ -65,7 +65,7 @@ def _teammates(project_id, exclude_user_id):
 
 
 def record(*, project_id, actor, content_type, label, targets=None,
-           source="", source_url="", occurred_at=None):
+           source="", source_url="", document=None, occurred_at=None):
     """
     작업 화살표 하나를 남깁니다.
 
@@ -104,6 +104,9 @@ def record(*, project_id, actor, content_type, label, targets=None,
                 label=(label or "")[:_LABEL_MAX],
                 direction_label=f"{src['name']} → {names}"[:200],
                 extra_participant_count=max(0, len(dsts) - 3),
+                # 좌측 인덱스가 이 값으로 화살표를 묶습니다. 안 넣으면 문서를
+                # 고쳐도 인덱스에 그 문서가 안 뜹니다.
+                work_document=document,
                 occurred_at=occurred_at or timezone.now(),
             )
     except Exception:                                          # noqa: BLE001
@@ -213,7 +216,7 @@ def on_document_saved(sender, instance, created, **kwargs):
         FlowContentType.WORK if created else FlowContentType.REVISION)
 
     record(project_id=instance.project_id, actor=instance.owner,
-           content_type=ctype, label=instance.title,
+           content_type=ctype, label=instance.title, document=instance,
            source=_source_of(instance), source_url=_url_of(instance))
 
 

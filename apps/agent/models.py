@@ -13,6 +13,20 @@ from apps.common.models import TimeStamped, UUIDModel
 from apps.meetings.models import FlowSource
 
 
+class AgentTone(models.TextChoices):
+    """
+    대리인 말투. 개인 설정의 `대리인 말투` 세 칸과 1:1 입니다.
+
+    판정이 아니라 **표현**입니다. 무엇을 말해도 되는가는 `policy.py` 가 정하고,
+    이 값은 같은 내용을 어떤 투로 옮길지만 바꿉니다. 그래서 이 값을 고쳐도
+    `active_version` 은 오르지 않습니다 — 판정 이력에 말투 변경이 섞이면
+    "그때 그 기준으로 판정했다" 를 되짚을 때 잡음이 됩니다.
+    """
+    FORMAL = "FORMAL", "정중하게"
+    FRIENDLY = "FRIENDLY", "친근하게"
+    CONCISE = "CONCISE", "간결하게"
+
+
 class AgentSettings(TimeStamped):
     """
     세부 설정 4종.
@@ -27,10 +41,21 @@ class AgentSettings(TimeStamped):
     allow_schedule_change = models.BooleanField(default=True)        # 일정 수정 여부
     allow_midmeeting_question = models.BooleanField(default=False)   # 회의 중간 질문
     disclose_work_plan_thought = models.BooleanField(default=True)   # 작업/계획/생각 공개
+    tone = models.CharField(max_length=10, choices=AgentTone.choices,
+                            default=AgentTone.FORMAL)
+    #: 대리인 호칭. 비면 `{이름}의 Bordo` 를 서버가 만듭니다(`display_name`).
+    #:
+    #: 조립을 **서버 한 곳에서만** 합니다. 화면마다 붙이면 사람 이름을 바꿨을 때
+    #: 어떤 화면은 새 이름, 어떤 화면은 옛 이름으로 남습니다.
+    agent_name = models.CharField(max_length=40, blank=True, default="")
     active_version = models.PositiveIntegerField(default=1)
 
     class Meta:
         db_table = "agent_settings"
+
+    @property
+    def display_name(self):
+        return self.agent_name or default_agent_name(self.user)
 
     def as_snapshot(self):
         return {
@@ -38,8 +63,55 @@ class AgentSettings(TimeStamped):
             "allow_schedule_change": self.allow_schedule_change,
             "allow_midmeeting_question": self.allow_midmeeting_question,
             "disclose_work_plan_thought": self.disclose_work_plan_thought,
+            # 판정에는 안 쓰지만 스냅샷에는 남깁니다. 나중에 그 발언이 왜 그런
+            # 투였는지 되짚을 자리가 여기 말고는 없습니다.
+            "tone": self.tone,
             "active_version": self.active_version,
         }
+
+
+def _named(name: str) -> str:
+    """
+    `{이름}의 Bordo`.
+
+    `CLAUDE.md` 의 호칭 규칙입니다 — `AI 대리인` 은 화면 어디에도 없는 낱말이라
+    쓰지 않습니다. 이름이 비어 있는 계정도 있어 그때는 `내 Bordo` 로 둡니다.
+    """
+    name = (name or "").strip()
+    return f"{name}의 Bordo" if name else "내 Bordo"
+
+
+def default_agent_name(user) -> str:
+    """본인이 따로 정하지 않았을 때 불릴 이름."""
+    return _named(getattr(user, "name", ""))
+
+
+def agent_display_name(user) -> str:
+    """이 사람의 대리인을 화면에서 뭐라고 부르는가. 설정이 없으면 기본 호칭."""
+    row = (AgentSettings.objects.filter(user=user)
+           .values_list("agent_name", flat=True).first())
+    return (row or "").strip() or default_agent_name(user)
+
+
+def agent_display_names(user_ids) -> dict:
+    """
+    여러 사람 몫을 한 번에.
+
+    채팅 사이드바는 대리인 방을 여러 개 그립니다. 방마다 따로 물으면 목록 하나에
+    조회가 방 수만큼 붙습니다.
+    """
+    ids = list(user_ids)
+    if not ids:
+        return {}
+    from apps.accounts.models import User
+
+    # 탈퇴한 사람과의 방도 목록에 남습니다. `all_objects` 로 봐야 이름 없는
+    # 방이 되지 않습니다.
+    names = dict(User.all_objects.filter(id__in=ids).values_list("id", "name"))
+    custom = dict(AgentSettings.objects.filter(user_id__in=ids)
+                  .values_list("user_id", "agent_name"))
+    return {uid: ((custom.get(uid) or "").strip() or _named(names.get(uid, "")))
+            for uid in ids}
 
 
 class AgentSettingsVersion(UUIDModel, TimeStamped):

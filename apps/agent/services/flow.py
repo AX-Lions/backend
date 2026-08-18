@@ -59,9 +59,14 @@ def agent_node(owner) -> dict:
     `id` 표기와 호칭은 `seed_demo.py` 를 그대로 따릅니다.
     호칭이 `AI` 가 아니라 **`{이름}의 Bordo`** 인 이유는 `CLAUDE.md` 에 적혀
     있습니다 — `AI 대리인` 은 화면 어디에도 없는 낱말입니다.
+
+    본인이 개인 설정에서 이름을 정해 뒀으면 그것을 씁니다. 정해 두고도 플로우에
+    기본 호칭이 뜨면, 사용자는 이름이 저장되지 않은 줄 압니다.
     """
+    from ..models import agent_display_name
+
     return {"id": f"{owner.id}:agent", "kind": "AGENT",
-            "user_id": str(owner.id), "name": f"{owner.name}의 Bordo",
+            "user_id": str(owner.id), "name": agent_display_name(owner),
             "avatar_url": owner.avatar_url or None}
 
 

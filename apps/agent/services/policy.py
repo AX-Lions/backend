@@ -129,12 +129,30 @@ def can_disclose(evidence_item: dict, snapshot: dict | None) -> bool:
 
     `private` 문서는 설정과 무관하게 막습니다 — 본인이 비공개로 표시한 것을
     대리인이 대신 공개하면 설정 화면의 어떤 스위치로도 되돌릴 수 없습니다.
+
+    ## 개인 설정과 회의별 범위는 **둘 다** 통과해야 합니다
+
+    개인 설정(`disclose_work_plan_thought`)은 평소 기준이고, 불참 팝업에서 고른
+    `delegate_sources` 는 이 회의에서만 쓰는 범위입니다. 회의에서 켠다고 개인
+    설정을 뚫지 못하고, 개인 설정이 켜져 있어도 이 회의에서 끈 것은 안 나갑니다.
+
+    `None` 은 고른 적이 없다(제한 없음)이고 `[]` 는 아무것도 쓰지 말라는 뜻입니다.
+    둘을 같게 다루면 "대리인은 보내되 내 기록은 쓰지 마라" 가 성립하지 않습니다.
     """
     if evidence_item.get("visibility") == "private":
         return False
 
-    if evidence_item.get("source_type") in ("work", "plan", "thought"):
-        s = {**DEFAULTS, **(snapshot or {})}
-        return bool(s.get("disclose_work_plan_thought"))
+    source_type = evidence_item.get("source_type")
+    s = {**DEFAULTS, **(snapshot or {})}
+
+    if source_type in ("work", "plan", "thought"):
+        if not s.get("disclose_work_plan_thought"):
+            return False
+
+    allowed = s.get("delegate_sources")
+    # 회의 발언(`meeting`)은 범위 밖입니다. 그 자리에 있던 사람이 이미 다 들은
+    # 말이라 대리인이 인용해도 새로 공개되는 것이 없습니다.
+    if allowed is not None and source_type not in (None, "meeting"):
+        return source_type in allowed
 
     return True

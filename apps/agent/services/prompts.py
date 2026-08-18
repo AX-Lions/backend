@@ -58,9 +58,24 @@ _BY_INTENT = {
 }
 
 
+#: 개인 설정의 `대리인 말투` 세 칸.
+#:
+#: 말투는 **판정이 아니라 표현**이라 프롬프트에만 실립니다. 무엇을 말해도 되는지는
+#: `policy.py` 가 정하고, 여기서는 같은 내용을 어떤 투로 옮길지만 바꿉니다.
+#:
+#: 대리인은 본인 대신 말합니다. 평소 쓰는 투와 너무 다르면 회의에 있던 사람들이
+#: 그 말을 본인이 한 것으로 읽지 않습니다.
+_BY_TONE = {
+    "FORMAL": "정중한 존댓말로 말하십시오. `~합니다` · `~입니다` 로 끝맺습니다.",
+    "FRIENDLY": "친근한 존댓말로 말하십시오. `~해요` · `~예요` 로 끝맺고 딱딱한 표현은 피합니다.",
+    "CONCISE": "군더더기 없이 짧게 말하십시오. 한두 문장으로 끝내고 인사말은 붙이지 않습니다.",
+}
+
+
 def build_system(principal_name: str, *, intent: str = "",
                  meeting_title: str = "", project_name: str = "",
-                 delegate_prompt: str = "", constraints: list[str] | None = None) -> str:
+                 delegate_prompt: str = "", constraints: list[str] | None = None,
+                 tone: str = "") -> str:
     parts = [_BASE.format(principal=principal_name)]
 
     lines = []
@@ -70,6 +85,10 @@ def build_system(principal_name: str, *, intent: str = "",
         lines.append(f"- 회의: {meeting_title}")
     if lines:
         parts.append(_CONTEXT.format(lines="\n".join(lines)))
+
+    tone_note = _BY_TONE.get((tone or "").upper())
+    if tone_note:
+        parts.append(f"## 말투\n\n{tone_note}\n")
 
     note = _BY_INTENT.get(intent)
     if note:

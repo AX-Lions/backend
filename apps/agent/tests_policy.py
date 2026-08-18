@@ -100,3 +100,49 @@ class DiscloseTest(SimpleTestCase):
         """회의록은 이미 참석자가 함께 들은 내용이라 공개 스위치 대상이 아닙니다."""
         item = {"source_type": "meeting", "visibility": "team"}
         self.assertTrue(policy.can_disclose(item, ALL_OFF))
+
+
+class MeetingScopedSourcesTest(SimpleTestCase):
+    """
+    불참 팝업에서 고른 자료 범위.
+
+    개인 설정이 평소 기준이라면 이것은 **이 회의에서만** 쓰는 범위입니다.
+    저장만 하고 판정에 안 쓰면, 사용자는 껐다고 믿는 기록이 그대로 회의에
+    나갑니다 — 없는 것보다 나쁩니다.
+    """
+
+    def _snap(self, sources):
+        return {**ALL_ON, "delegate_sources": sources}
+
+    def test_only_the_picked_kinds_go_out(self):
+        snap = self._snap(["work"])
+        self.assertTrue(policy.can_disclose({"source_type": "work"}, snap))
+        self.assertFalse(policy.can_disclose({"source_type": "thought"}, snap))
+        self.assertFalse(policy.can_disclose({"source_type": "document"}, snap))
+
+    def test_never_picked_means_no_limit(self):
+        """
+        `None` 은 고른 적 없음입니다. `[]` 과 같게 다루면 불참 등록을 안 한
+        회의에서 대리인이 아무것도 못 씁니다.
+        """
+        self.assertTrue(policy.can_disclose({"source_type": "thought"}, ALL_ON))
+
+    def test_empty_means_nothing(self):
+        """"대리인은 보내되 내 기록은 쓰지 마라" 는 성립하는 선택입니다."""
+        snap = self._snap([])
+        self.assertFalse(policy.can_disclose({"source_type": "work"}, snap))
+        # 회의에서 오간 말은 그 자리에 있던 사람이 이미 다 들었습니다.
+        self.assertTrue(policy.can_disclose({"source_type": "meeting"}, snap))
+
+    def test_both_gates_must_pass(self):
+        """
+        회의에서 켠다고 개인 설정을 뚫지 못합니다. 뚫리면 개인 설정 화면의
+        스위치가 뜻을 잃습니다.
+        """
+        snap = {**ALL_OFF, "delegate_sources": ["work"]}
+        self.assertFalse(policy.can_disclose({"source_type": "work"}, snap))
+
+    def test_private_still_wins(self):
+        snap = self._snap(["document"])
+        self.assertFalse(policy.can_disclose(
+            {"source_type": "document", "visibility": "private"}, snap))

@@ -81,17 +81,26 @@ Intent_OTHER = policy.Intent.OTHER
 
 def run(*, principal, question: str, meeting=None, project_id=None,
         actor_id=None, asker=None, delegate_prompt: str = "", allow_private: bool = False,
+        delegate_sources=None,
         trace_id=None, hop_count: int = 0,
         client: LLMClient | None = None, registry=None) -> RunOutcome:
     """
     대리인 실행 한 번.
 
     `principal` 은 대리 대상(User), `actor_id` 는 질문한 사람입니다.
+
+    `delegate_sources` 는 **이 회의에서만** 쓰는 자료 범위입니다(불참 팝업의
+    체크박스). 스냅샷에 함께 실어 두면 `policy.can_disclose()` 가 개인 설정과
+    같은 자리에서 함께 봅니다 — 판정 경로를 둘로 나누면 한쪽만 통과하는 근거가
+    생깁니다.
     """
     client = client or default_client
     registry = registry or default_registry
 
     snapshot = _snapshot_of(principal)
+    if delegate_sources is not None:
+        # 스냅샷에 남겨야 나중에 "그때 이 범위로 판정했다" 를 되짚을 수 있습니다.
+        snapshot = {**snapshot, "delegate_sources": list(delegate_sources)}
     max_hops = dj_settings.BORDO.get("MAX_HOPS", 3)
 
     run_obj = AgentRun.objects.create(
@@ -144,6 +153,9 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             project_name=getattr(meeting, "project_name", ""),
             delegate_prompt=delegate_prompt,
             constraints=gate.constraints,
+            # 말투는 스냅샷에서 꺼냅니다. 여기서 설정을 다시 읽으면 실행 도중에
+            # 바뀐 값이 섞여, 남은 스냅샷과 실제로 쓴 프롬프트가 어긋납니다.
+            tone=snapshot.get("tone", ""),
         )
         ctx = SkillContext(
             principal_id=str(principal.id), actor_id=str(actor_id or principal.id),

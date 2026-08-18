@@ -69,6 +69,9 @@ def run_agent_for_utterance(utterance_id: str) -> None:
             actor_id=utterance.participant_id,
             asker=utterance.participant,
             delegate_prompt=target.delegate_prompt or "",
+            # 불참 팝업에서 고른 자료 범위. 저장만 하고 안 넘기면 사용자는
+            # 껐다고 믿는 기록이 그대로 회의에 나갑니다.
+            delegate_sources=target.delegate_sources,
         )
     except Exception:                                          # noqa: BLE001
         # 여기서 터지면 다음 발언도 처리되지 않습니다. 회의 중에 조용히 멈춰 있는
