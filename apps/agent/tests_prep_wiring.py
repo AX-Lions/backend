@@ -130,3 +130,53 @@ class StanceInPromptTest(Base):
         system = prompts.build_system("서재민",
                                       stances=[{"title": "쟁점", "body": "   "}])
         self.assertNotIn("미리 정해 둔 입장", system)
+
+
+class WriteGateTest(Base):
+    """
+    통째로 나가는 자리는 **하나라도 꺼져 있으면** 막습니다.
+
+    `send_message` 와 `ask_peer_agent` 는 승인 단계가 없어 되돌릴 자리가 없는데,
+    검색 스킬이 돌려준 원문이 이미 모델의 messages 에 들어가 있어 어느 종류가
+    섞였는지 코드가 가릴 수 없습니다.
+    """
+
+    ALL_ON = {"disclose_work": True, "disclose_plan": True, "disclose_thought": True}
+
+    def test_one_off_closes_the_wholesale_paths(self):
+        snap = {**self.ALL_ON, "disclose_thought": False}
+        for skill in ("send_message", "ask_peer_agent"):
+            self.assertTrue(react._may_write(skill, snap), skill)
+
+    def test_all_on_opens_them(self):
+        for skill in ("send_message", "ask_peer_agent"):
+            self.assertEqual(react._may_write(skill, self.ALL_ON), "", skill)
+
+    def test_legacy_snapshot_still_decides(self):
+        from apps.agent.services import policy
+        self.assertFalse(policy.fully_disclosed({"disclose_work_plan_thought": False}))
+        self.assertTrue(policy.fully_disclosed({"disclose_work_plan_thought": True}))
+
+    def test_per_item_disclosure_is_still_granular(self):
+        """근거 하나를 보는 판정은 낱개 그대로입니다 — 여기까지 막으면 너무 셉니다."""
+        from apps.agent.services import policy
+        snap = {**self.ALL_ON, "disclose_thought": False}
+        self.assertTrue(policy.can_disclose({"source_type": "work"}, snap))
+        self.assertFalse(policy.can_disclose({"source_type": "thought"}, snap))
+
+
+class PeerPathTest(Base):
+    """대리인끼리 묻는 경로에서만 준비해 둔 것이 빠지면 그 경로가 우회로가 됩니다."""
+
+    def test_stances_apply_when_only_scope_meeting_is_given(self):
+        point = DebatePoint.objects.create(meeting=self.meeting, source_key="k1",
+                                           order=1, title="쟁점?")
+        DebateStance.objects.create(point=point, user=self.me, body="내 입장입니다")
+        rows = react._stances_for(self.meeting.id, self.me)
+        self.assertEqual(len(rows), 1)
+
+    def test_meeting_note_is_picked_up_from_the_participant_row(self):
+        self.part.delegate_prompt = "이번엔 일정 얘기 하지 마"
+        self.part.save()
+        p = react._participant_of(self.meeting.id, self.me)
+        self.assertEqual(p.delegate_prompt, "이번엔 일정 얘기 하지 마")

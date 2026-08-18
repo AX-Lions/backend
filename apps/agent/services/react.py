@@ -156,7 +156,11 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             intent=intent,
             meeting_title=getattr(meeting, "title", ""),
             project_name=getattr(meeting, "project_name", ""),
-            delegate_prompt=delegate_prompt,
+            # 회의별 지시. 호출부가 안 넘겼어도 참석자 행에 있으면 그것을 씁니다 —
+            # `/internal/v1/deputy/ask` 와 피어 조회는 넘기지 않는데, 그때만
+            # 「추가 설정」에 적어 둔 것이 무시되면 경로에 따라 대리인이 달라집니다.
+            delegate_prompt=(delegate_prompt
+                             or getattr(participant, "delegate_prompt", "")),
             constraints=gate.constraints,
             # 설정 스냅샷에서 꺼냅니다. 설정 행을 다시 읽지 않는 이유는 실행
             # 도중에 사용자가 바꿔도 **이 실행은 시작할 때의 설정으로 끝나야**
@@ -169,7 +173,11 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             # 회의 전에 논쟁점마다 적어 둔 입장. **회의별 지시보다 뒤**에 놓여
             # 가장 세게 걸립니다 — 이 쟁점이 실제로 나왔을 때 대리인이 다르게
             # 말하면 준비 화면을 채운 일이 헛것이 됩니다.
-            stances=_stances_for(getattr(meeting, "id", None), principal),
+            # `scope_meeting_id` 도 봅니다. 대리인끼리 묻는 경로(`lookup.ask_peer`)는
+            # `meeting` 을 안 넘기는데, 그때만 준비해 둔 입장이 빠지면 **남의
+            # 대리인을 거쳐 물어보는 것만으로 준비해 둔 답이 무시**됩니다.
+            stances=_stances_for(
+                getattr(meeting, "id", None) or scope_meeting_id, principal),
         )
         ctx = SkillContext(
             principal_id=str(principal.id), actor_id=str(actor_id or principal.id),
@@ -456,7 +464,9 @@ def _may_write(skill_name: str, snapshot: dict | None) -> str:
         return ("본인이 일정 수정을 대리인에게 맡기지 않도록 설정해 두었습니다. "
                 "일정은 제안하지 않고 본인에게 남깁니다.")
 
-    if not s.get("disclose_work_plan_thought", True):
+    # 낱개 중 **하나라도** 꺼져 있으면 막습니다. 통째로 나가는 자리라 어느 종류가
+    # 섞였는지 가릴 수 없습니다 (`policy.fully_disclosed` 주석 참고).
+    if not policy.fully_disclosed(snapshot):
         if skill_name == "ask_peer_agent":
             # 남에게 물으려면 이쪽 맥락을 얼마간 건네야 합니다. 본인이 자기
             # 기록을 안 알리기로 했다면 그 맥락도 나가면 안 됩니다.

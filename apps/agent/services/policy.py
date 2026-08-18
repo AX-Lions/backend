@@ -130,6 +130,27 @@ def check(intent: str, snapshot: dict | None) -> Decision:
     return ALLOW
 
 
+def fully_disclosed(snapshot: dict | None) -> bool:
+    """
+    작업·계획·생각을 **셋 다** 공개하는가.
+
+    `can_disclose` 가 근거 하나를 보는 것과 달리, 이것은 **맥락이 통째로 나가는
+    자리**를 위한 것입니다(`send_message` · `ask_peer_agent`). 그 둘은 승인 단계가
+    없어 되돌릴 자리가 없는데, 검색 스킬이 돌려준 원문이 이미 모델의 messages 에
+    들어가 있어 어느 종류가 섞였는지 코드가 가릴 수 없습니다.
+
+    하나라도 꺼져 있으면 막습니다 — 과하게 막는 쪽이 새어 나가는 쪽보다 낫습니다.
+    """
+    raw = snapshot or {}
+    if LEGACY_DISCLOSURE in raw and not any(
+            k in raw for k in ("disclose_work", "disclose_plan", "disclose_thought")):
+        # 낱개가 없는 옛 스냅샷은 옛 한 칸으로 판정합니다.
+        return bool(raw[LEGACY_DISCLOSURE])
+    s = {**DEFAULTS, **raw}
+    return all(s.get(k, True) for k in
+               ("disclose_work", "disclose_plan", "disclose_thought"))
+
+
 def can_disclose(evidence_item: dict, snapshot: dict | None) -> bool:
     """
     이 근거 하나를 발언에 써도 되는가.
