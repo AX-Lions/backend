@@ -33,10 +33,6 @@ class BackendClient:
             try:
                 session = await self._get_session()
                 async with session.request(method, url, **kwargs) as resp:
-                    if resp.status == 409:
-                        # DUPLICATE_EVENT는 성공 처리하고 재게시하지 않는다 (12장)
-                        return {"status": "duplicate"}
-
                     if 400 <= resp.status < 500:
                         # 클라이언트 오류는 몇 번을 다시 보내도 같은 결과다. 재시도 대신
                         # 본문(error.code)을 그대로 돌려줘서 호출부가 분기할 수 있게 한다.
