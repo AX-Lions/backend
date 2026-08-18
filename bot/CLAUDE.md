@@ -58,8 +58,15 @@ Discord 이벤트를 Backend로 전달하고, Backend가 결정한 내용만 화
 ## 알려진 공백 (작업 대상)
 
 - `/meeting-start`가 `GET /internal/v1/meetings/scheduled`와 `POST /internal/v1/meetings/start`의
-  `meeting_id` 지원을 전제로 짜여 있음 — 둘 다 Backend에 아직 없음(이슈로 요청 예정).
-  붙기 전까지는 자동완성이 빈 목록만 돌려주고 실제 시작은 실패한다.
+  `meeting_id` 지원을 전제로 짜여 있음(AX-Lions/backend#89). **둘 다 안전하게 비어있는
+  상태가 아니다:**
+  - `GET /internal/v1/meetings/scheduled`는 아직 없어서 자동완성은 그냥 빈 목록만 돌려준다(안전).
+  - `POST /internal/v1/meetings/start`는 이미 존재하지만 옛 계약(agenda/participants 기반
+    즉석 생성) 그대로다 — `meeting_id`를 읽지도, `title`/`participants`를 응답에 담지도
+    않는다. 지금 이 커맨드를 그대로 배포하면 **실패하지 않고** `project = team.projects
+    .order_by("created_at").first()`로 아무 프로젝트나 골라 제목 "Discord 회의", 참석자
+    0명짜리 엉뚱한 회의를 조용히 만들어버린다. **#89가 배포되기 전까지 이 브랜치를
+    develop 이상으로 배포하지 말 것.**
 - 모든 상태가 인메모리 — 재시작하면 진행 중 회의 정보가 사라짐
 - 테스트·린터·빌드 단계 없음
 

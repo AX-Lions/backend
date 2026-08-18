@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime, timezone
 
 import discord
@@ -22,6 +23,12 @@ class MeetingCog(commands.Cog):
 
         # [기존] _active_meeting_threads
         self.active_meeting_threads: dict[int, dict] = {}
+
+        # meeting_id 자동완성용 예정 회의 목록 캐시. 한 글자씩 칠 때마다
+        # Backend를 다시 부르면 왕복이 그대로 배로 늘어나므로, guild_id별로
+        # 짧게 캐시해 같은 명령 입력 중에는 재사용한다.
+        self._scheduled_cache: dict[int, tuple[float, list]] = {}
+        self._SCHEDULED_CACHE_TTL = 5.0  # 초
     # --------------------------------------------------
     # 공통 함수
     # --------------------------------------------------
@@ -60,21 +67,35 @@ class MeetingCog(commands.Cog):
     # /meeting-start
     # --------------------------------------------------
 
+    async def _scheduled_meetings(self, guild_id: int) -> list[dict]:
+        now = time.monotonic()
+        cached = self._scheduled_cache.get(guild_id)
+        if cached and now - cached[0] < self._SCHEDULED_CACHE_TTL:
+            return cached[1]
+
+        result = await self.backend.get(
+            "/internal/v1/meetings/scheduled", params={"guild_id": str(guild_id)}
+        )
+        if not isinstance(result, dict):
+            return []
+
+        # 다른 목록 엔드포인트와 마찬가지로 apps/common/views.py의 listing()이
+        # 감싼 {"count", "results"} 모양을 그대로 따른다.
+        meetings = result.get("results", [])
+        self._scheduled_cache[guild_id] = (now, meetings)
+        return meetings
+
     async def _meeting_id_autocomplete(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         if interaction.guild_id is None:
             return []
 
-        result = await self.backend.get(
-            "/internal/v1/meetings/scheduled", params={"guild_id": str(interaction.guild_id)}
-        )
-        if not isinstance(result, dict):
-            return []
+        meetings = await self._scheduled_meetings(interaction.guild_id)
 
         current = current.lower()
         choices = []
-        for m in result.get("meetings", []):
+        for m in meetings:
             meeting_id = m.get("meeting_id")
             if not meeting_id:
                 continue
