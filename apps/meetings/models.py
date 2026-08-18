@@ -270,6 +270,15 @@ class FlowEdge(UUIDModel, TimeStamped):
 
     document = models.ForeignKey("meetings.MeetingDocumentRef", on_delete=models.SET_NULL,
                                  null=True, blank=True)
+    #: 작업 모드 좌측 인덱스가 묶는 문서.
+    #:
+    #: 위 `document` 와 **다른 것**입니다. 저쪽은 회의에서 오간 문서의 스냅샷
+    #: (`MeetingDocumentRef`)이고, 이쪽은 프로젝트에 실제로 있는 문서입니다.
+    #: 작업 엣지에는 회의가 없어 스냅샷을 만들 자리가 없습니다 — 이 칸이 없으면
+    #: 작업 모드 인덱스는 무엇으로도 묶이지 않아 언제나 빈 목록입니다.
+    work_document = models.ForeignKey("documents.Document", on_delete=models.SET_NULL,
+                                      null=True, blank=True,
+                                      related_name="flow_edges")
     agenda = models.ForeignKey(Agenda, on_delete=models.SET_NULL, null=True, blank=True,
                                related_name="flow_edges")
     occurred_at = models.DateTimeField()

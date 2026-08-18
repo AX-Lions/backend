@@ -82,6 +82,31 @@ def agent_display_name(owner) -> str:
     return name or f"{owner.name}의 Bordo"
 
 
+def agent_display_names(user_ids) -> dict:
+    """
+    여러 사람 몫을 한 번에. 규칙은 `agent_display_name()` 과 같습니다.
+
+    채팅 사이드바는 대리인 방을 여러 개 그립니다. 방마다 위 함수를 부르면
+    목록 하나에 조회가 방 수만큼 붙습니다.
+    """
+    ids = list(user_ids)
+    if not ids:
+        return {}
+
+    from apps.accounts.models import User
+
+    from ..models import AgentSettings
+
+    # 탈퇴한 사람과의 방도 목록에는 남습니다. `all_objects` 로 봐야 이름 없는
+    # 방이 되지 않습니다.
+    names = dict(User.all_objects.filter(id__in=ids).values_list("id", "name"))
+    custom = dict(AgentSettings.objects.filter(user_id__in=ids)
+                  .values_list("user_id", "agent_name"))
+    return {uid: ((custom.get(uid) or "").strip()
+                  or f"{names.get(uid, '')}의 Bordo")
+            for uid in ids}
+
+
 def server_node() -> dict:
     return {"id": "server", "kind": "SERVER", "user_id": None, "name": "서버",
             "avatar_url": None}

@@ -194,6 +194,9 @@ def home(request):
 
     return Response({
         "user_name": user.name,
+        # 사이드바 하단 프로필. 없으면 화면이 이름 첫 글자로 원을 그립니다 —
+        # 그 판단을 하려면 값이 오기는 해야 합니다.
+        "user_avatar_url": user.avatar_url or None,
         # 문구는 그대로 두고 `Zero 브리핑 보러가기` 버튼이 함께 뜹니다.
         # 문구를 갈아끼우면 이름으로 맞이하는 인사가 사라집니다.
         "greeting_mode": "BRIEFING_AVAILABLE" if briefing["exists"] else "WELCOME",

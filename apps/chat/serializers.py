@@ -55,6 +55,7 @@ class MessageSerializer(serializers.ModelSerializer):
 
 class RoomSummarySerializer(serializers.ModelSerializer):
     path_label = serializers.CharField(read_only=True)
+    title = serializers.SerializerMethodField()
     avatar_urls = serializers.SerializerMethodField()
     last_message = serializers.SerializerMethodField()
     unread_count = serializers.SerializerMethodField()
@@ -65,6 +66,17 @@ class RoomSummarySerializer(serializers.ModelSerializer):
         fields = ("id", "type", "title", "team_id", "team_name", "project_id",
                   "project_name", "path_label", "avatar_urls", "last_message",
                   "unread_count", "has_important")
+
+    def get_title(self, obj):
+        """
+        대리인 방은 **주인의 지금 호칭**으로 부릅니다 (`{이름}의 Bordo`).
+
+        `AI 대리인` 은 화면 어디에도 없는 낱말이라 저장된 제목을 그대로 쓰면
+        목록에만 그 낱말이 남습니다. 이름은 개인 설정에서 바뀌므로 조회 시점에
+        맞춥니다 — 뷰가 `agent_name_map` 으로 한 번에 모아 넘깁니다.
+        """
+        named = (self.context.get("agent_name_map") or {}).get(obj.agent_owner_id)
+        return named or obj.title
 
     def get_avatar_urls(self, obj):
         # 단체방 4분할 썸네일. 4개를 넘기면 화면에서 못 씁니다.

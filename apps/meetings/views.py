@@ -8,6 +8,7 @@
 from datetime import timedelta
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -18,15 +19,14 @@ from apps.common.display import day_label, user_tz
 from apps.common.events import publish
 from apps.common.parsing import parse_dt
 from apps.common.permissions import meeting_access, project_membership
-from apps.orgs.models import ProjectMember
 from apps.common.views import listing
+from apps.orgs.models import ProjectMember
 from config.errors import BordoError
 
 from .models import (Agenda, AiBriefing, Attendance, BriefingConfirmation,
-                     BriefingRequest, FlowCategory, FlowContentType, FlowEdge, FlowSource,
-                     FlowFilterPreset, Meeting, MeetingDocumentRef,
-                     MeetingParticipant, MeetingStatus, MeetingSummary, Surface,
-                     Utterance)
+                     BriefingRequest, FlowCategory, FlowContentType, FlowEdge,
+                     FlowFilterPreset, FlowSource, Meeting, MeetingParticipant,
+                     MeetingStatus, MeetingSummary, Surface, Utterance)
 from .serializers import (AgendaSerializer, AiBriefingSerializer,
                           BriefingConfirmationSerializer, BriefingRequestSerializer,
                           DocumentRefSerializer, FlowEdgeSerializer,
@@ -182,6 +182,29 @@ def _clean_sources(raw):
 
 
 # ─────────────────────────────────────────── 플로우
+def _flag(raw, default):
+    """쿼리의 불리언. 안 오면 기본값이고, `false` · `0` · `no` 만 거짓입니다."""
+    if raw is None or raw == "":
+        return default
+    return str(raw).strip().lower() not in ("false", "0", "no")
+
+
+def _work_period(params):
+    """
+    작업 플로우의 조회 구간. 기본은 최근 7일입니다.
+
+    `project_flow`(캔버스) · `indexes`(좌측 인덱스) · `flow_participant`(우측
+    패널)가 **같은 값을 써야 합니다.** 따로 두면 한쪽만 고쳤을 때 인덱스에 있는
+    문서를 눌러도 강조될 화살표가 판에 없고, 패널의 숫자와 캔버스의 숫자가
+    갈립니다 — 같은 화면에서 다른 값을 보여 주면 어느 쪽이 맞는지 알 수 없습니다.
+    """
+    to_at = parse_dt(params.get("to"), "to") or timezone.now()
+    from_at = parse_dt(params.get("from"), "from") or to_at - timedelta(days=7)
+    if from_at > to_at:
+        raise BordoError("VALIDATION_ERROR", "from 이 to 보다 뒤입니다.")
+    return from_at, to_at
+
+
 def _resolve_category(raw):
     cat = (raw or FlowCategory.MEETING).upper()
     if cat not in FlowCategory.values:
@@ -376,11 +399,8 @@ def project_flow(request, project_id):
     """
     project, _ = project_membership(request.user, project_id)
 
-    to_at = parse_dt(request.query_params.get("to"), "to") or timezone.now()
-    from_at = (parse_dt(request.query_params.get("from"), "from")
-               or to_at - timedelta(days=7))
-    if from_at > to_at:
-        raise BordoError("VALIDATION_ERROR", "from 이 to 보다 뒤입니다.")
+    # 기본 구간은 좌측 인덱스 · 우측 패널과 한 곳에서 정합니다.
+    from_at, to_at = _work_period(request.query_params)
 
     params = request.query_params.copy()
     params.setdefault("category", FlowCategory.WORK)
@@ -426,14 +446,22 @@ def project_flow(request, project_id):
 
 @api_view(["GET"])
 def indexes(request, meeting_id):
-    """좌측 인덱스. 작업 모드는 문서, 회의 모드는 안건."""
+    """
+    좌측 인덱스. 작업 모드는 문서, 회의 모드는 안건.
+
+    ## 작업 모드는 회의가 아니라 프로젝트·기간으로 봅니다
+
+    경로에 회의 id 가 붙어 있지만 **작업 엣지에는 회의가 없습니다**
+    (`project_flow` 참고 — 작업 플로우의 스코프는 기간입니다). 회의로 좁히면
+    조건에 맞는 행이 하나도 없어 이 목록은 언제나 빈 배열이었습니다.
+    회의 id 는 어느 프로젝트인지를 알아내는 데만 씁니다.
+    """
     meeting = meeting_access(request.user, meeting_id)
     cat = _resolve_category(request.query_params.get("category"))
-    edges = FlowEdge.objects.filter(meeting=meeting, category=cat)
 
     if cat == FlowCategory.MEETING:
         edge_map = {}
-        for e in edges:
+        for e in FlowEdge.objects.filter(meeting=meeting, category=cat):
             if e.agenda_id:
                 edge_map.setdefault(e.agenda_id, []).append(e.id)
         rows = Agenda.objects.filter(meeting=meeting)
@@ -442,11 +470,19 @@ def indexes(request, meeting_id):
             "related_edge_ids": [str(i) for i in edge_map.get(a.id, [])],
         } for a in rows]))
 
+    from_at, to_at = _work_period(request.query_params)
     edge_map = {}
-    for e in edges:
-        if e.document_id:
-            edge_map.setdefault(e.document_id, []).append(e.id)
-    docs = MeetingDocumentRef.objects.filter(id__in=list(edge_map.keys()))
+    for e in FlowEdge.objects.filter(project_id=meeting.project_id, category=cat,
+                                     occurred_at__range=(from_at, to_at)):
+        if e.work_document_id:
+            edge_map.setdefault(e.work_document_id, []).append(e.id)
+
+    from apps.documents.models import Document, Visibility
+
+    # 비공개 문서는 목록에서 뺍니다. 작업 플로우는 팀 관점 화면이라 제목만
+    # 스쳐도 비공개로 둔 뜻이 사라집니다 — 남의 것이면 존재도 알리지 않습니다.
+    docs = Document.objects.filter(id__in=list(edge_map.keys())).filter(
+        Q(visibility=Visibility.TEAM) | Q(owner=request.user))
     return Response(listing([{
         "id": str(d.id), "label": d.title, "kind": "DOCUMENT",
         "related_edge_ids": [str(i) for i in edge_map.get(d.id, [])],
@@ -580,11 +616,8 @@ def flow_participant(request, project_id, user_id):
     """
     project, _ = project_membership(request.user, project_id)
 
-    to_at = parse_dt(request.query_params.get("to"), "to") or timezone.now()
-    from_at = (parse_dt(request.query_params.get("from"), "from")
-               or to_at - timedelta(days=7))
-    if from_at > to_at:
-        raise BordoError("VALIDATION_ERROR", "from 이 to 보다 뒤입니다.")
+    # 기본 구간은 좌측 인덱스 · 우측 패널과 한 곳에서 정합니다.
+    from_at, to_at = _work_period(request.query_params)
 
     person = (ProjectMember.objects
               .filter(project=project, user_id=user_id)
@@ -683,7 +716,16 @@ def ai_briefing(request, meeting_id):
     requests_to_me = BriefingRequest.objects.filter(meeting=meeting, user=request.user,
                                                     accepted_at__isnull=True)
 
-    if briefing.read_at is None:
+    # `mark_read=false` 로 읽음 처리를 끕니다.
+    #
+    # 플로우 화면은 브리핑 패널을 열든 말든 회의를 열 때 이것을 부릅니다. 그래서
+    # 회의 화면에 잠깐 들른 것만으로 홈의 `Bordo 브리핑 보러가기` 가 사라졌습니다 —
+    # 사용자는 읽은 적이 없는데 읽은 것이 됩니다. 서버는 패널을 열었는지 알 수
+    # 없으므로 **부르는 쪽이 알려 줘야 합니다.**
+    #
+    # 기본은 여전히 읽음입니다. 기본을 끄면 이 값을 안 보내는 쪽에서는 브리핑이
+    # 영영 안 읽힌 상태로 남아 홈 팝업이 매번 뜹니다.
+    if briefing.read_at is None and _flag(request.query_params.get("mark_read"), True):
         briefing.read_at = timezone.now()
         briefing.save(update_fields=["read_at"])
     return Response(AiBriefingSerializer(briefing, context={
