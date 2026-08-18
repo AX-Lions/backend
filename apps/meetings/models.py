@@ -154,6 +154,20 @@ class MeetingParticipant(TimeStamped):
         help_text="이 회의에서 대리인이 근거로 쓸 자료 종류. "
                   "null 이면 고른 적 없음(제한 없음), [] 면 아무것도 쓰지 않음.")
 
+    # ── 이번 회의에만 다르게 (「Bordo 활동 설정」) ─────────────
+    #
+    # 평소 설정(`AgentSettings`)을 **덮어쓰지 않습니다.** 회의 하나 때문에 평소
+    # 설정을 바꿔 두면 그 회의가 끝난 뒤 되돌리는 것은 사람 몫이 되고, 대개
+    # 잊습니다. 다음 회의에서 켜 둔 줄 알았던 것이 꺼져 있습니다.
+    settings_override = models.JSONField(
+        default=dict, blank=True,
+        help_text="이 회의에만 적용할 설정. 바꾼 키만 담습니다. "
+                  "{} 면 평소 설정 그대로.")
+    prompt_override = models.JSONField(
+        null=True, blank=True, default=None,
+        help_text="이 회의에만 쓸 시스템 프롬프트 목록. "
+                  "null 이면 평소 것 그대로, [] 면 아무 프롬프트도 쓰지 않음.")
+
     #: 이 회의에서 대리인이 볼 수 있는 자료 종류.
     #
     # `search_records` 의 `kinds` 와 **같은 값을 씁니다.** 화면에서 고른 것이
@@ -189,6 +203,21 @@ class MeetingParticipant(TimeStamped):
     def missed(self):
         """홈 카드의 `불참한 회의` 뱃지 판정."""
         return self.attendance in (Attendance.ABSENT, Attendance.DELEGATED)
+
+    @property
+    def uses_standing_settings(self) -> bool:
+        """
+        화면의 `현재 설정 사용` / `이번에만 다르게 사용` 중 어느 쪽인가.
+
+        컬럼을 따로 두지 않습니다. 모드 컬럼과 실제 덮어쓴 값이 어긋나면
+        (모드는 `현재 설정 사용` 인데 override 에 값이 남아 있는 식) 화면과
+        대리인이 서로 다른 것을 보게 됩니다.
+        """
+        return not self.settings_override and self.prompt_override is None
+
+    def effective_settings(self, base: dict) -> dict:
+        """평소 설정 위에 이 회의 것만 얹습니다."""
+        return {**(base or {}), **(self.settings_override or {})}
 
 
 class Agenda(UUIDModel, TimeStamped):
@@ -480,3 +509,91 @@ class FlowFilterPreset(UUIDModel, TimeStamped):
     class Meta:
         db_table = "flow_filter_preset"
         ordering = ["-created_at"]
+
+
+# ═══════════════════════════════════════════ 회의 대리 참석 준비
+#
+# 자리를 비우기로 한 사람이 **회의 전에** 채워 두는 것들입니다.
+# 회의가 끝난 뒤 만들어지는 `AiBriefing` 과 앞뒤로 짝을 이룹니다.
+#
+#     회의 전   DebatePoint  → DebateStance   "이런 게 쟁점일 텐데, 내 입장은 이렇다"
+#     회의 중   대리인이 그 입장을 근거로 말함
+#     회의 후   AiBriefing                     "없는 사이 이렇게 정해졌다"
+
+
+class DebatePoint(UUIDModel, TimeStamped):
+    """
+    예상 논쟁점.
+
+    ## 사람이 아니라 회의에 답니다
+
+    "이번 회의에서 의견이 갈릴 곳" 은 회의의 성질이지 개인의 것이 아닙니다.
+    두 사람이 불참하면 같은 쟁점을 봅니다 — 사람마다 만들면 같은 예측을 두 번
+    돌리고, 둘이 서로 다른 쟁점을 보게 되어 회의 후에 말이 안 맞습니다.
+    **갈리는 것은 입장(`DebateStance`)뿐입니다.**
+
+    ## `source_key` 로 다시 알아봅니다
+
+    예측은 회의 직전에 다시 돌 수 있습니다(자료가 늘었을 때). 통째로 지우고 새로
+    만들면 **사람이 이미 적어 둔 입장이 함께 사라집니다.** 브리핑 카드와 같은
+    방식으로 열쇠를 두고 갱신합니다.
+    """
+    meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE,
+                                related_name="debate_points")
+    #: 재예측 때 같은 쟁점을 알아보는 열쇠. 제목에서 만듭니다.
+    source_key = models.CharField(max_length=80)
+    #: 화면의 `논쟁점 01`. 1부터.
+    order = models.PositiveSmallIntegerField(default=1)
+    title = models.CharField(max_length=200, help_text="질문형. `A 할 것인가, B 할 것인가?`")
+    #: [{"key": "A", "title": "핵심 기능만 구현", "description": "남은 기간을 고려해…"}]
+    #: 둘로 갈리는 게 보통이지만 셋 이상도 담을 수 있게 배열로 둡니다.
+    options = models.JSONField(default=list, blank=True)
+    rationale = models.TextField(blank=True, default="",
+                                 help_text="`Bordo가 이렇게 예측했어요` 문단")
+    #: 근거 카드. [{"kind": "meeting"|"work", "title", "body", "at", "who", "link"}]
+    #: 스냅샷입니다 — 원본이 나중에 바뀌어도 그때 무엇을 보고 예측했는지가 남아야 합니다.
+    evidence = models.JSONField(default=list, blank=True)
+    created_by_agent = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "meeting_debate_point"
+        ordering = ["order", "created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["meeting", "source_key"],
+                                    name="uq_debate_point"),
+        ]
+        indexes = [models.Index(fields=["meeting", "order"])]
+
+    def __str__(self):
+        return f"{self.order:02d} {self.title}"
+
+
+class DebateStance(UUIDModel, TimeStamped):
+    """
+    논쟁점에 대한 나의 입장.
+
+    **대리인이 회의에서 이걸 근거로 말합니다.** 그래서 사람마다 하나입니다 —
+    같은 쟁점에 내 입장이 둘이면 대리인이 어느 쪽으로 말할지 정할 수 없습니다.
+    고쳐 쓰는 것은 덮어쓰기입니다.
+
+    `option_key` 는 비어 있을 수 있습니다. 화면의 선택지 A/B 를 고르지 않고
+    글만 적는 경우가 정상이라, 고르지 않았다고 저장을 막지 않습니다.
+    """
+    point = models.ForeignKey(DebatePoint, on_delete=models.CASCADE,
+                              related_name="stances")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                             related_name="debate_stances")
+    option_key = models.CharField(max_length=8, blank=True, default="",
+                                  help_text="고른 선택지. 비어 있을 수 있습니다.")
+    body = models.TextField()
+
+    class Meta:
+        db_table = "meeting_debate_stance"
+        ordering = ["point__order", "created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["point", "user"], name="uq_debate_stance"),
+        ]
+        indexes = [models.Index(fields=["user"])]
+
+    def __str__(self):
+        return f"{self.user_id}: {self.body[:30]}"

@@ -185,7 +185,8 @@ class DelegateTest(Base):
         self.post("/delegate/on", {"discord_user_id": "dc-me", "scope": "전체"})
         p = MeetingParticipant.objects.get(user=self.me)
         self.assertTrue(p.delegated)
-        self.assertEqual(p.attendance, Attendance.ABSENT)
+        # 웹 경로와 같은 값이어야 화면 뱃지가 갈리지 않습니다.
+        self.assertEqual(p.attendance, Attendance.DELEGATED)
 
         self.post("/delegate/off", {"discord_user_id": "dc-me"})
         p.refresh_from_db()
@@ -662,3 +663,55 @@ class OutboxTest(Base):
         r = self.post(f"/outbox-events/{uuid.uuid4()}/ack")
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json()["error"]["code"], "STATE_NOT_FOUND")
+
+
+@override_settings(BORDO=_SETTINGS)
+class DelegateAttendanceTest(Base):
+    """
+    같은 행위가 경로에 따라 다른 값이 되면 화면 뱃지가 갈립니다.
+
+    웹은 `DELEGATED`, 봇은 `ABSENT` 를 쓰고 있었습니다. 홈 카드가 뱃지를
+    `불참한 회의` 로 그리느냐 `Bordo 대리 참석 예정` 으로 그리느냐가
+    어디서 눌렀느냐에 달려 있었습니다.
+    """
+
+    def setUp(self):
+        self._start()
+        self.meeting = Meeting.objects.get()
+        MeetingParticipant.objects.create(meeting=self.meeting, user=self.me,
+                                          user_name="서재민")
+
+    def _p(self):
+        return MeetingParticipant.objects.get(user=self.me, meeting=self.meeting)
+
+    def test_confirmed_meeting_is_covered(self):
+        """일정이 확정된 회의가 대부분인데 그 회의에는 아무 일도 안 하고 있었습니다."""
+        Meeting.objects.filter(pk=self.meeting.pk).update(
+            status=MeetingStatus.CONFIRMED)
+        r = self.post("/delegate/on", {"discord_user_id": "dc-me", "scope": "전체"})
+        self.assertEqual(r.json()["meetings_updated"], 1)
+        self.assertEqual(self._p().attendance, Attendance.DELEGATED)
+
+    def test_off_before_the_meeting_opens_is_pending(self):
+        """열리지도 않은 회의를 PRESENT 로 두면 이미 와 있는 사람으로 그려집니다."""
+        Meeting.objects.filter(pk=self.meeting.pk).update(
+            status=MeetingStatus.SCHEDULED)
+        self.post("/delegate/on", {"discord_user_id": "dc-me", "scope": "전체"})
+        self.post("/delegate/off", {"discord_user_id": "dc-me"})
+        self.assertEqual(self._p().attendance, Attendance.PENDING)
+
+    def test_off_during_the_meeting_is_present(self):
+        Meeting.objects.filter(pk=self.meeting.pk).update(status=MeetingStatus.ACTIVE)
+        self.post("/delegate/on", {"discord_user_id": "dc-me", "scope": "전체"})
+        self.post("/delegate/off", {"discord_user_id": "dc-me"})
+        self.assertEqual(self._p().attendance, Attendance.PRESENT)
+
+    def test_meeting_start_uses_the_same_value(self):
+        r = self.post("/meetings/start", {
+            "guild_id": GUILD, "thread_id": "thread-delegated", "agenda": "x",
+            "participants": [{"discord_user_id": "dc-me", "status": "delegated"}]})
+        self.assertEqual(r.status_code, 201, r.content)
+        p = MeetingParticipant.objects.get(user=self.me,
+                                           meeting__discord_channel_id="thread-delegated")
+        self.assertTrue(p.delegated)
+        self.assertEqual(p.attendance, Attendance.DELEGATED)

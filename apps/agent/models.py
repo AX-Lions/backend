@@ -47,7 +47,19 @@ class AgentSettings(TimeStamped):
     mention_feasibility = models.BooleanField(default=True)          # 구현 가능성 언급
     allow_schedule_change = models.BooleanField(default=True)        # 일정 수정 여부
     allow_midmeeting_question = models.BooleanField(default=False)   # 회의 중간 질문
-    disclose_work_plan_thought = models.BooleanField(default=True)   # 작업/계획/생각 공개
+
+    # 공개를 셋으로 나눕니다.
+    #
+    # 한 칸이던 `disclose_work_plan_thought` 로는 **작업은 감추고 계획만 보여주는**
+    # 설정을 만들 수 없었습니다. 화면에는 스위치가 셋인데 어느 것을 눌러도 셋이
+    # 함께 움직여, 사용자는 껐다고 생각한 것이 계속 나갔습니다.
+    #
+    # 옛 이름은 `disclose_work_plan_thought` 프로퍼티로 남습니다 — 지난 실행의
+    # 스냅샷과 옛 클라이언트가 그 키로 판정하고 있어, 지우면 그때 판정을 재현할 수
+    # 없게 됩니다.
+    disclose_work = models.BooleanField(default=True)                # 작업 공개
+    disclose_plan = models.BooleanField(default=True)                # 계획 공개
+    disclose_thought = models.BooleanField(default=True)             # 생각 공개
     tone = models.CharField(max_length=10, choices=AgentTone.choices,
                             default=AgentTone.FORMAL)
     agent_name = models.CharField(
@@ -72,11 +84,32 @@ class AgentSettings(TimeStamped):
         """
         return self.agent_name.strip() or f"{self.user.name}의 Bordo"
 
+    @property
+    def disclose_work_plan_thought(self) -> bool:
+        """
+        옛 이름. **하나라도 켜져 있으면 참**입니다.
+
+        `policy.check` 의 STATUS 관문이 이 값을 봅니다. 셋 중 하나라도 공개면 그
+        질문에 답할 여지가 있으니 관문은 통과시키고, 무엇을 인용할지는 근거
+        단위로 `can_disclose` 가 다시 봅니다. 여기서 `all()` 로 막으면 작업만 끈
+        사람의 대리인이 진행 상황 질문에 통째로 유보합니다.
+        """
+        return self.disclose_work or self.disclose_plan or self.disclose_thought
+
+    def set_disclosure(self, value: bool) -> None:
+        """옛 클라이언트가 한 칸으로 보낼 때. 셋을 함께 움직입니다."""
+        self.disclose_work = self.disclose_plan = self.disclose_thought = bool(value)
+
     def as_snapshot(self):
         return {
             "mention_feasibility": self.mention_feasibility,
             "allow_schedule_change": self.allow_schedule_change,
             "allow_midmeeting_question": self.allow_midmeeting_question,
+            "disclose_work": self.disclose_work,
+            "disclose_plan": self.disclose_plan,
+            "disclose_thought": self.disclose_thought,
+            # 옛 키도 함께 싣습니다. 지난 스냅샷과 같은 모양으로 남겨야 이력을
+            # 나란히 놓고 볼 수 있습니다.
             "disclose_work_plan_thought": self.disclose_work_plan_thought,
             "tone": self.tone,
             "agent_name": self.agent_name,

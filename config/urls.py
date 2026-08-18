@@ -23,6 +23,7 @@ from apps.chat import views as chat
 from apps.documents import views as documents
 from apps.home import views as home
 from apps.mcp import views as mcp
+from apps.meetings import prep as meetings_prep
 from apps.meetings import views as meetings
 from apps.orgs import views as orgs
 from apps.states import views as states
@@ -80,6 +81,11 @@ urlpatterns = [
     path(f"{API}/projects/<uuid:project_id>/meetings", meetings.meetings),
     path(f"{API}/meetings/<uuid:meeting_id>", meetings.meeting_detail),
     path(f"{API}/meetings/<uuid:meeting_id>/delegate", meetings.delegate),
+    # 회의 대리 참석 준비 — 홈의 `회의에 참여하지 않아요` 가 여기로 들어옵니다
+    path(f"{API}/meetings/<uuid:meeting_id>/absence", meetings_prep.absence),
+    path(f"{API}/meetings/<uuid:meeting_id>/prep", meetings_prep.prep),
+    path(f"{API}/meetings/<uuid:meeting_id>/agent-setup", meetings_prep.agent_setup),
+    path(f"{API}/debate-points/<uuid:point_id>/stance", meetings_prep.stance),
     path(f"{API}/meetings/<uuid:meeting_id>/flow", meetings.flow),
     # 작업 플로우는 기간이 스코프라 회의 경로를 쓸 수 없습니다 (이슈 #54)
     path(f"{API}/projects/<uuid:project_id>/flow", meetings.project_flow),
@@ -190,6 +196,9 @@ urlpatterns = [
     path(f"{INTERNAL}/deputy/ask", discord_internal.deputy_ask),
     path(f"{INTERNAL}/meetings/start", discord_internal.meeting_start),
     path(f"{INTERNAL}/meetings/end", discord_internal.meeting_end),
+    # 봇이 재시작해도 대리 참석자를 되물을 수 있게 (인메모리 set 을 대신합니다)
+    path(f"{INTERNAL}/meetings/participants", discord_internal.meeting_participants),
+    path(f"{INTERNAL}/meetings/absence", discord_internal.meeting_absence),
     path(f"{INTERNAL}/discord/messages", discord_internal.discord_messages),
     path(f"{INTERNAL}/discord/presence", discord_internal.discord_presence),
 

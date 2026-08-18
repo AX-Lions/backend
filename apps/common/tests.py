@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from django.test import SimpleTestCase
 
+from apps.common import display
 from apps.common.display import (day_label, full_stamp, short_stamp, time_range,
                                  user_tz)
 
@@ -49,3 +50,20 @@ class DisplayTest(SimpleTestCase):
         self.assertEqual(str(user_tz(Fake("Mars/Olympus"))), "UTC")
         self.assertEqual(str(user_tz(Fake(""))), "UTC")
         self.assertEqual(str(user_tz(Fake("Asia/Seoul"))), "Asia/Seoul")
+
+
+class MeetingWhenTest(SimpleTestCase):
+    """헤더 한 줄 — `8월 18일 14:00 - 15:00`."""
+
+    def test_ko_date_and_range(self):
+        tz = ZoneInfo("Asia/Seoul")
+        start = datetime(2026, 8, 18, 5, 0, tzinfo=ZoneInfo("UTC"))   # 한국 14:00
+        end = datetime(2026, 8, 18, 6, 0, tzinfo=ZoneInfo("UTC"))
+        self.assertEqual(display.meeting_when(start, end, tz), "8월 18일 14:00 - 15:00")
+
+    def test_no_padding_on_month_and_day(self):
+        tz = ZoneInfo("UTC")
+        self.assertEqual(display.date_label(datetime(2026, 8, 3, tzinfo=tz), tz), "8월 3일")
+
+    def test_empty_when_missing(self):
+        self.assertEqual(display.meeting_when(None, None, ZoneInfo("UTC")), "")

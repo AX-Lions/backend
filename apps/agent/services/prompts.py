@@ -71,6 +71,17 @@ _STANDING = """\
 그쪽이 더 최근이고 이 회의를 보고 적은 것입니다.
 """
 
+_STANCES = """\
+## {principal} 님이 이 회의를 앞두고 미리 정해 둔 입장
+
+{lines}
+
+**이 쟁점이 회의에서 실제로 나오면 위 입장대로 말하십시오.** 본인이 회의 전에
+직접 적은 것이라, 기록을 뒤져 다르게 답하면 준비해 둔 뜻이 사라집니다.
+적어 두지 않은 쟁점은 평소대로 근거를 찾아 답하고, 적어 둔 쟁점이 나오지
+않으면 굳이 꺼내지 마십시오.
+"""
+
 #: 평소 지시를 몇 개까지 싣는가.
 #
 # 저장은 무제한이지만 전부 실으면 규칙보다 길어져 모델이 앞쪽 규칙을 흘립니다.
@@ -93,7 +104,8 @@ _BY_INTENT = {
 def build_system(principal_name: str, *, intent: str = "",
                  meeting_title: str = "", project_name: str = "",
                  delegate_prompt: str = "", constraints: list[str] | None = None,
-                 tone: str = "", standing_prompts: list[str] | None = None) -> str:
+                 tone: str = "", standing_prompts: list[str] | None = None,
+                 stances: list[dict] | None = None) -> str:
     parts = [_BASE.format(principal=principal_name)]
 
     # 말투는 규칙 바로 뒤, 상황·의도보다 앞에 둡니다. 뒤에 붙이면 의도별 주의와
@@ -131,7 +143,34 @@ def build_system(principal_name: str, *, intent: str = "",
         parts.append(_INSTRUCTION.format(principal=principal_name,
                                          prompt=delegate_prompt.strip()))
 
+    # 입장을 **맨 뒤**에 둡니다. 앞의 어떤 지시보다 구체적이라(쟁점 하나에 대한
+    # 본인의 답) 어긋날 때 이쪽이 이겨야 합니다.
+    block = _stance_block(principal_name, stances)
+    if block:
+        parts.append(block)
+
     return "\n".join(parts)
+
+
+def _stance_block(principal_name: str, stances: list[dict] | None) -> str:
+    """
+    준비 화면에서 논쟁점마다 적어 둔 입장.
+
+    본문이 빈 항목은 싣지 않습니다 — 제목만 남은 줄이 들어가면 모델이 "이
+    쟁점에 대해 뭔가 정해 뒀다" 고 읽고 없는 입장을 지어냅니다.
+    """
+    picked = []
+    for item in (stances or []):
+        body = (item.get("body") or "").strip()
+        if not body:
+            continue
+        head = f"- {item.get('title', '')}"
+        if item.get("option"):
+            head += f" → 「{item['option']}」"
+        picked.append(f"{head}\n  {body}")
+    if not picked:
+        return ""
+    return _STANCES.format(principal=principal_name, lines="\n".join(picked))
 
 
 def standing_prompts_for(user) -> list[str]:

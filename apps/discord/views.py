@@ -28,6 +28,7 @@ from datetime import timedelta
 
 from django.core.cache import cache
 from django.db import IntegrityError, transaction
+from django.db.models import Count
 from django.utils import timezone
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.response import Response
@@ -220,14 +221,28 @@ def _set_delegate(request, on: bool):
 
     user = _user_of(request.data.get("discord_user_id"))
 
-    # 진행 중이거나 예정된 회의에만 적용합니다. 끝난 회의의 참석 상태를 뒤늦게
-    # 바꾸면 그때 대리인이 왜 답했는지 기록과 어긋납니다.
+    # 진행 중이거나 아직 안 열린 회의에만 적용합니다. 끝난 회의의 참석 상태를
+    # 뒤늦게 바꾸면 그때 대리인이 왜 답했는지 기록과 어긋납니다.
+    #
+    # `CONFIRMED` 를 빠뜨리고 있었습니다 — 일정이 확정된 회의가 대부분인데 그
+    # 회의들에는 `/delegate-on` 이 아무 일도 안 했습니다.
     qs = MeetingParticipant.objects.filter(
         user=user,
-        meeting__status__in=[MeetingStatus.SCHEDULED, MeetingStatus.ACTIVE])
+        meeting__status__in=[MeetingStatus.SCHEDULED, MeetingStatus.CONFIRMED,
+                             MeetingStatus.ACTIVE])
 
-    changed = qs.update(delegated=on,
-                        attendance=Attendance.ABSENT if on else Attendance.PRESENT)
+    if on:
+        # 웹 경로(`/meetings/{id}/absence`)와 같은 값을 씁니다. 같은 행위가
+        # 경로에 따라 `ABSENT` 와 `DELEGATED` 로 갈리면, 어디서 눌렀느냐에 따라
+        # 화면 뱃지가 `불참` 과 `Bordo 대리 참석 예정` 으로 달라집니다.
+        changed = qs.update(delegated=True, attendance=Attendance.DELEGATED)
+    else:
+        # 되돌릴 때는 회의 상태로 나눕니다. 열리지도 않은 회의를 `PRESENT` 로
+        # 두면 참석자 목록에 이미 와 있는 사람으로 그려집니다.
+        changed = qs.filter(meeting__status=MeetingStatus.ACTIVE).update(
+            delegated=False, attendance=Attendance.PRESENT)
+        changed += qs.exclude(meeting__status=MeetingStatus.ACTIVE).update(
+            delegated=False, attendance=Attendance.PENDING)
     return Response({"delegated": on, "meetings_updated": changed})
 
 
@@ -302,7 +317,8 @@ def meeting_start(request):
             MeetingParticipant.objects.update_or_create(
                 meeting=meeting, user=u,
                 defaults=dict(user_name=u.name, delegated=delegated,
-                              attendance=(Attendance.ABSENT if delegated
+                              # 웹 경로와 같은 값입니다 (`_set_delegate` 주석 참고).
+                              attendance=(Attendance.DELEGATED if delegated
                                           else Attendance.PRESENT)))
 
     return Response({"meeting_id": str(meeting.id),
@@ -631,3 +647,107 @@ def outbox_fail(request, event_id):
     return Response({"id": str(event.id), "status": event.status,
                      "attempts": event.attempts,
                      "available_at": event.available_at})
+
+
+# ═══════════════════════════════════════════ 회의 참석 · 대리 상태
+#
+# 봇은 지금 대리 대상자를 **모듈 전역 set** 에, 진행 중 회의를 cog 의 dict 에
+# 들고 있습니다. 재시작하면 통째로 사라지는데 서버에 되물을 경로가 없었습니다 —
+# 대리 참석을 켜 둔 사람이 전부 직접 참석으로 잡힙니다.
+#
+# 진실의 원본을 서버 하나로 모읍니다(설계 2원칙, 서버 중심).
+
+
+def _meeting_by_thread(thread_id: str):
+    from apps.meetings.models import Meeting
+
+    thread_id = _require(thread_id, "thread_id")
+    meeting = (Meeting.objects.filter(discord_channel_id=thread_id)
+               .select_related("project").order_by("-created_at").first())
+    if meeting is None:
+        raise BordoError("MEETING_NOT_FOUND",
+                         "이 스레드에 연결된 회의가 없습니다.",
+                         details={"thread_id": thread_id})
+    return meeting
+
+
+@internal(["GET"])
+def meeting_participants(request):
+    """
+    이 회의에 **누가 불참이고 그 대리인이 무엇을 준비했는지.**
+
+    봇이 회의를 열 때 `○○ 님은 Bordo 가 대신 참석합니다` 를 게시하고, 참석
+    여부를 물을 대상(`asked` 가 False 인 사람)을 고르는 데 씁니다.
+
+    `will_speak` 는 `targeting.candidates()` 와 **같은 조건**입니다. 봇이 자기
+    나름의 규칙으로 판단하면 "대리인이 답할 사람" 이 서버와 갈려, 봇은 대신
+    참석한다고 알렸는데 정작 대리인은 안 깨어납니다.
+    """
+    from apps.agent.services.flow import agent_display_names
+    from apps.meetings.models import (Attendance, DebatePoint, DebateStance,
+                                      MeetingParticipant)
+
+    meeting = _meeting_by_thread(request.query_params.get("thread_id"))
+    rows = list(MeetingParticipant.objects
+                .filter(meeting=meeting).select_related("user"))
+
+    names = agent_display_names([p.user_id for p in rows])
+    point_count = DebatePoint.objects.filter(meeting=meeting).count()
+    stance_count = dict(
+        DebateStance.objects.filter(point__meeting=meeting)
+        .values_list("user_id")
+        .annotate(n=Count("id"))
+        .values_list("user_id", "n"))
+
+    results = []
+    for p in rows:
+        results.append({
+            "user_id": str(p.user_id),
+            "discord_user_id": p.user.discord_user_id or None,
+            "name": p.user_name,
+            "attendance": p.attendance,
+            "delegated": p.delegated,
+            "agent_name": names.get(p.user_id, ""),
+            # targeting.candidates() 와 같은 식입니다.
+            "will_speak": p.delegated and p.attendance != Attendance.PRESENT,
+            # 아직 참석 여부를 안 정한 사람. 팝업으로 물어볼 대상입니다.
+            "asked": p.attendance != Attendance.PENDING,
+            "prepared": {"points": point_count,
+                         "stances": stance_count.get(p.user_id, 0)},
+            # 회의 한정 지시. 봇은 해석하지 않고 그대로 둡니다 — 대리인이 씁니다.
+            "has_note": bool(p.delegate_prompt),
+        })
+
+    return Response(listing(results, extra={
+        "meeting_id": str(meeting.id),
+        "title": meeting.title,
+        "status": meeting.status,
+        "project_id": str(meeting.project_id),
+    }))
+
+
+@internal(["POST"])
+def meeting_absence(request):
+    """
+    회의 **하나**에 대한 불참 등록 / 해제.
+
+    `/internal/v1/delegate/on` 과 다릅니다. 그쪽은 그 사용자의 예정·진행 중 회의를
+    **한꺼번에** 뒤집습니다 — 회의 시작 팝업에서 `불참하기` 를 누른 사람이 오늘
+    남은 회의 전부에 대리인을 세우게 됩니다.
+
+    웹의 `POST /api/v1/meetings/{id}/absence` 와 같은 일을 하며, 같은 함수를
+    지납니다. 봇으로 들어왔다고 다른 상태가 되면 뱃지 문구가 경로에 따라 갈립니다.
+    """
+    from apps.meetings.prep import cancel_absence, register_absence
+
+    meeting = _meeting_by_thread(request.data.get("thread_id"))
+    user = _user_of(request.data.get("discord_user_id"))
+    delegated = bool(request.data.get("delegated", True))
+
+    if delegated:
+        _, p, _ = register_absence(user, meeting.id)
+    else:
+        _, p = cancel_absence(user, meeting.id)
+
+    return Response({"meeting_id": str(meeting.id), "user_id": str(user.id),
+                     "delegated": p.delegated, "attendance": p.attendance})

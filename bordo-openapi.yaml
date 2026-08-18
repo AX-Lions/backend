@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bordo API
-  version: 0.0.5
+  version: 0.0.6
   summary: AI 협업 대리인 서비스 — 와이어프레임 실물 대조판
   description: |2
 
@@ -4116,12 +4116,393 @@ paths:
               - PROPOSE_TASK
               policy_version: 7
               speak_mode: AUTO
+  /api/v1/meetings/{meeting_id}/absence:
+    post:
+      tags:
+      - 09. 회의
+      summary: 회의 불참 등록 (= 대리 참석 켜기)
+      description: |-
+        홈 「오늘 일정」의 `회의에 참여하지 않아요` 와 Discord 회의 시작 팝업의 `불참하기` 가 여기로 들어온다.
+
+        **불참 등록은 곧 대리 참석 켜기다.** 화면 문구는 `회의에 참여하지 않아요` 지만 뱃지는 `Bordo 대리 참석 예정` 이다 —
+        자리를 비우는 것과 대리인을 보내는 것이 이 서비스에서는 같은 행위다.
+        `delegated=false` 로 두면 회의 후 브리핑이 통째로 안 생겨(브리핑은 대리 참석자에게만 만들어진다)
+        사용자는 없는 사이 무슨 일이 있었는지 못 본다.
+
+        본문이 없다. 세부 설정은 준비 화면에서 따로 저장한다 — 여기서 함께 받으면 버튼 하나가 준비 화면의 입력을 덮는다.
+        이미 켜져 있으면 `200` + `created: false` 다(오류가 아니다).
+
+        **`delegate_prompt` 와 `allowed_sources` 는 건드리지 않는다.** 껐다 켰다 할 때 준비 화면에서 적어 둔 것이 사라지면 안 된다.
+
+        > `POST /meetings/{id}/delegate` 와 다르다. 그쪽은 `prompt` 키가 없으면 빈 문자열로 덮어쓰는 **전량 교체** 계약이고
+        > 홈의 대리 참석 팝업이 이미 그 계약으로 붙어 있다. `delegated` 플래그의 단일 진입점은 이쪽이다.
+      operationId: registerMeetingAbsence
+      responses:
+        '201':
+          description: 등록됨
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeetingPrepHeader'
+              example:
+                meeting_id: meeting_3
+                title: 글로벌 회의 일정 및 개발 방향 논의
+                project_name: 멋사 중앙해커톤
+                team_name: AX Lions
+                scheduled_at: '2026-08-18T14:00:00+09:00'
+                ends_at: '2026-08-18T15:00:00+09:00'
+                when: 8월 18일 14:00 - 15:00
+                location: Discord
+                status: CONFIRMED
+                delegated: true
+                badge: 서재민의 Bordo 대리 참석 예정
+                prep_url: /api/v1/meetings/meeting_3/prep
+                created: true
+        '200':
+          description: '이미 등록돼 있었음 (`created: false`)'
+        '401':
+          $ref: '#/components/responses/E401'
+        '403':
+          $ref: '#/components/responses/E403'
+        '404':
+          description: 이 회의의 참석자가 아님 (`STATE_NOT_FOUND`). **403 이 아니다** — 권한 문제로 읽히면 초대해 달라고 해야 할 사람이 관리자에게 권한을 달라고 한다.
+        '409':
+          description: 이미 끝난 회의 (`MEETING_LOCKED`)
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/MeetingId'
+    delete:
+      tags:
+      - 09. 회의
+      summary: 불참 해제 (참여로 되돌리기)
+      description: |-
+        진행 중인 회의면 `PRESENT`, 아직 안 열렸으면 `PENDING` 이다. 열리지도 않은 회의를 `PRESENT` 로 두면 참석자 목록에 이미 와 있는 사람으로 그려진다.
+
+        **적어 둔 입장과 설정은 지우지 않는다.** 마음을 바꿔 다시 불참을 누르는 일이 실제로 있고, 그때 다시 쓰게 하면 화면을 두 번 채우게 된다.
+      operationId: cancelMeetingAbsence
+      responses:
+        '200':
+          description: '해제됨 (`delegated: false`)'
+        '401':
+          $ref: '#/components/responses/E401'
+        '404':
+          $ref: '#/components/responses/E404'
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/MeetingId'
+  /api/v1/meetings/{meeting_id}/prep:
+    get:
+      tags:
+      - 09. 회의
+      summary: 회의 대리 참석 준비 화면
+      description: |-
+        헤더 · 예상 논쟁점 · 내 입장 · Bordo 활동 설정을 **한 번에** 내려준다.
+        화면이 네 번 부르면 그 사이 불참을 취소했을 때 헤더는 `참석 예정` 인데 아래는 대리인 설정을 그리고 있는 상태가 나온다.
+
+        ### 논쟁점 상태 뱃지
+
+        | 값 | 화면 |
+        |---|---|
+        | `NEEDED` | `답변필요` |
+        | `ANSWERED` | `답변완료` |
+
+        `답변중...` 은 서버에 없다. 펼쳐 놓고 타이핑 중이라는 뜻이라 서버가 알 수 없고, 저장되면 곧 `답변완료` 다.
+
+        ### 예상 논쟁점은 언제 생기는가
+
+        불참을 등록하면 서버가 예측을 걸어 둔다(비동기). 다 만들어지면 WebSocket `meeting.debate.ready` 가 나간다.
+        모델이 없거나 실패하면 **회의 안건에서 규칙으로** 만들고 `created_by_agent: false` 로 표시한다 —
+        화면이 `Bordo가 예상했어요` 문구를 붙이지 않게 하기 위해서다.
+
+        ### 설정을 둘 다 내려주는 이유
+
+        화면에 `현재 설정 사용` 과 `이번에만 다르게 사용` 이 나란히 있다. 되돌렸을 때 무엇으로 돌아가는지 보여주려면 실제 적용값(`settings`)과 평소 값(`standing_settings`)이 둘 다 있어야 한다.
+        `standing_prompt_limit` 은 평소 지시가 실제로 몇 개 실리는지다(최근 5개) — 화면이 이 수를 모르면 여섯 번째 카드가 조용히 무시되는데 사용자는 적어 둔 것이 지켜진다고 믿는다.
+      operationId: getMeetingPrep
+      responses:
+        '200':
+          description: 조회됨
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  header:
+                    $ref: '#/components/schemas/MeetingPrepHeader'
+                  debate:
+                    type: object
+                    properties:
+                      notice:
+                        type: string
+                        description: 화면 부제. 개수가 들어가므로 서버가 완성한다.
+                      count:
+                        type: integer
+                      answered_count:
+                        type: integer
+                      points:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/DebatePoint'
+                  agent_setup:
+                    $ref: '#/components/schemas/MeetingAgentSetup'
+                required:
+                - header
+                - debate
+                - agent_setup
+              example:
+                header:
+                  meeting_id: meeting_3
+                  title: 글로벌 회의 일정 및 개발 방향 논의
+                  project_name: 멋사 중앙해커톤
+                  team_name: AX Lions
+                  when: 8월 18일 14:00 - 15:00
+                  location: Discord
+                  status: CONFIRMED
+                  delegated: true
+                  badge: 서재민의 Bordo 대리 참석 예정
+                debate:
+                  notice: Bordo가 회의 자료와 이전 논의를 바탕으로 3개의 논쟁점을 예상했어요.
+                  count: 3
+                  answered_count: 1
+                  points:
+                  - id: dp_2
+                    order: 2
+                    label: 논쟁점 02
+                    title: 개발 범위를 축소할 것인가, 기존 범위를 유지할 것인가?
+                    options:
+                    - key: A
+                      title: 핵심 기능만 구현
+                      description: 남은 기간을 고려해 기능 범위를 축소
+                    - key: B
+                      title: 기존 기획 범위 유지
+                      description: 계획한 기능을 최대한 구현
+                    rationale: 이전 회의에서 기능 범위를 축소하자는 의견이 있었고, 이후 개발 일정이 하루 지연되었어요.
+                    evidence:
+                    - kind: meeting
+                      title: 8월 15일 · 기능 구현 범위 논의
+                      who: 최비성
+                      at: '2026-08-15T14:32:00+09:00'
+                      body: 남은 기간을 생각하면 핵심 기능부터 구현해야 할 것 같아요.
+                      link:
+                        label: 회의에서 보기
+                        meeting_id: meeting_2
+                    - kind: work
+                      title: 8월 16일 · 작업 변경사항
+                      who: 서재민의 작업
+                      at: '2026-08-16T09:10:00+09:00'
+                      body: 완료 예정일이(가) 8월 17일 → 8월 18일 로 바뀌었어요.
+                      link:
+                        label: 작업에서 보기
+                        work_item_id: work_44
+                    created_by_agent: true
+                    status: NEEDED
+                    status_label: 답변필요
+                    stance: null
+                agent_setup:
+                  mode: ONCE
+                  mode_label: 이번에만 다르게 사용
+                  settings:
+                    mention_feasibility: true
+                    allow_schedule_change: true
+                    allow_midmeeting_question: false
+                    disclose_work: false
+                    disclose_plan: true
+                    disclose_thought: false
+                    tone: FORMAL
+                  standing_settings:
+                    disclose_work: true
+                    disclose_plan: true
+                    disclose_thought: true
+                  overridden_keys:
+                  - disclose_work
+                  - disclose_thought
+                  prompts:
+                  - 상단에 입력한 메시지들은 개인적인 내용이니 공유하지 마
+                  standing_prompts:
+                  - id: ap_1
+                    body: 상단에 입력한 메시지들은 개인적인 내용이니 공유하지 마
+                  standing_prompt_limit: 1
+                  extra_note: 이번 회의에서는 일정 얘기를 꺼내지 마
+                  sources:
+                  - work
+        '401':
+          $ref: '#/components/responses/E401'
+        '403':
+          $ref: '#/components/responses/E403'
+        '404':
+          $ref: '#/components/responses/E404'
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/MeetingId'
+  /api/v1/meetings/{meeting_id}/agent-setup:
+    put:
+      tags:
+      - 09. 회의
+      summary: 이번 회의에만 적용할 Bordo 활동 설정
+      description: |-
+        **보낸 것만 바꾼다.** 화면에 `적용하기` 가 셋(현재 설정 사용 · 이번에만 다르게 · 추가 설정)이라
+        전량 교체로 두면 한 버튼이 다른 버튼의 입력을 지운다.
+
+        | `mode` | 동작 |
+        |---|---|
+        | `STANDING` | 덮어쓴 것을 전부 지우고 평소 설정으로 돌아간다. 함께 온 `settings` 는 무시한다 |
+        | `ONCE` | `settings` · `prompts` 를 이번 회의에만 적용한다 |
+        | 없음 | 보낸 키만 바꾼다 |
+
+        `prompts` 의 `null` 과 `[]` 는 다르다 — `null` 은 "평소 것 그대로", `[]` 는 "아무 프롬프트도 안 씀" 이다.
+        같게 다루면 프롬프트를 전부 지운 사람의 대리인이 평소 지시를 그대로 쓴다. (`sources` 와 같은 규칙)
+
+        바꿀 수 있는 설정은 화면의 토글 6개 + `tone` 뿐이다. `agent_name` · `active_version` 은 `400` 이다 —
+        회의 하나 때문에 대리인 호칭이 바뀌면 다른 회의의 플로우 노드와 이름이 갈린다.
+        모르는 키를 조용히 버리지 않는 이유는, 화면은 저장됐다고 하는데 대리인은 그 설정을 안 보기 때문이다.
+
+        **평소 설정(`/me/agent/settings`)은 건드리지 않는다.** 회의 하나 때문에 평소 설정을 바꿔 두면
+        끝난 뒤 되돌리는 것이 사람 몫이 되고 대개 잊는다 — 다음 회의에서 켜 둔 줄 알았던 것이 꺼져 있다.
+      operationId: setMeetingAgentSetup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mode:
+                  type: string
+                  enum:
+                  - STANDING
+                  - ONCE
+                settings:
+                  type: object
+                  description: 토글 6개 + tone. 바꿀 것만 담는다.
+                  additionalProperties: true
+                prompts:
+                  anyOf:
+                  - type: array
+                    items:
+                      type: string
+                  - type: 'null'
+                  description: '`null` = 평소 것 그대로, `[]` = 아무것도 안 씀'
+                extra_note:
+                  type: string
+                  description: 「추가 설정」 자유 입력. 평소 지시보다 뒤에 실려 우선한다.
+                sources:
+                  anyOf:
+                  - type: array
+                    items:
+                      type: string
+                  - type: 'null'
+            example:
+              mode: ONCE
+              settings:
+                disclose_work: false
+                disclose_thought: false
+              extra_note: 이번 회의에서는 일정 얘기를 꺼내지 마
+      responses:
+        '200':
+          description: 저장됨. 본문은 `prep` 의 `agent_setup` 과 같은 모양이다.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeetingAgentSetup'
+        '400':
+          description: 모르는 설정 키 · 없는 말투 · 잘못된 `mode` · 모르는 `sources` 값
+        '401':
+          $ref: '#/components/responses/E401'
+        '404':
+          $ref: '#/components/responses/E404'
+        '409':
+          description: 이미 끝난 회의 (`MEETING_LOCKED`)
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/MeetingId'
+  /api/v1/debate-points/{point_id}/stance:
+    put:
+      tags:
+      - 09. 회의
+      summary: 논쟁점에 대한 나의 입장 저장
+      description: |-
+        `PUT` 인 이유는 **사람마다 하나**이기 때문이다. 같은 쟁점에 내 입장이 둘이면 대리인이 어느 쪽으로 말할지 정할 수 없다.
+        두 번 보내면 갱신이다.
+
+        여기 적은 것은 **대리인 프롬프트의 맨 뒤**에 실린다. 쟁점 하나에 대한 본인의 답이라 평소 지시·회의별 지시보다 구체적이고,
+        어긋날 때 이쪽이 이겨야 한다.
+
+        `option_key` 는 선택이다. 화면의 A/B 를 고르지 않고 글만 적는 것이 정상이라 저장을 막지 않는다.
+        다만 그 논쟁점에 **없는** 키를 보내면 `400` + 고를 수 있었던 목록이다 — 조용히 버리면 사용자는 A 를 골랐는데 대리인은 아무것도 안 고른 채 말한다.
+      operationId: setDebateStance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                body:
+                  type: string
+                option_key:
+                  type: string
+                  description: 고른 선택지. 비워 둘 수 있다.
+              required:
+              - body
+            example:
+              body: 남은 기간을 보면 핵심 기능부터 구현하는 쪽이 맞아요.
+              option_key: A
+      responses:
+        '201':
+          description: 처음 저장됨. 본문은 `DebatePoint`(내 입장 포함).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DebatePoint'
+        '200':
+          description: 갱신됨
+        '400':
+          description: 빈 본문 · 그 논쟁점에 없는 `option_key`
+        '401':
+          $ref: '#/components/responses/E401'
+        '404':
+          description: 논쟁점 없음(`DEBATE_POINT_NOT_FOUND`) · 이 회의의 참석자가 아님(`STATE_NOT_FOUND`)
+        '409':
+          description: 이미 끝난 회의 (`MEETING_LOCKED`)
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/DebatePointId'
+    delete:
+      tags:
+      - 09. 회의
+      summary: 내 입장 삭제
+      description: |-
+        화면의 ⋮ 메뉴. 없는 입장을 지우면 `404` 다 — `204` 를 주면 애초에 저장이 안 됐던 것을 사용자가 못 알아챈다.
+      operationId: deleteDebateStance
+      responses:
+        '204':
+          description: 삭제됨
+        '401':
+          $ref: '#/components/responses/E401'
+        '404':
+          $ref: '#/components/responses/E404'
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/DebatePointId'
   /api/v1/meetings/{meeting_id}/prebrief/generate:
     post:
       tags:
       - 09. 회의
-      summary: 사전 브리핑 생성 (비동기)
+      summary: 사전 브리핑 생성 (비동기) — ⛔ 대체됨
       description: |-
+        ⛔ **`POST /meetings/{id}/absence` + `GET /meetings/{id}/prep` 으로 대체됐다.**
+        읽을 오퍼레이션(`poll_url` 이 가리키는 `GET .../prebrief`)이 스펙에 아예 정의돼 있지 않아,
+        만들라는 경로만 있고 결과를 꺼낼 길이 없었다. 예측은 이제 불참을 등록할 때 서버가 걸어 두고
+        준비 화면 조회에 함께 실려 온다.
+
+        ---
+
         회의 전에 팀 상태를 분석해 **예상 쟁점·예상 질문·충돌 지점**을 만든다.
 
         모델 호출이 필요하므로 Celery 로 처리하고 `202` 를 반환한다. 완료는 WebSocket `meeting.prebrief.completed` 로 알린다.
@@ -4194,8 +4575,14 @@ paths:
     post:
       tags:
       - 09. 회의
-      summary: 사전 답변 저장
+      summary: 사전 답변 저장 — ⛔ 대체됨
       description: |-
+        ⛔ **`PUT /debate-points/{id}/stance` 로 대체됐다.**
+        이쪽은 `topic` + `pattern`(정규식) 기반이라 논쟁점 하나에 묶을 필드가 없고 `GET`·`PATCH`·`DELETE` 도 없는데,
+        화면은 논쟁점별 답변 카드마다 수정·삭제 ⋮ 메뉴를 요구한다. `pattern` 은 화면 어디에도 없는 낱말이다.
+
+        ---
+
         "이런 패턴의 질문이 오면 이렇게 답해라"를 사용자가 미리 등록한다.
 
         `allowed_to_speak=false` 면 대리인은 이 답변을 **알고 있어도 발언하지 않고 유보한다.**
@@ -5126,6 +5513,173 @@ paths:
       - bearerAuth: []
       parameters:
       - $ref: '#/components/parameters/TeamId'
+  /internal/v1/meetings/participants:
+    get:
+      tags:
+      - 13. Internal API (Discord Bot)
+      summary: 이 회의의 참석·대리 상태
+      description: |-
+        봇이 회의를 열 때 `○○ 님은 Bordo 가 대신 참석합니다` 를 게시하고, 참석 여부를 물을 대상을 고르는 데 쓴다.
+
+        **봇의 인메모리 상태를 대신한다.** 지금 봇은 대리 대상자를 모듈 전역 `set` 에, 진행 중 회의를 cog 의 dict 에 들고 있어
+        재시작하면 통째로 잃는데 서버에 되물을 경로가 없었다. 진실의 원본을 서버 하나로 모은다(설계 2원칙).
+
+        | 필드 | 뜻 |
+        |---|---|
+        | `will_speak` | 이 발언에 대리인이 깨어날 사람인가. **서버의 대상 판정(`targeting.candidates`)과 같은 식**이다 |
+        | `asked` | 참석 여부를 이미 정했는가. `false` 면 팝업으로 물어볼 대상 |
+        | `prepared` | 준비 화면을 얼마나 채웠는가 (`points` 는 회의 전체, `stances` 는 그 사람 것) |
+        | `has_note` | 회의 한정 지시가 있는가. 봇은 내용을 해석하지 않는다 — 대리인이 쓴다 |
+
+        `will_speak` 을 봇이 자기 규칙으로 판단하면 "대신 참석합니다" 라고 알렸는데 정작 대리인이 안 깨어난다.
+      operationId: internalMeetingParticipants
+      responses:
+        '200':
+          description: 조회됨
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  meeting_id:
+                    type: string
+                  title:
+                    type: string
+                  status:
+                    type: string
+                  project_id:
+                    type: string
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        user_id: {type: string}
+                        discord_user_id: {type: string, nullable: true}
+                        name: {type: string}
+                        attendance: {type: string}
+                        delegated: {type: boolean}
+                        agent_name: {type: string}
+                        will_speak: {type: boolean}
+                        asked: {type: boolean}
+                        has_note: {type: boolean}
+                        prepared:
+                          type: object
+                          properties:
+                            points: {type: integer}
+                            stances: {type: integer}
+              example:
+                count: 2
+                meeting_id: meeting_3
+                title: 글로벌 회의 일정 및 개발 방향 논의
+                status: ACTIVE
+                project_id: prj_b
+                results:
+                - user_id: usr_backend_01
+                  discord_user_id: '111'
+                  name: 서재민
+                  attendance: DELEGATED
+                  delegated: true
+                  agent_name: 서재민의 Bordo
+                  will_speak: true
+                  asked: true
+                  has_note: true
+                  prepared:
+                    points: 3
+                    stances: 2
+                - user_id: usr_front_01
+                  discord_user_id: '222'
+                  name: 임수연
+                  attendance: PENDING
+                  delegated: false
+                  agent_name: 임수연의 Bordo
+                  will_speak: false
+                  asked: false
+                  has_note: false
+                  prepared:
+                    points: 3
+                    stances: 0
+        '400':
+          description: '`thread_id` 없음. 빈 값으로 조회하면 웹에서 만든 회의(`discord_channel_id=""`)가 잡힌다.'
+        '401':
+          $ref: '#/components/responses/E401'
+        '404':
+          description: 이 스레드에 연결된 회의 없음 (`MEETING_NOT_FOUND`)
+      security:
+      - serviceToken: []
+      parameters:
+      - name: thread_id
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Discord 스레드 id
+        example: '876543210987654321'
+  /internal/v1/meetings/absence:
+    post:
+      tags:
+      - 13. Internal API (Discord Bot)
+      summary: 회의 하나에 대한 불참 등록 / 해제
+      description: |-
+        회의 시작 팝업의 `불참하기` 가 여기로 들어온다.
+
+        **`/internal/v1/delegate/on` 과 다르다.** 그쪽은 그 사용자의 예정·확정·진행 중 회의를 **한꺼번에** 뒤집는다 —
+        팝업에서 불참을 한 번 누르면 오늘 남은 회의가 전부 넘어간다.
+
+        웹의 `POST /api/v1/meetings/{id}/absence` 와 **같은 함수를 지난다.**
+        봇으로 들어왔다고 다른 상태가 되면 화면 뱃지가 경로에 따라 갈린다.
+      operationId: internalMeetingAbsence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                thread_id:
+                  type: string
+                discord_user_id:
+                  type: string
+                delegated:
+                  type: boolean
+                  default: true
+                  description: '`false` 면 참여로 되돌린다'
+              required:
+              - thread_id
+              - discord_user_id
+            example:
+              thread_id: '876543210987654321'
+              discord_user_id: '111'
+              delegated: true
+      responses:
+        '200':
+          description: 반영됨
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  meeting_id: {type: string}
+                  user_id: {type: string}
+                  delegated: {type: boolean}
+                  attendance: {type: string}
+              example:
+                meeting_id: meeting_3
+                user_id: usr_backend_01
+                delegated: true
+                attendance: DELEGATED
+        '400':
+          $ref: '#/components/responses/E400'
+        '401':
+          $ref: '#/components/responses/E401'
+        '404':
+          description: 연결된 계정 없음(`USER_NOT_FOUND`) · 스레드에 연결된 회의 없음(`MEETING_NOT_FOUND`)
+        '409':
+          description: 이미 끝난 회의 (`MEETING_LOCKED`)
+      security:
+      - serviceToken: []
   /internal/v1/discord/messages:
     post:
       tags:
@@ -9227,8 +9781,18 @@ paths:
                   type: boolean
                 allow_midmeeting_question:
                   type: boolean
+                disclose_work:
+                  type: boolean
+                  description: 작업 공개
+                disclose_plan:
+                  type: boolean
+                  description: 계획 공개
+                disclose_thought:
+                  type: boolean
+                  description: 생각 공개
                 disclose_work_plan_thought:
                   type: boolean
+                  description: '옛 이름. **셋을 함께 움직이는 지름길**이다. 낱개 키와 함께 보내면 낱개 쪽이 이긴다 — 사용자가 실제로 만진 것은 낱개다.'
             example:
               allow_midmeeting_question: true
   /api/v1/me/agent/prompts:
@@ -11747,6 +12311,186 @@ components:
       - COMPLETED
       - REJECTED
       description: '**AI가 만든 태스크는 예외 없이 `PENDING_APPROVAL` 로 시작한다.** 사람이 승인해야 `TODO` 가 된다.'
+    MeetingPrepHeader:
+      type: object
+      description: 「회의 대리 참석 준비」 헤더. **문자열은 서버가 완성해 내려준다** — 브라우저 시간대로 찍으면 시간대가 다른 팀원이 같은 회의를 다른 시각으로 본다.
+      properties:
+        meeting_id:
+          type: string
+        title:
+          type: string
+        project_name:
+          type: string
+        team_name:
+          type: string
+        scheduled_at:
+          type: string
+          format: date-time
+          description: RFC3339 (오프셋 포함)
+        ends_at:
+          type: string
+          format: date-time
+          description: '`scheduled_at + duration_min`. 종료 시각 컬럼은 없다.'
+        when:
+          type: string
+          description: '`8월 18일 14:00 - 15:00` — 요청자 시간대로 조립'
+          example: 8월 18일 14:00 - 15:00
+        location:
+          type: string
+          enum:
+          - Discord
+          - 서비스
+        status:
+          $ref: '#/components/schemas/MeetingStatus'
+        delegated:
+          type: boolean
+        badge:
+          type: string
+          description: '`{대리인 이름} 대리 참석 예정` · 진행 중이면 `… 대리 참석 중` · 아니면 `참석 예정`. 클라이언트가 필드 조합으로 만들면 화면마다 갈린다.'
+          example: 서재민의 Bordo 대리 참석 예정
+        prep_url:
+          type: string
+          nullable: true
+        created:
+          type: boolean
+          description: 이번 호출로 새로 켜졌는가 (`absence` 응답에만)
+      required:
+      - meeting_id
+      - title
+      - when
+      - delegated
+      - badge
+    DebatePoint:
+      type: object
+      description: 예상 논쟁점 하나 + **내** 입장. 쟁점은 회의에 달리고 입장은 사람마다 갈린다.
+      properties:
+        id:
+          type: string
+        order:
+          type: integer
+        label:
+          type: string
+          description: '`논쟁점 01`. 두 자리 맞춤을 클라이언트가 하면 10번째에서 갈린다.'
+          example: 논쟁점 02
+        title:
+          type: string
+          description: 질문형. `A 할 것인가, B 할 것인가?`
+        options:
+          type: array
+          items:
+            type: object
+            properties:
+              key: {type: string, example: A}
+              title: {type: string}
+              description: {type: string}
+        rationale:
+          type: string
+          description: '`Bordo가 이렇게 예측했어요` 문단'
+        evidence:
+          type: array
+          description: 근거 카드. **스냅샷이다** — 원본이 나중에 바뀌어도 그때 무엇을 보고 예측했는지가 남아야 한다. 인용문은 모델이 아니라 코드가 원본에서 만든다.
+          items:
+            type: object
+            properties:
+              kind:
+                type: string
+                enum:
+                - meeting
+                - work
+              title: {type: string, example: 8월 15일 · 기능 구현 범위 논의}
+              who: {type: string, example: 최비성}
+              at: {type: string, format: date-time}
+              body: {type: string}
+              link:
+                type: object
+                description: '`{label, meeting_id}` 또는 `{label, work_item_id}`'
+                additionalProperties: true
+        created_by_agent:
+          type: boolean
+          description: '`false` 면 안건에서 규칙으로 만든 것이다. 화면이 `Bordo가 예상했어요` 문구를 붙이면 안 된다.'
+        status:
+          type: string
+          enum:
+          - NEEDED
+          - ANSWERED
+        status_label:
+          type: string
+          enum:
+          - 답변필요
+          - 답변완료
+        stance:
+          anyOf:
+          - type: object
+            properties:
+              id: {type: string}
+              option_key: {type: string, nullable: true}
+              body: {type: string}
+              updated_at: {type: string, format: date-time}
+          - type: 'null'
+      required:
+      - id
+      - order
+      - label
+      - title
+      - status
+      - status_label
+    MeetingAgentSetup:
+      type: object
+      description: 「Bordo 활동 설정」. 실제 적용값과 평소 값을 함께 내려준다 — 되돌렸을 때 무엇으로 돌아가는지 화면이 보여줘야 한다.
+      properties:
+        mode:
+          type: string
+          enum:
+          - STANDING
+          - ONCE
+          description: 컬럼이 아니라 파생값이다. 모드와 실제 덮어쓴 값이 어긋나면 화면과 대리인이 서로 다른 것을 본다.
+        mode_label:
+          type: string
+          enum:
+          - 현재 설정 사용
+          - 이번에만 다르게 사용
+        settings:
+          type: object
+          description: 이번 회의에서 실제로 판정에 쓰일 값 (평소 설정 + 덮어쓰기)
+          additionalProperties: true
+        standing_settings:
+          type: object
+          description: 평소 설정. `현재 설정 사용` 을 눌렀을 때 돌아갈 자리.
+          additionalProperties: true
+        overridden_keys:
+          type: array
+          items:
+            type: string
+        prompts:
+          type: array
+          description: 이번 회의에 실제로 실릴 시스템 프롬프트 본문
+          items:
+            type: string
+        standing_prompts:
+          type: array
+          description: 설정 화면에 저장해 둔 카드 (`id` 로 수정·삭제)
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              body: {type: string}
+        standing_prompt_limit:
+          type: integer
+          description: 평소 지시가 실제로 몇 개 실리는지(최근 5개). 화면이 이 수를 모르면 여섯 번째 카드가 조용히 무시된다.
+        extra_note:
+          type: string
+          description: 「추가 설정」 자유 입력. 평소 지시보다 뒤에 실려 우선한다.
+        sources:
+          anyOf:
+          - type: array
+            items:
+              type: string
+          - type: 'null'
+          description: '`null` = 고른 적 없음(제한 없음), `[]` = 아무 자료도 안 봄'
+      required:
+      - mode
+      - mode_label
+      - settings
     MeetingStatus:
       type: string
       enum:
@@ -14062,8 +14806,19 @@ components:
         allow_midmeeting_question:
           type: boolean
           description: '`회의 중간 질문`'
+        disclose_work:
+          type: boolean
+          description: 작업 공개
+        disclose_plan:
+          type: boolean
+          description: 계획 공개
+        disclose_thought:
+          type: boolean
+          description: 생각 공개
         disclose_work_plan_thought:
           type: boolean
+          readOnly: true
+          description: '옛 이름. **셋 중 하나라도 켜져 있으면 참**인 파생값이라 읽기 전용이다. POLICY 의 STATUS 관문이 이 값을 본다.'
           description: '`작업/계획/생각 공개`'
         tone:
           type: string
@@ -14551,6 +15306,14 @@ components:
                     prompt:
                       type: string
                       description: 이 회의에 한정된 사전 지시
+                    absence_url:
+                      type: string
+                      description: '`회의에 참여하지 않아요` 를 누르면 부를 곳 (`POST`). 클라이언트가 경로를 조립하면 경로가 바뀔 때 두 곳을 고쳐야 한다.'
+                      example: /api/v1/meetings/meeting_3/absence
+                    prep_url:
+                      type: string
+                      description: 그다음 열 「회의 대리 참석 준비」 화면
+                      example: /api/v1/meetings/meeting_3/prep
                     sources:
                       anyOf:
                       - type: array
@@ -14946,6 +15709,22 @@ components:
         type: string
       example: idem-1760000000-a1b2c3d4
       description: 외부 쓰기 요청의 중복 방지 키. 같은 키로 재요청하면 기존 결과를 그대로 돌려줍니다.
+    MeetingId:
+      name: meeting_id
+      in: path
+      required: true
+      schema:
+        type: string
+      example: meeting_3
+      description: 회의 ID. 프로젝트 참여자가 아니면 `403`, 없는 회의면 `404 MEETING_NOT_FOUND`.
+    DebatePointId:
+      name: point_id
+      in: path
+      required: true
+      schema:
+        type: string
+      example: dp_2
+      description: 예상 논쟁점 ID. 없으면 `404 DEBATE_POINT_NOT_FOUND`.
     ProjectId:
       name: project_id
       in: path
