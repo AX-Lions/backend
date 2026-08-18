@@ -293,11 +293,19 @@ if MTG:
 
 home = call("GET", "/home", label="홈")
 assert "shortcuts" in home, "shortcuts (Zero/Discord 바로가기) 가 없습니다"
+assert "user_avatar_url" in home, "사이드바 프로필 아바타 자리가 없습니다"
 print(f"     Zero 방 = {home['shortcuts']['agent_room_id']}, "
       f"Discord 연결 = {home['shortcuts']['discord']['connected']}")
 if home["today_schedule"]:
     a = home["today_schedule"][0]["action"]
     print(f"     오늘 일정 버튼 = {a['label']} ({a['kind']})")
+
+# 대리인 방 이름은 저장값이 아니라 주인의 지금 호칭입니다. `AI 대리인` 은 화면
+# 어디에도 없는 낱말이라, 목록에 그게 남아 있으면 조립 규칙이 안 걸린 것입니다.
+sidebar = call("GET", "/chat/sidebar", label="채팅 사이드바")
+agent_room = sidebar["my_agent_room"]
+assert agent_room and agent_room["title"].endswith("Bordo"),     f"대리인 방 이름이 호칭 규칙을 안 따릅니다: {agent_room and agent_room['title']}"
+print(f"     내 대리인 방 = {agent_room['title']}")
 if home["recent_meeting_summary"]:
     s = home["recent_meeting_summary"]
     print(f"     최근 회의 = {s['team_name']} / {s['title']} / 불참={s['missed']}")

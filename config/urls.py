@@ -7,8 +7,9 @@ Bordo API 라우팅.
 * **D(API 서버)** — 채팅 · 현재 상태 · 태스크 · 캘린더 · 문서
 * **A(Discord)** — `/internal/v1/...`
 * **B(AI · 실시간)** — Agent Run 스트림, `/ws/projects/{id}`
+* **MCP** — `/mcp` (개인 AI 클라이언트, `brd_` 토큰) · `/api/v1/me/mcp-token`
 
-MCP(`/mcp`)와 동기화는 2차라 아직 없습니다.
+동기화(`sync-*`)는 2차라 아직 없습니다.
 """
 from django.contrib import admin
 from django.urls import path
@@ -17,9 +18,11 @@ from apps.accounts import views as accounts
 from apps.agent import views as agent
 from apps.calendars import views as calendars
 from apps.discord import views as discord_internal
+from apps.discord import web_views as discord_web
 from apps.chat import views as chat
 from apps.documents import views as documents
 from apps.home import views as home
+from apps.mcp import views as mcp
 from apps.meetings import views as meetings
 from apps.orgs import views as orgs
 from apps.states import views as states
@@ -68,6 +71,11 @@ urlpatterns = [
     path(f"{API}/me/agent/prompts", agent.prompts),
     path(f"{API}/me/agent/prompts/<uuid:prompt_id>", agent.prompt_detail),
 
+    # ── 12. Discord 연동 (웹) — 봇이 DM 으로 준 코드를 여기서 입력합니다
+    path(f"{API}/me/discord/link", discord_web.me_discord_link),
+    path(f"{API}/teams/<uuid:team_id>/discord/link", discord_web.team_discord_link),
+    path(f"{API}/teams/<uuid:team_id>/discord/status", discord_web.team_discord_status),
+
     # ── 09. 회의 · 플로우
     path(f"{API}/projects/<uuid:project_id>/meetings", meetings.meetings),
     path(f"{API}/meetings/<uuid:meeting_id>", meetings.meeting_detail),
@@ -75,6 +83,9 @@ urlpatterns = [
     path(f"{API}/meetings/<uuid:meeting_id>/flow", meetings.flow),
     # 작업 플로우는 기간이 스코프라 회의 경로를 쓸 수 없습니다 (이슈 #54)
     path(f"{API}/projects/<uuid:project_id>/flow", meetings.project_flow),
+    # 플로우 노드(사람)를 눌렀을 때 우측 패널이 부릅니다.
+    path(f"{API}/projects/<uuid:project_id>/flow/participants/<uuid:user_id>",
+         meetings.flow_participant),
     path(f"{API}/meetings/<uuid:meeting_id>/indexes", meetings.indexes),
     path(f"{API}/meetings/<uuid:meeting_id>/summary-table", meetings.summary_table),
     path(f"{API}/meetings/<uuid:meeting_id>/context", meetings.context),
@@ -102,6 +113,10 @@ urlpatterns = [
          agent.conversation_messages),
     path(f"{API}/me/pending-questions", agent.my_pending_questions),
     path(f"{API}/pending-questions/<uuid:question_id>/answer", agent.answer_question),
+    # AI 실행 단계·근거. 대화 메시지가 내려주는 run_id 로 여기까지 옵니다.
+    path(f"{API}/agent-runs/<uuid:run_id>", agent.agent_run_detail),
+    path(f"{API}/agent-runs/<uuid:run_id>/steps", agent.agent_run_steps),
+    path(f"{API}/agent-runs/<uuid:run_id>/evidence", agent.agent_run_evidence),
 
     # ── 04. 문서
     path(f"{API}/projects/<uuid:project_id>/documents", documents.documents),
@@ -183,7 +198,7 @@ urlpatterns = [
     path(f"{INTERNAL}/outbox-events/<uuid:event_id>/ack", discord_internal.outbox_ack),
     path(f"{INTERNAL}/outbox-events/<uuid:event_id>/fail", discord_internal.outbox_fail),
 
-    # 봇이 아직 쓰는 옛 경로. 명세는 /meetings/start 입니다.
-    # 봇이 옮겨 오면 지웁니다 — 지금 지우면 회의 시작이 통째로 막힙니다.
-    path(f"{INTERNAL}/meetings", discord_internal.meeting_start),
+    # ── /mcp — 개인 AI 클라이언트 (brd_ 토큰). JWT 를 타지 않으므로 /api/v1 과 섞지 않습니다.
+    path("mcp", mcp.mcp),
+    path(f"{API}/me/mcp-token", mcp.me_mcp_token),
 ]

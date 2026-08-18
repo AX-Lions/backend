@@ -61,8 +61,50 @@ def agent_node(owner) -> dict:
     있습니다 — `AI 대리인` 은 화면 어디에도 없는 낱말입니다.
     """
     return {"id": f"{owner.id}:agent", "kind": "AGENT",
-            "user_id": str(owner.id), "name": f"{owner.name}의 Bordo",
+            "user_id": str(owner.id), "name": agent_display_name(owner),
             "avatar_url": owner.avatar_url or None}
+
+
+def agent_display_name(owner) -> str:
+    """
+    대리인 호칭. 본인이 정한 이름이 있으면 그것을 씁니다.
+
+    **여기 한 군데서만 만듭니다.** 노드·AI 조회 상세·채팅방 제목이 각자 조립하면
+    이름을 바꿨을 때 화면마다 다른 이름이 뜹니다.
+
+    설정 행이 없어도 돌아야 합니다 — 설정 화면에 한 번도 안 들어간 사용자의
+    대리인이 이름 때문에 안 그려지면 안 됩니다.
+    """
+    from ..models import AgentSettings
+
+    row = AgentSettings.objects.filter(user_id=owner.id).only("agent_name").first()
+    name = (row.agent_name.strip() if row else "")
+    return name or f"{owner.name}의 Bordo"
+
+
+def agent_display_names(user_ids) -> dict:
+    """
+    여러 사람 몫을 한 번에. 규칙은 `agent_display_name()` 과 같습니다.
+
+    채팅 사이드바는 대리인 방을 여러 개 그립니다. 방마다 위 함수를 부르면
+    목록 하나에 조회가 방 수만큼 붙습니다.
+    """
+    ids = list(user_ids)
+    if not ids:
+        return {}
+
+    from apps.accounts.models import User
+
+    from ..models import AgentSettings
+
+    # 탈퇴한 사람과의 방도 목록에는 남습니다. `all_objects` 로 봐야 이름 없는
+    # 방이 되지 않습니다.
+    names = dict(User.all_objects.filter(id__in=ids).values_list("id", "name"))
+    custom = dict(AgentSettings.objects.filter(user_id__in=ids)
+                  .values_list("user_id", "agent_name"))
+    return {uid: ((custom.get(uid) or "").strip()
+                  or f"{names.get(uid, '')}의 Bordo")
+            for uid in ids}
 
 
 def server_node() -> dict:

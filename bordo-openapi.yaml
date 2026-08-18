@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bordo API
-  version: 0.0.4
+  version: 0.0.5
   summary: AI 협업 대리인 서비스 — 와이어프레임 실물 대조판
   description: |2
 
@@ -24,7 +24,7 @@ info:
     |---|---|---|---|
     | `/api/v1` | Next.js 프론트 | HTTPS REST/JSON | JWT |
     | `/internal/v1` | Discord Bot | HTTPS REST/JSON | Service Token (`X-Service-Token`) |
-    | `/mcp` | Claude Code · Codex · Cursor | MCP / JSON-RPC 2.0 | `dpt_` Token |
+    | `/mcp` | Claude Code · Codex · Cursor | MCP / JSON-RPC 2.0 | `brd_` Token (`POST /me/mcp-token`) |
     | `/ws/projects/{project_id}` | 웹 프론트 | WebSocket | JWT + 프로젝트 멤버십 |
 
     ---
@@ -332,7 +332,7 @@ tags:
 - name: 13. Internal API (Discord Bot)
   description: '**Service Token 전용.** 자연어 명령을 스킬로 실행합니다. Bot 은 판단하지 않고 전달·게시만 합니다.'
 - name: 14. MCP (개인 AI · JSON-RPC 2.0)
-  description: 개인 AI 클라이언트용 JSON-RPC 2.0. Tool 13종. 🕓 **2차 범위**.
+  description: 개인 AI 클라이언트용 JSON-RPC 2.0. **1단계 — 쓰기 도구 3종** (`bordo_` 접두). dual-era(legacy `initialize` · modern `server/discover`). 나머지 10종은 2단계.
 - name: 15. WebSocket (문서)
   description: 실시간 이벤트 계약. 채팅 때문에 필수가 되었습니다.
 - name: 16. 채팅
@@ -868,6 +868,123 @@ paths:
           type: integer
           default: 20
         description: 최대 개수
+  /api/v1/me/mcp-token:
+    post:
+      tags:
+      - 02. 사용자
+      summary: MCP 토큰 발급 (재발급)
+      description: |-
+        개인 AI 클라이언트용 `brd_` 토큰을 발급한다. **원문은 이 응답에 딱 한 번** 실리고 서버에는 해시만 남는다.
+        사용자당 활성 1개 — 재발급이 곧 이전 토큰의 폐기다.
+
+        `setup_command` 를 서버가 만들어 주는 이유 — 사용자가 URL 과 헤더 형식을 직접 조립하면 반드시 틀린다. 복사 버튼 하나로 끝나야 한다.
+
+        > 화면 문구에 반드시 넣을 경고. `.mcp.json` 은 **저장소에 커밋되는 파일**이다. 토큰을 거기 적으면 안 된다.
+        > `claude mcp add` 의 기본 위치(개인 설정)에 넣도록 안내한다.
+      operationId: issueMcpToken
+      responses:
+        '201':
+          description: 발급됨
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: '`brd_` 로 시작. 다시 볼 수 없다.'
+                  issued_at:
+                    type: string
+                    format: date-time
+                  setup_command:
+                    type: string
+                required:
+                - token
+                - issued_at
+                - setup_command
+              example:
+                token: brd_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+                issued_at: '2026-08-18T14:00:00+09:00'
+                setup_command: 'claude mcp add --transport http bordo https://api.bordo.dev/mcp --header "Authorization: Bearer brd_xxxx..."'
+        '401':
+          $ref: '#/components/responses/E401'
+      security:
+      - bearerAuth: []
+    delete:
+      tags:
+      - 02. 사용자
+      summary: MCP 토큰 폐기
+      description: 활성 토큰을 즉시 폐기한다. 없어도 204 다. `GET /users/me` 의 `mcp_token_issued_at` 이 `null` 로 돌아간다.
+      operationId: revokeMcpToken
+      responses:
+        '204':
+          description: 폐기됨
+        '401':
+          $ref: '#/components/responses/E401'
+      security:
+      - bearerAuth: []
+  /api/v1/me/discord/link:
+    post:
+      tags:
+      - 12. Discord 연동 (웹)
+      summary: 내 Discord 계정 연결 (코드 입력)
+      description: |-
+        Discord 에서 `/bordo-connect` 로 DM 받은 6자리 코드를 넣는다. 설정 화면(`/account`)이 부른다.
+        `GET /users/me` 의 `discord_linked` 가 `true` 로 바뀐다.
+
+        같은 Discord 계정이 다른 Bordo 계정에 이어져 있었다면 그쪽에서 떼어 이 계정에 붙인다 —
+        한 Discord 계정이 두 사람에게 이어지면 봇의 발언이 누구 것인지 정할 수 없다.
+
+        오류 — `DISCORD_CODE_INVALID`(400) · `DISCORD_CODE_EXPIRED`(410, 10분) · `DISCORD_CODE_ALREADY_USED`(409)
+      operationId: linkMyDiscord
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                connect_code:
+                  type: string
+              required:
+              - connect_code
+            example:
+              connect_code: 4F2A91
+      responses:
+        '200':
+          description: 연결됨
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  linked: {type: boolean}
+                  user_id: {type: string}
+                  discord_user_id: {type: string, nullable: true}
+              example:
+                linked: true
+                user_id: usr_backend_01
+                discord_user_id: '111'
+        '400':
+          $ref: '#/components/responses/E400'
+        '401':
+          $ref: '#/components/responses/E401'
+        '409':
+          $ref: '#/components/responses/E409'
+      security:
+      - bearerAuth: []
+    delete:
+      tags:
+      - 12. Discord 연동 (웹)
+      summary: 내 Discord 계정 연결 해제
+      operationId: unlinkMyDiscord
+      responses:
+        '200':
+          description: '해제됨 (`linked: false`)'
+        '401':
+          $ref: '#/components/responses/E401'
+      security:
+      - bearerAuth: []
   /api/v1/teams:
     post:
       tags:
@@ -3866,6 +3983,36 @@ paths:
         | `speak_mode` | `AUTO` / `APPROVE_BEFORE_SPEAK` / `SILENT` |
 
         사용자가 회의에 직접 들어오면 프론트가 `enabled=false` 또는 `speak_mode=APPROVE_BEFORE_SPEAK` 로 자동 전환할 수 있다.
+
+        ---
+
+        ⚠️ **구현은 아래 모양입니다.** 위 표는 v1 잔재이고 `allowed_categories` ·
+        `capabilities` · `speak_mode` · `policy_version` 은 서버에 없습니다.
+        화면(불참 등록 팝업)에 대응하는 입력이 없어 만들지 않았습니다.
+
+        ```
+        요청   { "enabled": true,
+                 "sources": ["work", "plan", "thought", "document"],
+                 "prompt": "일정 확정은 하지 말고 의견만 전해 주세요." }
+
+        응답   { "meeting_id", "user_id", "delegated", "attendance",
+                 "prompt", "sources" }
+        ```
+
+        `sources` 는 이 회의에서 대리인이 **근거로 쓸 자료 종류**입니다. 개인
+        설정의 공개 범위와 **둘 다** 통과해야 나갑니다.
+
+        | 보낸 값 | 뜻 |
+        |---|---|
+        | 키 없음 | 지금 값을 그대로 둔다 |
+        | `null` | 고른 적 없음으로 되돌린다 (제한 없음) |
+        | `[]` | **아무 자료도 쓰지 않는다** — 회의 발언만 듣고 답하거나 유보한다 |
+        | `["work"]` | 작업 현황만 |
+
+        목록에 없는 값은 `400 VALIDATION_ERROR` 입니다.
+
+        `prompt` 는 **키가 없어도 빈 문자열로 덮어씁니다.** 자료 범위만 다시
+        고르려던 사람이 지시를 잃지 않도록 화면이 항상 함께 보냅니다.
       operationId: setDelegation
       responses:
         '200':
@@ -4824,6 +4971,11 @@ paths:
         5. 관리자가 Guild·채널을 팀에 연결
 
         코드는 만료·재사용 방지가 적용된다 → `DISCORD_CODE_EXPIRED`, `DISCORD_CODE_ALREADY_USED`
+
+        **구현 메모.** 계정 연결(코드)은 팀 멤버 누구나, `guild_id` 로 서버까지 붙이는 것은 OWNER·ADMIN 만이다.
+        일반 멤버가 `guild_id` 를 같이 보내면 계정 연결은 되고 서버 연결만 `403` 이다.
+        `channels` 는 아직 저장하지 않는다 — 봇이 회의 스레드를 스스로 만들므로 채널 지정이 필요 없다.
+        설정 화면에서 계정만 잇는다면 `POST /me/discord/link` 가 짧다.
       operationId: linkDiscord
       responses:
         '200':
@@ -5244,8 +5396,14 @@ paths:
     post:
       tags:
       - 13. Internal API (Discord Bot)
-      summary: Bot Presence 보고
-      description: '`READY` / `RESUMED` 시 연결 상태를 갱신한다. Gateway 종료 시 Bot 은 **Resume 우선, 실패하면 Identify** 로 재연결한다.'
+      summary: Bot Presence 보고 · 사람 접속 상태
+      description: |-
+        두 용도를 한 경로로 받는다.
+
+        - **봇 생존 신호** — `discord_user_id` 없이 `{status, at}` 만 보내면 (`on_ready` · `on_resumed`) 서버 캐시에 남고 `GET /teams/{id}/discord/status` 의 `bot_status` 가 `READY` 가 된다. 응답 `202`.
+        - **사람 접속 상태** — `discord_user_id` + `status`(online·idle·dnd·offline·invisible). 진행 중 회의의 참석 상태를 갱신한다. 대리 참석을 켠 사람은 건드리지 않는다.
+
+        Gateway 종료 시 Bot 은 **Resume 우선, 실패하면 Identify** 로 재연결한다.
       operationId: internalDiscordPresence
       responses:
         '200':
@@ -5896,397 +6054,71 @@ paths:
     post:
       tags:
       - 14. MCP (개인 AI · JSON-RPC 2.0)
-      summary: MCP JSON-RPC 엔드포인트 (13개 Tool)
+      summary: MCP JSON-RPC 엔드포인트 (1단계 — 쓰기 도구 3종)
       description: |-
-        🕓 **2차 범위** — 1차에서는 사람이 직접 입력합니다. 회의 대리인 기능이 안정적으로 돌아간 뒤에 MCP·로컬 AI 연동을 붙입니다. **빼는 것이 아니라 순서를 미루는 것**입니다. 개인 AI 클라이언트 전용이라 웹 화면이 없는 것이 정상일 수 있습니다.
+        개인 AI 클라이언트(Claude Code · Codex · Cursor)가 붙는 단일 엔드포인트.
+        **1단계는 쓰기 도구 3종**입니다 — 읽기 도구가 없어야 이 장기 토큰이 새더라도 가져갈 게 없습니다.
+        나머지 10종은 아래 `x-deferred-tools` 에 이름만 남깁니다(2단계).
 
         ---
 
-        **전송** HTTPS + JSON-RPC 2.0 · **인증** `Authorization: Bearer dpt_...`
+        **전송** HTTPS + JSON-RPC 2.0, 요청 하나에 JSON 응답 하나. SSE 스트림 · 세션(`Mcp-Session-Id`) · 배치 요청은 **없습니다.**
+        **인증** `Authorization: Bearer brd_...` — `POST /api/v1/me/mcp-token` 으로 발급. 실패는 본문을 읽기 전이라 HTTP `401`.
+        `GET` · `DELETE /mcp` 는 `405`.
 
-        모든 MCP 호출은 `POST /mcp` 하나로 들어가고 `params.name` 으로 Tool 을 구분한다.
-        오류는 HTTP 상태가 아니라 **JSON-RPC `error` 객체**로 오며 HTTP 는 200 이다.
+        ### dual-era — 두 세대의 클라이언트를 모두 받습니다
 
-        ### 13개 Tool
+        | 세대 | 판별 | 흐름 |
+        |---|---|---|
+        | **legacy** (≤ `2025-11-25`) | 본문 `params._meta` 에 판 번호가 **없다** | `initialize` → `notifications/initialized`(**202 · 본문 없음**) → `tools/list` → `tools/call` |
+        | **modern** (`2026-07-28`) | `params._meta["io.modelcontextprotocol/protocolVersion"]` 이 **있다** | `server/discover` → `tools/list` → `tools/call`. `MCP-Protocol-Version` · `Mcp-Method` · `Mcp-Name` 헤더가 오면 본문과 대조 |
 
-        | Tool | 목적 |
-        |---|---|
-        | `deputy_initialize_workspace` | 전용 폴더 생성 |
-        | `deputy_get_team_context` | 팀 정보 조회 |
-        | `deputy_sync_status` | 차이 검사 (3-way) |
-        | `deputy_push_documents` | 문서 업로드 |
-        | `deputy_pull_documents` | 문서 다운로드 |
-        | `deputy_push_current_state` | work·plan·thought 업로드 |
-        | `deputy_search_context` | 팀 맥락 검색 |
-        | `deputy_get_policy` | 정책 조회 |
-        | `deputy_propose_policy_update` | 정책 변경 **제안** |
-        | `deputy_log_work_session` | 작업 세션 기록 |
-        | `deputy_catch_up` | 부재중 요약 |
-        | `deputy_ask_agent` | 다른 대리인에게 질문 |
-        | `deputy_answer_pending_question` | 유보 질문 답변 |
+        한쪽만 만들면 어느 클라이언트를 쓰느냐에 따라 연결 자체가 안 됩니다.
 
-        아래 **Request body 의 예시 드롭다운**에서 Tool 을 골라 보십시오. 각 Tool 의 인자와 결과가 짝으로 들어 있습니다.
+        ### 오류 — 어디로 오는가
+
+        | 종류 | 예 | 오는 곳 | HTTP |
+        |---|---|---|---|
+        | 인증 실패 | 토큰 없음·틀림·폐기 | 공통 오류 형식 (`error.code`) | **401** |
+        | Origin 불일치 | 브라우저에서 남의 도메인 | 공통 오류 형식 | **403** |
+        | 호출 상한 | 사용자당 분당 120 | 공통 오류 형식 | **429** |
+        | JSON 파싱 · 형식 | 깨진 본문, `jsonrpc` 없음 | JSON-RPC `error` `-32700` / `-32600` | 200 |
+        | 모르는 method | `resources/list` | JSON-RPC `error` `-32601` | 200 (**modern 은 404**) |
+        | 모르는 도구 · 인자 형식 | `bordo_nope` | JSON-RPC `error` `-32602` (`data.available`) | 200 |
+        | 헤더·본문 불일치 | `Mcp-Name` ≠ `params.name` | JSON-RPC `error` `-32020` | **400** |
+        | 모르는 프로토콜 판 | `2030-01-01` | JSON-RPC `error` `-32022` (`data.supported`) | **400** |
+        | **도구 실행 오류** | 검증 실패 · 권한 없음 · 대상 없음 · 서버 예외 | **`result.isError: true`** + `content[0].text` 에 사유 | 200 |
+
+        도구 실행 오류를 JSON-RPC `error` 로 내면 클라이언트가 프로토콜 문제로 취급해 모델에게 안 보여주고, AI 는 왜 실패했는지 모른 채 같은 호출을 반복합니다.
+        서버 예외는 고정 문구만 나갑니다 — 원문 오류에는 제약 조건 이름과 값이 섞여 있고 그게 개발자 컴퓨터의 AI 대화창에 그대로 찍힙니다.
+
+        ### 1단계 도구 3종 (`bordo_` 접두)
+
+        | Tool | 하는 일 | 멱등 |
+        |---|---|---|
+        | `bordo_record_work` | 지금 하는 일 기록. `(project, owner, title)` 이 같으면 **갱신** | 재시도 = 갱신 |
+        | `bordo_upload_document` | 문서 업로드. 비밀키를 **저장 전에** 지우고 `masked_secrets` 건수를 돌려줌 | `(project, title, content_hash)` 같으면 안 만듦 |
+        | `bordo_complete_work` | `work_item_id` 또는 `title` 로 찾아 `DONE` · 100% | 이미 완료면 `ALREADY_DONE` 성공 |
+
+        `project_id` 를 생략하면 **가장 최근에 연 프로젝트**로 갑니다. 그 사실은 결과 `project.resolved_by: "default"` 로 반드시 돌려줍니다.
+        핸드셰이크(`initialize` · `server/discover`) 결과의 `instructions` 에 쓸 수 있는 프로젝트 목록이 실립니다 — 읽기 도구 없이 클라이언트가 `project_id` 를 아는 유일한 경로입니다.
+        기록된 항목은 `source: "mcp"` 가 붙어 화면이 「개인 AI가 기록함」 뱃지를 답니다.
       operationId: mcpJsonRpc
-      responses:
-        '200':
-          description: |-
-            정상 결과 또는 **JSON-RPC 오류**. HTTP 상태는 어느 쪽이든 200 이다.
-
-            주요 오류 코드 — `-32009` SYNC_CONFLICT · `-32011` AGENT_MAX_HOPS_EXCEEDED · `-32601` METHOD_NOT_FOUND
-          content:
-            application/json:
-              schema:
-                oneOf:
-                - $ref: '#/components/schemas/JsonRpcResult'
-                - $ref: '#/components/schemas/JsonRpcError'
-              examples:
-                deputy_initialize_workspace:
-                  summary: deputy_initialize_workspace 결과
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-0100
-                    result:
-                      workspace_path: ~/projects/deputy-backend/.deputy
-                      created: true
-                      structure:
-                      - .deputy/sync-state.json
-                      - .deputy/records/
-                      - .deputy/current/work.json
-                      team:
-                        id: team_deputy
-                        name: Deputy 개발팀
-                deputy_get_team_context:
-                  summary: deputy_get_team_context 결과
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-0101
-                    result:
-                      team:
-                        id: team_deputy
-                        name: Deputy 개발팀
-                        my_role: OWNER
-                      members:
-                      - user_id: usr_backend_01
-                        name: 최비성
-                        project_role: backend
-                        timezone: Asia/Seoul
-                      categories:
-                      - database
-                      - backend
-                      - frontend
-                      - discord
-                deputy_sync_status:
-                  summary: deputy_sync_status 결과
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-0102
-                    result:
-                      local_only:
-                      - local_path: records/backend/outbox.md
-                        reason: NEW
-                      server_only: []
-                      conflicts: []
-                deputy_pull_documents:
-                  summary: deputy_pull_documents 결과
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-0103
-                    result:
-                      documents:
-                      - document_id: doc_040
-                        local_path: records/discord/embed-spec.md
-                        title: Discord Embed 규격
-                        server_version: 2
-                        content_hash: sha256:4f77aa20
-                      skipped_private: 1
-                deputy_push_current_state:
-                  summary: deputy_push_current_state 결과
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-0104
-                    result:
-                      versions:
-                        work: 12
-                        plans: 8
-                        thoughts: 5
-                      applied:
-                        work:
-                        - id: work_44
-                          action: UPDATED
-                          progress: 75
-                        plans:
-                        - id: plan_9
-                          action: UPDATED
-                        thoughts:
-                        - id: th_3
-                          action: CREATED
-                      conflicts: []
-                      sync_run_id: sync_88
-                deputy_search_context:
-                  summary: deputy_search_context 결과
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-0105
-                    result:
-                      query: 다중 팀 지원 DB 구조
-                      pipeline:
-                        sql_filter_hits: 24
-                        semantic_hits: 6
-                        state_hits: 2
-                        relation_hits: 1
-                      results:
-                      - source_type: document
-                        source_id: doc_013
-                        title: 다중 팀 DB 설계
-                        excerpt: users ↔ team_members ↔ teams 다대다 구조
-                        relevance_score: 0.88
-                        visibility: team
-                        category: database
-                      excluded_private: 2
-                deputy_get_policy:
-                  summary: deputy_get_policy 결과
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-0106
-                    result:
-                      policy:
-                        active_version: 7
-                        feasibility:
-                          allowed_categories:
-                          - database
-                          - backend
-                          min_confidence: 0.7
-                          require_evidence: true
-                        schedule:
-                          mode: SUGGEST_ONLY
-                          max_shift_hours: 4
-                deputy_propose_policy_update:
-                  summary: deputy_propose_policy_update 결과
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-0107
-                    result:
-                      proposal_id: prop_1
-                      status: PENDING_USER_CONFIRMATION
-                      current_version: 7
-                      proposed_diff:
-                        feasibility.min_confidence:
-                          from: 0.7
-                          to: 0.8
-                      confirm_url: https://app.bordo.dev/t/team_deputy/settings/policy?proposal=prop_1
-                deputy_log_work_session:
-                  summary: deputy_log_work_session 결과
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-0108
-                    result:
-                      run_id: run_99
-                      references_resolved:
-                      - local_path: records/database/team-schema.md
-                        document_id: doc_013
-                      activity_event_id: act_5540
-                deputy_catch_up:
-                  summary: deputy_catch_up 결과
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-0109
-                    result:
-                      since: '2026-08-06T18:00:00+09:00'
-                      until: '2026-08-07T09:00:00+09:00'
-                      meetings:
-                      - meeting_id: meeting_3
-                        title: 다중 팀 DB 구조 리뷰
-                        status: ENDED
-                        summary: 다중 팀 지원은 team_members 다대다 구조로 가능. VIEWER 권한은 미결.
-                      my_agent_utterances:
-                      - run_id: run_72
-                        confidence: 0.91
-                        policy_decision: ALLOW_WITH_EVIDENCE
-                        evidence_count: 2
-                      pending_questions:
-                      - id: q_12
-                        question: VIEWER 가 대리인 발언을 트리거할 수 있나요?
-                        asked_by: 임수연
-                      pending_approvals:
-                      - type: task
-                        id: task_9
-                        title: team_members 인덱스 추가
-                      sync:
-                        server_only: 1
-                        conflicts: 1
-                deputy_answer_pending_question:
-                  summary: deputy_answer_pending_question 결과
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-0110
-                    result:
-                      question_id: q_12
-                      status: ANSWERED
-                      delivery_status: QUEUED
-                      delivery:
-                        to_user_id: usr_front_01
-                        channel: discord_dm
-                        outbox_event_id: obx_620
-                      promoted_thought_id: th_6
-                initialize:
-                  summary: initialize 결과
-                  value:
-                    jsonrpc: '2.0'
-                    id: init-1
-                    result:
-                      protocolVersion: '2024-11-05'
-                      serverInfo:
-                        name: deputy-mcp
-                        version: 1.0.0
-                      capabilities:
-                        tools:
-                          listChanged: true
-                      session:
-                        user_id: usr_backend_01
-                        teams:
-                        - team_id: team_deputy
-                          team_role: OWNER
-                        tool_capabilities:
-                        - READ_TEAM_CONTEXT
-                        - SYNC_DOCUMENTS
-                        - ASK_QUESTIONS
-                tools/list:
-                  summary: tools/list 결과 (13종)
-                  value:
-                    jsonrpc: '2.0'
-                    id: list-1
-                    result:
-                      tools:
-                      - name: deputy_initialize_workspace
-                        description: 전용 폴더 생성
-                        inputSchema:
-                          type: object
-                          properties: {}
-                      - name: deputy_get_team_context
-                        description: 팀 정보 조회
-                        inputSchema:
-                          type: object
-                          properties: {}
-                      - name: deputy_sync_status
-                        description: 차이 검사 (3-way diff)
-                        inputSchema:
-                          type: object
-                          properties: {}
-                      - name: deputy_pull_documents
-                        description: 문서 다운로드
-                        inputSchema:
-                          type: object
-                          properties: {}
-                      - name: deputy_push_current_state
-                        description: 현재 상태 업로드
-                        inputSchema:
-                          type: object
-                          properties: {}
-                      - name: deputy_search_context
-                        description: 팀 맥락 검색
-                        inputSchema:
-                          type: object
-                          properties: {}
-                      - name: deputy_get_policy
-                        description: 정책 조회
-                        inputSchema:
-                          type: object
-                          properties: {}
-                      - name: deputy_propose_policy_update
-                        description: 정책 변경 제안
-                        inputSchema:
-                          type: object
-                          properties: {}
-                      - name: deputy_log_work_session
-                        description: 작업 세션 기록
-                        inputSchema:
-                          type: object
-                          properties: {}
-                      - name: deputy_catch_up
-                        description: 부재중 요약
-                        inputSchema:
-                          type: object
-                          properties: {}
-                      - name: deputy_answer_pending_question
-                        description: 유보 질문 답변
-                        inputSchema:
-                          type: object
-                          properties: {}
-                      - name: deputy_push_documents
-                        description: 문서 업로드
-                        inputSchema:
-                          type: object
-                          properties: {}
-                      - name: deputy_ask_agent
-                        description: 다른 대리인에게 질문
-                        inputSchema:
-                          type: object
-                          properties: {}
-                deputy_push_documents:
-                  summary: deputy_push_documents 성공
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-8f19
-                    result:
-                      uploaded:
-                      - local_path: records/database/team-schema.md
-                        document_id: doc_013
-                        server_version: 4
-                        masked_secrets: 0
-                      skipped: []
-                      conflicts: []
-                deputy_ask_agent:
-                  summary: deputy_ask_agent 라우팅됨 (hop 1/3)
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-8f28
-                    result:
-                      message_id: msg_01
-                      trace_id: trace_82
-                      hop_count: 1
-                      max_hops: 3
-                      target:
-                        user_id: usr_backend_01
-                        agent_id: agent_backend_01
-                        delegation_enabled: true
-                      run_id: run_75
-                      status: ROUTED
-                오류 · SYNC_CONFLICT:
-                  summary: -32009 — 자동 병합 금지, 해결책 4종 제시
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-8f20
-                    error:
-                      code: -32009
-                      message: SYNC_CONFLICT
-                      data:
-                        local_path: current/plan/index.json
-                        document_id: doc_030
-                        base_version: 4
-                        local_version: 5
-                        server_version: 6
-                        allowed_resolutions:
-                        - keep_local
-                        - keep_server
-                        - keep_both
-                        - manual_merge
-                        conflict_id: cf_1
-                        resolve_url: /api/v1/sync-conflicts/cf_1/resolve
-                오류 · MAX_HOPS_EXCEEDED:
-                  summary: -32011 — 무한 대화 차단, 사람에게 라우팅
-                  value:
-                    jsonrpc: '2.0'
-                    id: req-8f29
-                    error:
-                      code: -32011
-                      message: AGENT_MAX_HOPS_EXCEEDED
-                      data:
-                        trace_id: trace_82
-                        hop_count: 3
-                        max_hops: 3
-                        action: ROUTE_HUMAN
-        '401':
-          $ref: '#/components/responses/E401'
+      x-deferred-tools:
+        description: 2단계. 이름만 예약합니다. 호출하면 `-32602` 입니다.
+        tools:
+        - bordo_initialize_workspace
+        - bordo_get_team_context
+        - bordo_sync_status
+        - bordo_push_current_state
+        - bordo_pull_documents
+        - bordo_search_context
+        - bordo_get_policy
+        - bordo_propose_policy_update
+        - bordo_log_work_session
+        - bordo_catch_up
+        - bordo_ask_agent
+        - bordo_answer_pending_question
       security:
       - mcpToken: []
       requestBody:
@@ -6296,227 +6128,280 @@ paths:
             schema:
               $ref: '#/components/schemas/JsonRpcRequest'
             examples:
-              deputy_initialize_workspace:
-                summary: deputy_initialize_workspace — 전용 폴더 생성
-                description: 로컬에 `.deputy` 워크스페이스를 만든다. 이후 모든 동기화는 이 폴더의 `sync-state.json` Manifest 를 기준으로 한다.
-                value:
-                  jsonrpc: '2.0'
-                  id: req-0100
-                  method: tools/call
-                  params:
-                    name: deputy_initialize_workspace
-                    arguments:
-                      root_path: ~/projects/deputy-backend
-                      team_id: team_deputy
-              deputy_get_team_context:
-                summary: deputy_get_team_context — 팀 정보 조회
-                description: 개인 AI가 로컬에서 문서를 분류할 때 쓰는 카테고리 사전과 팀원 목록.
-                value:
-                  jsonrpc: '2.0'
-                  id: req-0101
-                  method: tools/call
-                  params:
-                    name: deputy_get_team_context
-                    arguments:
-                      team_id: team_deputy
-              deputy_sync_status:
-                summary: deputy_sync_status — 차이 검사 (3-way diff)
-                description: Manifest 의 `base_hash` 와 `local_hash`·`server_hash` 를 비교해 push/pull/conflict 를 판정한다. **이 Tool
-                  이 호출될 때만 파일을 스캔한다.**
-                value:
-                  jsonrpc: '2.0'
-                  id: req-0102
-                  method: tools/call
-                  params:
-                    name: deputy_sync_status
-                    arguments:
-                      team_id: team_deputy
-                      scopes:
-                      - documents
-                      - work
-                      - plans
-                      - thoughts
-              deputy_pull_documents:
-                summary: deputy_pull_documents — 문서 다운로드
-                description: 서버 문서를 로컬로 가져온다. **PRIVATE 문서는 소유자 본인만 받을 수 있다.**
-                value:
-                  jsonrpc: '2.0'
-                  id: req-0103
-                  method: tools/call
-                  params:
-                    name: deputy_pull_documents
-                    arguments:
-                      team_id: team_deputy
-                      filters:
-                        categories:
-                        - database
-                        since: '2026-08-01T00:00:00Z'
-              deputy_push_current_state:
-                summary: deputy_push_current_state — 현재 상태 업로드
-                description: '`work`/`plans`/`thoughts` 를 한 번에 올린다. 하루를 마치며 "Deputy에 정리해줘"라고 지시했을 때 개인 AI가 호출하는 대표 Tool 이다.
-                  **이 데이터가 있어야 대리인이 답할 수 있다.**'
-                value:
-                  jsonrpc: '2.0'
-                  id: req-0104
-                  method: tools/call
-                  params:
-                    name: deputy_push_current_state
-                    arguments:
-                      team_id: team_deputy
-                      work:
-                      - title: team_members 마이그레이션
-                        status: IN_PROGRESS
-                        progress: 75
-                        category: database
-                        blockers: []
-                      plans:
-                      - title: MCP 동기화 엔진
-                        priority: P1
-                      thoughts:
-                      - topic: 다중 팀 권한 모델
-                        content: team_role 과 project_role 분리 필요
-                        confidence: 0.6
-                        requires_discussion: true
-              deputy_search_context:
-                summary: deputy_search_context — 팀 맥락 검색
-                description: 'ReAct Engine 과 **동일한 4단계 파이프라인**을 탄다: SQL 메타 필터 → 키워드/임베딩 → 현재 상태 → 관계(회의·태스크·일정). 결과는 Evidence
-                  로 정규화된다. **PRIVATE 데이터는 존재 여부도 반환하지 않는다.**'
-                value:
-                  jsonrpc: '2.0'
-                  id: req-0105
-                  method: tools/call
-                  params:
-                    name: deputy_search_context
-                    arguments:
-                      team_id: team_deputy
-                      query: 다중 팀 지원 DB 구조
-                      categories:
-                      - database
-                      - backend
-                      state_types:
-                      - work
-                      - plan
-                      - thought
-                      limit: 10
-              deputy_get_policy:
-                summary: deputy_get_policy — 정책 조회
-                description: 개인 AI가 서버에 올리기 전에 '이건 대리인이 말해도 되는 범위인가'를 미리 확인할 때 쓴다.
-                value:
-                  jsonrpc: '2.0'
-                  id: req-0106
-                  method: tools/call
-                  params:
-                    name: deputy_get_policy
-                    arguments:
-                      team_id: team_deputy
-              deputy_propose_policy_update:
-                summary: deputy_propose_policy_update — 정책 변경 제안
-                description: '**개인 AI는 정책을 직접 바꿀 수 없다.** `proposal_id` 만 생성되고 사용자가 웹에서 확정한다.'
-                value:
-                  jsonrpc: '2.0'
-                  id: req-0107
-                  method: tools/call
-                  params:
-                    name: deputy_propose_policy_update
-                    arguments:
-                      team_id: team_deputy
-                      patch:
-                        feasibility:
-                          min_confidence: 0.8
-                      reason: 최근 낮은 신뢰도 답변이 두 번 유보됨
-              deputy_log_work_session:
-                summary: deputy_log_work_session — 작업 세션 기록
-                description: 개인 AI와의 작업 내용을 요약해 남긴다. 활동 피드에 반영된다.
-                value:
-                  jsonrpc: '2.0'
-                  id: req-0108
-                  method: tools/call
-                  params:
-                    name: deputy_log_work_session
-                    arguments:
-                      team_id: team_deputy
-                      summary: team_members 마이그레이션 작성 및 인덱스 전략 검토
-                      references:
-                      - records/database/team-schema.md
-              deputy_catch_up:
-                summary: deputy_catch_up — 부재중 요약
-                description: 자리를 비운 사이 팀에서 일어난 일을 한 번에 받는다. **시간대가 다른 팀에서 아침에 가장 먼저 호출하는 Tool.**
-                value:
-                  jsonrpc: '2.0'
-                  id: req-0109
-                  method: tools/call
-                  params:
-                    name: deputy_catch_up
-                    arguments:
-                      team_id: team_deputy
-                      since: '2026-08-06T18:00:00+09:00'
-              deputy_answer_pending_question:
-                summary: deputy_answer_pending_question — 유보 질문 답변
-                description: 사용자가 개인 AI를 통해 답한다. 답변은 Outbox 로 질문자에게 전달된다.
-                value:
-                  jsonrpc: '2.0'
-                  id: req-0110
-                  method: tools/call
-                  params:
-                    name: deputy_answer_pending_question
-                    arguments:
-                      question_id: q_12
-                      answer: 가능합니다. team_members 중간 테이블로 다대다 구성하면 됩니다.
-                      promote_to_thought: true
-              initialize:
-                summary: initialize — 핸드셰이크
-                description: 클라이언트가 프로토콜 버전을 맞춘다. 응답의 `tool_capabilities` 에 따라 노출 Tool 이 달라진다.
+              initialize (legacy):
+                summary: legacy 핸드셰이크
                 value:
                   jsonrpc: '2.0'
                   id: init-1
                   method: initialize
                   params:
-                    protocolVersion: '2024-11-05'
+                    protocolVersion: '2025-11-25'
                     clientInfo:
                       name: claude-code
                       version: 1.0.0
                     capabilities: {}
+              notifications/initialized (legacy):
+                summary: 핸드셰이크 직후 클라이언트가 보냄 — 응답은 202 · 본문 없음
+                value:
+                  jsonrpc: '2.0'
+                  method: notifications/initialized
+              server/discover (modern):
+                summary: 'modern 핸드셰이크. 헤더 `MCP-Protocol-Version: 2026-07-28` · `Mcp-Method: server/discover`'
+                value:
+                  jsonrpc: '2.0'
+                  id: d-1
+                  method: server/discover
+                  params:
+                    _meta:
+                      io.modelcontextprotocol/protocolVersion: '2026-07-28'
               tools/list:
-                summary: tools/list — 도구 카탈로그
-                description: 사용자의 Capability 에 따라 **노출되는 Tool 이 달라진다.** 권한 없는 Tool 은 목록에서 아예 빠진다.
+                summary: 도구 카탈로그
                 value:
                   jsonrpc: '2.0'
                   id: list-1
                   method: tools/list
                   params: {}
-              deputy_push_documents:
-                summary: deputy_push_documents — 문서 업로드
-                description: 멱등 키 `team_id + local_path + content_hash`. `base_version` 이 서버 현재 버전과 다르면 업로드하지 않고 `-32009 SYNC_CONFLICT`.
+              bordo_record_work:
+                summary: bordo_record_work — 지금 하는 일 기록 (modern 이면 `_meta` 와 `Mcp-Name` 헤더 추가)
                 value:
                   jsonrpc: '2.0'
-                  id: req-8f19
+                  id: 7
                   method: tools/call
                   params:
-                    name: deputy_push_documents
+                    name: bordo_record_work
                     arguments:
-                      team_id: team_deputy
-                      documents:
-                      - local_path: records/database/team-schema.md
-                        category: database
-                        title: 다중 팀 DB 설계
+                      title: MCP 연동
+                      summary: dual-era 분기와 헤더 검증
+                      progress: 80
+                      status: IN_PROGRESS
+                      blockers: []
+                      category: backend
+                      visibility: team
+                      project_id: prj_b
+              bordo_upload_document:
+                summary: bordo_upload_document — 문서 업로드
+                value:
+                  jsonrpc: '2.0'
+                  id: 8
+                  method: tools/call
+                  params:
+                    name: bordo_upload_document
+                    arguments:
+                      title: MCP 연결 설계
+                      content: "# 설계\n..."
+                      category: backend
+                      visibility: team
+              bordo_complete_work:
+                summary: bordo_complete_work — 완료 보고
+                value:
+                  jsonrpc: '2.0'
+                  id: 9
+                  method: tools/call
+                  params:
+                    name: bordo_complete_work
+                    arguments:
+                      title: MCP 연동
+                      note: 클라이언트 두 종으로 연결 확인
+      responses:
+        '200':
+          description: 정상 결과 · JSON-RPC 오류 · 도구 실행 오류(`result.isError`). 셋 다 200 입니다.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - $ref: '#/components/schemas/JsonRpcResult'
+                - $ref: '#/components/schemas/JsonRpcError'
+              examples:
+                initialize (legacy):
+                  value:
+                    jsonrpc: '2.0'
+                    id: init-1
+                    result:
+                      protocolVersion: '2025-11-25'
+                      serverInfo:
+                        name: bordo
+                        version: 1.0.0
+                      capabilities:
+                        tools:
+                          listChanged: false
+                      instructions: |-
+                        당신은 서재민의 Bordo 계정으로 기록합니다.
+                        쓸 수 있는 프로젝트:
+                          - prj_b (Bordo / 백엔드)  ← project_id 를 생략하면 여기에 기록됩니다
+                          - prj_a (Bordo / Discord 봇)
+                        기록한 것은 팀 Flow 화면에 「개인 AI가 기록함」으로 표시되고, 자리를 비운 동안 대리인이 이 내용을 근거로 답합니다.
+                server/discover (modern):
+                  value:
+                    jsonrpc: '2.0'
+                    id: d-1
+                    result:
+                      resultType: complete
+                      supportedVersions:
+                      - '2026-07-28'
+                      - '2025-11-25'
+                      capabilities:
+                        tools: {}
+                      instructions: 당신은 서재민의 Bordo 계정으로 기록합니다. ...
+                      _meta:
+                        io.modelcontextprotocol/serverInfo:
+                          name: bordo
+                          version: 1.0.0
+                tools/list:
+                  value:
+                    jsonrpc: '2.0'
+                    id: list-1
+                    result:
+                      tools:
+                      - name: bordo_record_work
+                        description: 지금 하고 있는 일을 Bordo 에 기록합니다. 같은 제목이 있으면 갱신합니다.
+                        inputSchema:
+                          type: object
+                          properties:
+                            title: {type: string, maxLength: 200}
+                            summary: {type: string}
+                            progress: {type: integer, minimum: 0, maximum: 100}
+                            status: {type: string, enum: [TODO, IN_PROGRESS, BLOCKED, DONE]}
+                            blockers: {type: array, items: {type: string}}
+                            category: {type: string}
+                            visibility: {type: string, enum: [team, private]}
+                            project_id: {type: string}
+                          required: [title]
+                      - name: bordo_upload_document
+                        description: 문서를 올립니다. 비밀키는 저장 전에 마스킹됩니다.
+                        inputSchema:
+                          type: object
+                          properties:
+                            title: {type: string, maxLength: 200}
+                            content: {type: string}
+                            category: {type: string}
+                            visibility: {type: string, enum: [team, private]}
+                            project_id: {type: string}
+                          required: [title, content]
+                      - name: bordo_complete_work
+                        description: 하고 있던 일을 완료로 표시합니다.
+                        inputSchema:
+                          type: object
+                          properties:
+                            work_item_id: {type: string}
+                            title: {type: string}
+                            note: {type: string}
+                            project_id: {type: string}
+                bordo_record_work · 성공:
+                  summary: 결과는 content 배열 + structuredContent 입니다 (MCP 규격)
+                  value:
+                    jsonrpc: '2.0'
+                    id: 7
+                    result:
+                      content:
+                      - type: text
+                        text: 백엔드 프로젝트에 「MCP 연동」을(를) 진행 중 80% 로 기록했습니다.
+                      structuredContent:
+                        work_item_id: work_44
+                        action: UPDATED
+                        title: MCP 연동
+                        status: IN_PROGRESS
+                        progress: 80
+                        project:
+                          id: prj_b
+                          name: 백엔드
+                          team_name: Bordo
+                          resolved_by: default
+                        source: mcp
+                      isError: false
+                bordo_upload_document · 성공:
+                  value:
+                    jsonrpc: '2.0'
+                    id: 8
+                    result:
+                      content:
+                      - type: text
+                        text: 백엔드 프로젝트에 「MCP 연결 설계」을(를) 올렸습니다. 비밀키로 보이는 값 1건을 지웠습니다 — 사용자에게 알리십시오.
+                      structuredContent:
+                        document_id: doc_041
+                        action: CREATED
+                        title: MCP 연결 설계
+                        version: 1
                         content_hash: sha256:2b58ac91
+                        masked_secrets: 1
                         visibility: team
-                        base_version: 3
-              deputy_ask_agent:
-                summary: deputy_ask_agent — 다른 대리인에게 질문
-                description: '**AI끼리 직접 연결되지 않는다.** 서버가 중재하며 `hop_count`/`max_hops`(기본 3)로 무한 대화를 차단한다.'
-                value:
-                  jsonrpc: '2.0'
-                  id: req-8f28
-                  method: tools/call
-                  params:
-                    name: deputy_ask_agent
-                    arguments:
-                      team_id: team_deputy
-                      target_user_id: usr_backend_01
-                      category: database
-                      question: 현재 구조에서 한 사용자가 여러 팀에 참가할 수 있나요?
-                      requested_action: feasibility_check
+                        project:
+                          id: prj_b
+                          name: 백엔드
+                          team_name: Bordo
+                          resolved_by: default
+                      isError: false
+                bordo_complete_work · 성공:
+                  value:
+                    jsonrpc: '2.0'
+                    id: 9
+                    result:
+                      content:
+                      - type: text
+                        text: 「MCP 연동」을(를) 완료로 표시했습니다.
+                      structuredContent:
+                        work_item_id: work_44
+                        action: COMPLETED
+                        title: MCP 연동
+                        status: DONE
+                        progress: 100
+                        project:
+                          id: prj_b
+                          name: 백엔드
+                          team_name: Bordo
+                          resolved_by: default
+                        source: mcp
+                      isError: false
+                도구 실행 오류 (isError):
+                  summary: JSON-RPC error 가 아닙니다 — 모델이 사유를 읽고 스스로 고칩니다
+                  value:
+                    jsonrpc: '2.0'
+                    id: 7
+                    result:
+                      content:
+                      - type: text
+                        text: progress 는 0~100 입니다.
+                      structuredContent:
+                        code: VALIDATION_ERROR
+                        details:
+                          progress: 150
+                      isError: true
+                프로토콜 오류 · -32601:
+                  value:
+                    jsonrpc: '2.0'
+                    id: 3
+                    error:
+                      code: -32601
+                      message: '지원하지 않는 method: resources/list'
+        '202':
+          description: 알림(`notifications/*`)은 본문 없이 202 입니다.
+        '400':
+          description: '`-32020` 헤더·본문 불일치 · `-32022` 지원하지 않는 프로토콜 판 (`data.supported`)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JsonRpcError'
+              example:
+                jsonrpc: '2.0'
+                id: 1
+                error:
+                  code: -32022
+                  message: 지원하지 않는 프로토콜 판입니다.
+                  data:
+                    supported:
+                    - '2026-07-28'
+                    - '2025-11-25'
+        '401':
+          $ref: '#/components/responses/E401'
+        '403':
+          $ref: '#/components/responses/E403'
+        '404':
+          description: modern 경로에서 모르는 method (`-32601`). 구현 안 된 서버와 구별하는 규칙입니다.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JsonRpcError'
+        '429':
+          description: 사용자당 분당 호출 상한 (`MCP_RATE_LIMITED`)
   /api/v1/me/agent/settings/history:
     get:
       tags:
@@ -8823,6 +8708,19 @@ paths:
 
         각 항목에 `related_edge_ids` 가 붙어 있어야 **`인덱스 선택 시 인덱스에 해당되는 화살표나
         자료들이 포커싱됨`** 을 클라이언트가 추가 요청 없이 처리할 수 있습니다.
+
+        **`category=WORK` 은 회의가 아니라 프로젝트·기간으로 봅니다.** 경로에 회의
+        id 가 붙어 있지만 작업 엣지에는 회의가 없습니다(`/projects/{id}/flow` 참고 —
+        작업 플로우의 스코프는 기간입니다). 회의로 좁히면 조건에 맞는 행이 하나도
+        없어 이 목록이 언제나 빈 배열이 됩니다. 회의 id 는 어느 프로젝트인지를
+        알아내는 데만 씁니다.
+
+        기간 기본값은 `/projects/{id}/flow` · `/flow/participants/{user_id}` 와
+        같습니다(최근 7일). 인덱스와 캔버스가 다른 구간을 보면 인덱스의 문서를
+        눌러도 강조될 화살표가 판에 없습니다.
+
+        비공개(`private`) 문서는 목록에서 뺍니다. 작업 플로우는 팀 관점 화면이라
+        제목만 스쳐도 비공개로 둔 뜻이 사라집니다.
       operationId: listMeetingIndexes
       responses:
         '200':
@@ -8882,6 +8780,20 @@ paths:
           $ref: '#/components/schemas/FlowCategory'
         description: ''
         example: MEETING
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+        description: '`category=WORK` 일 때만. 생략하면 `to - 7일`.'
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+        description: '`category=WORK` 일 때만. 생략하면 지금.'
   /api/v1/meetings/{meeting_id}/summary-table:
     get:
       tags:
@@ -9528,6 +9440,22 @@ paths:
           type: string
         description: 회의 ID
         example: mtg_88
+      - name: mark_read
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: true
+        description: |-
+          읽음으로 찍을지. `false` 면 안 찍습니다.
+
+          플로우 화면은 브리핑 패널을 열든 말든 회의를 열 때 이것을 부릅니다.
+          그대로 두면 **회의 화면에 잠깐 들른 것만으로 홈의 `Bordo 브리핑
+          보러가기` 가 사라집니다** — 사용자는 읽은 적이 없는데 읽은 것이 됩니다.
+          서버는 패널을 열었는지 알 수 없으므로 부르는 쪽이 알려 줘야 합니다.
+
+          기본은 `true` 입니다. 기본을 끄면 이 값을 안 보내는 쪽에서 브리핑이
+          영영 안 읽힌 상태로 남아 홈 팝업이 매번 뜹니다.
       - name: q
         in: query
         required: false
@@ -12263,6 +12191,11 @@ components:
           type: string
           format: date-time
           description: RFC3339 (오프셋 포함)
+        source:
+          type: string
+          enum: [web, mcp, agent]
+          default: web
+          description: 누가 적었나. `mcp` 면 화면이 「개인 AI가 기록함」 뱃지를 단다.
       required:
       - id
       - title
@@ -12300,6 +12233,11 @@ components:
           $ref: '#/components/schemas/WorkStatus'
         owner_id:
           type: string
+        source:
+          type: string
+          enum: [web, mcp, agent]
+          default: web
+          description: 누가 적었나. `mcp` 면 화면이 「개인 AI가 기록함」 뱃지를 단다.
       required:
       - id
       - title
@@ -12338,6 +12276,11 @@ components:
           type: string
           format: date-time
           description: RFC3339 (오프셋 포함)
+        source:
+          type: string
+          enum: [web, mcp, agent]
+          default: web
+          description: 누가 적었나. `mcp` 면 화면이 「개인 AI가 기록함」 뱃지를 단다.
       required:
       - id
       - topic
@@ -13089,17 +13032,30 @@ components:
           type: string
           enum:
           - READY
-          - RESUMING
-          - DISCONNECTED
+          - UNKNOWN
+          description: 봇이 15분 안에 `/internal/v1/discord/presence` 로 생존 신호를 보냈으면 `READY`. Intent·권한은 봇만 알므로 서버는 그 이상 판정하지 않는다.
         gateway:
           type: object
           properties:
-            resumed:
-              type: boolean
-            last_heartbeat_at:
+            status:
+              type: string
+              description: 봇이 마지막으로 보낸 값 (`online` · `resumed`)
+            last_seen_at:
               type: string
               format: date-time
               description: RFC3339 (오프셋 포함)
+        members:
+          type: object
+          description: 계정을 연결한 팀원 수. 안 이은 사람은 회의 참석자로 잡히지 않는다.
+          properties:
+            total:
+              type: integer
+            linked:
+              type: integer
+            unlinked_names:
+              type: array
+              items:
+                type: string
         intents:
           type: object
           properties:
@@ -13271,14 +13227,18 @@ components:
           type: string
           enum:
           - initialize
+          - notifications/initialized
+          - server/discover
+          - ping
           - tools/list
           - tools/call
+          description: '`initialize` · `notifications/initialized` 는 legacy, `server/discover` 는 modern. 알림(`notifications/*`)은 `id` 가 없다.'
         params:
           type: object
           additionalProperties: true
+          description: 'modern 이면 `_meta["io.modelcontextprotocol/protocolVersion"]` 에 판 번호가 들어온다.'
       required:
       - jsonrpc
-      - id
       - method
     JsonRpcError:
       type: object
@@ -13296,7 +13256,7 @@ components:
           properties:
             code:
               type: integer
-              description: '`-32009` SYNC_CONFLICT · `-32011` AGENT_MAX_HOPS_EXCEEDED · `-32601` METHOD_NOT_FOUND'
+              description: '`-32700` 파싱 · `-32600` 형식 · `-32601` method 없음 · `-32602` 도구·인자 · `-32020` 헤더 불일치(400) · `-32022` 프로토콜 판(400)'
             message:
               type: string
             data:
@@ -13309,7 +13269,7 @@ components:
       - jsonrpc
       - id
       - error
-      description: '**MCP 오류는 HTTP 상태가 아니라 이 객체로 온다.** HTTP 는 200 이다.'
+      description: '**프로토콜 오류만** 이 객체로 온다. 도구 실행 오류는 `JsonRpcResult.result.isError` 다.'
     JsonRpcResult:
       type: object
       properties:
@@ -13324,6 +13284,23 @@ components:
         result:
           type: object
           additionalProperties: true
+          description: |-
+            `tools/call` 이면 MCP 규격대로 `content[]` · `structuredContent` · `isError` 를 가진다.
+            `content[0].text` 는 사람이 읽을 한 줄, `structuredContent` 가 프로그램이 읽을 본문이다.
+            **도구 실행 오류는 `isError: true`** 로 온다 — JSON-RPC `error` 로 내면 모델이 사유를 못 읽는다.
+          properties:
+            content:
+              type: array
+              items:
+                type: object
+                properties:
+                  type: {type: string, enum: [text]}
+                  text: {type: string}
+            structuredContent:
+              type: object
+              additionalProperties: true
+            isError:
+              type: boolean
       required:
       - jsonrpc
       - id
@@ -14088,6 +14065,26 @@ components:
         disclose_work_plan_thought:
           type: boolean
           description: '`작업/계획/생각 공개`'
+        tone:
+          type: string
+          enum:
+          - FORMAL
+          - FRIENDLY
+          - CONCISE
+          description: |-
+            개인 설정의 `대리인 말투` 세 칸. 기본은 `FORMAL`.
+
+            **판정이 아니라 표현입니다.** 무엇을 말해도 되는가는 위 boolean 4개가
+            정하고, 이 값은 같은 내용을 어떤 투로 옮길지만 바꿉니다.
+        agent_name:
+          type: string
+          maxLength: 40
+          description: |-
+            개인 설정의 `내 Agent 이름`. 비우면 서버가 `{이름}의 Bordo` 를 만듭니다.
+
+            플로우의 대리인 노드 · 대리인 채팅방 제목 · `AI 조회` 상세에 그대로
+            찍힙니다. 조립은 **서버 한 군데서만** 합니다(`agent_display_name()`) —
+            화면마다 붙이면 사람 이름을 바꿨을 때 어떤 화면만 옛 이름으로 남습니다.
         active_version:
           type: integer
           description: 저장할 때마다 1 증가. 모든 AI 발언이 판정 당시 버전과 연결된다.
@@ -14382,6 +14379,13 @@ components:
       properties:
         user_name:
           type: string
+        user_avatar_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: |-
+            사이드바 하단 프로필. 없으면 `null` 이고, 그때 화면은 이름 첫 글자로
+            원을 그립니다 — 그 판단을 하려면 값이 오기는 해야 합니다.
         greeting_mode:
           type: string
           enum:
@@ -14537,6 +14541,42 @@ components:
                   연결된 채널이 있으면 `참여하기`, 없으면 `보러가기` 입니다.
                   클라이언트가 필드 조합으로 추측하면 채널이 없는 회의에
                   참여 버튼이 뜹니다.
+              delegation:
+                anyOf:
+                - type: object
+                  properties:
+                    delegated:
+                      type: boolean
+                      description: 대리 참석을 켜 뒀는가
+                    prompt:
+                      type: string
+                      description: 이 회의에 한정된 사전 지시
+                    sources:
+                      anyOf:
+                      - type: array
+                        items:
+                          type: string
+                          enum:
+                          - work
+                          - plan
+                          - thought
+                          - document
+                      - type: 'null'
+                      description: |-
+                        이 회의에서 대리인이 근거로 쓸 자료 종류.
+
+                        **`null` 과 `[]` 는 다릅니다.** `null` 은 고른 적이 없다
+                        (제한 없음)이고, `[]` 는 아무것도 쓰지 말라는 뜻입니다.
+                  required:
+                  - delegated
+                  - prompt
+                - type: 'null'
+                description: |-
+                  행의 `회의에 참여하지 않아요` 버튼이 읽는 값.
+
+                  참석자가 아니면 `null` 입니다. 화면은 이 값의 유무로 불참 등록
+                  버튼과 회의 링크를 가릅니다 — 빈 객체를 주면 남의 회의에도
+                  버튼이 떠서, 눌러 봐야 `참석자가 아닙니다` 로 막힙니다.
             required:
             - at
             - project_id
@@ -14888,7 +14928,7 @@ components:
     mcpToken:
       type: http
       scheme: bearer
-      description: 개인 AI 클라이언트용 `dpt_` 토큰. 사용자 식별 + 팀 멤버십 + Tool Capability 를 함께 검사합니다.
+      description: 개인 AI 클라이언트용 `brd_` 토큰. `POST /api/v1/me/mcp-token` 으로 발급하며 서버에는 해시만 남습니다. 그 사용자로 동작하고 팀·프로젝트 권한은 웹과 같은 검사를 지납니다.
   parameters:
     TeamId:
       name: team_id

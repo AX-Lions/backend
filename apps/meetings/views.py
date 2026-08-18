@@ -8,23 +8,25 @@
 from datetime import timedelta
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from apps.agent.models import PendingQuestion
+from apps.agent.services.flow import agent_display_name
 from apps.common.display import day_label, user_tz
 from apps.common.events import publish
 from apps.common.parsing import parse_dt
 from apps.common.permissions import meeting_access, project_membership
 from apps.common.views import listing
+from apps.orgs.models import ProjectMember
 from config.errors import BordoError
 
 from .models import (Agenda, AiBriefing, Attendance, BriefingConfirmation,
-                     BriefingRequest, FlowCategory, FlowContentType, FlowEdge, FlowSource,
-                     FlowFilterPreset, Meeting, MeetingDocumentRef,
-                     MeetingParticipant, MeetingStatus, MeetingSummary, Surface,
-                     Utterance)
+                     BriefingRequest, FlowCategory, FlowContentType, FlowEdge,
+                     FlowFilterPreset, FlowSource, Meeting, MeetingParticipant,
+                     MeetingStatus, MeetingSummary, Surface, Utterance)
 from .serializers import (AgendaSerializer, AiBriefingSerializer,
                           BriefingConfirmationSerializer, BriefingRequestSerializer,
                           DocumentRefSerializer, FlowEdgeSerializer,
@@ -128,13 +130,81 @@ def delegate(request, meeting_id):
     p.delegated = enabled
     p.delegate_prompt = request.data.get("prompt", "") or ""
     p.attendance = Attendance.DELEGATED if enabled else Attendance.PENDING
-    p.save(update_fields=["delegated", "delegate_prompt", "attendance", "updated_at"])
+
+    if "sources" in request.data:
+        p.allowed_sources = _clean_sources(request.data["sources"])
+
+    p.save(update_fields=["delegated", "delegate_prompt", "attendance",
+                          "allowed_sources", "updated_at"])
     return Response({"meeting_id": str(meeting.id), "user_id": str(request.user.id),
                      "delegated": p.delegated, "attendance": p.attendance,
-                     "prompt": p.delegate_prompt})
+                     "prompt": p.delegate_prompt,
+                     "sources": p.allowed_sources})
+
+
+def _clean_sources(raw):
+    """
+    이 회의에서 대리인이 근거로 쓸 자료 종류.
+
+    ## 빈 목록과 안 보낸 것을 가릅니다
+
+        키가 없음   지금 값을 그대로 둔다
+        null        고른 적 없음으로 되돌린다 (제한 없음)
+        []          **아무 자료도 쓰지 않는다**
+        ["work"]    작업 현황만
+
+    빈 목록을 "제한 없음" 으로 읽으면 전부 끈 사람의 대리인이 **모든 자료를
+    보게 됩니다.** 정반대로 동작하는 셈이라 빈 목록을 그대로 존중합니다.
+
+    모르는 값은 400 입니다. 조용히 버리면 사용자는 골랐다고 생각하는데
+    대리인은 그 자료를 안 봅니다.
+    """
+    if raw is None:
+        return None
+
+    if not isinstance(raw, list):
+        raise BordoError("VALIDATION_ERROR", "sources 는 배열이어야 합니다.")
+
+    allowed = MeetingParticipant.SOURCE_CHOICES
+    picked, bad = [], []
+    for item in raw:
+        value = str(item or "").strip().lower()
+        if value in allowed:
+            if value not in picked:
+                picked.append(value)
+        else:
+            bad.append(item)
+
+    if bad:
+        raise BordoError("VALIDATION_ERROR", "고를 수 없는 자료 종류입니다.",
+                         details={"sources": bad, "allowed": list(allowed)})
+    return picked
 
 
 # ─────────────────────────────────────────── 플로우
+def _flag(raw, default):
+    """쿼리의 불리언. 안 오면 기본값이고, `false` · `0` · `no` 만 거짓입니다."""
+    if raw is None or raw == "":
+        return default
+    return str(raw).strip().lower() not in ("false", "0", "no")
+
+
+def _work_period(params):
+    """
+    작업 플로우의 조회 구간. 기본은 최근 7일입니다.
+
+    `project_flow`(캔버스) · `indexes`(좌측 인덱스) · `flow_participant`(우측
+    패널)가 **같은 값을 써야 합니다.** 따로 두면 한쪽만 고쳤을 때 인덱스에 있는
+    문서를 눌러도 강조될 화살표가 판에 없고, 패널의 숫자와 캔버스의 숫자가
+    갈립니다 — 같은 화면에서 다른 값을 보여 주면 어느 쪽이 맞는지 알 수 없습니다.
+    """
+    to_at = parse_dt(params.get("to"), "to") or timezone.now()
+    from_at = parse_dt(params.get("from"), "from") or to_at - timedelta(days=7)
+    if from_at > to_at:
+        raise BordoError("VALIDATION_ERROR", "from 이 to 보다 뒤입니다.")
+    return from_at, to_at
+
+
 def _resolve_category(raw):
     cat = (raw or FlowCategory.MEETING).upper()
     if cat not in FlowCategory.values:
@@ -329,11 +399,8 @@ def project_flow(request, project_id):
     """
     project, _ = project_membership(request.user, project_id)
 
-    to_at = parse_dt(request.query_params.get("to"), "to") or timezone.now()
-    from_at = (parse_dt(request.query_params.get("from"), "from")
-               or to_at - timedelta(days=7))
-    if from_at > to_at:
-        raise BordoError("VALIDATION_ERROR", "from 이 to 보다 뒤입니다.")
+    # 기본 구간은 좌측 인덱스 · 우측 패널과 한 곳에서 정합니다.
+    from_at, to_at = _work_period(request.query_params)
 
     params = request.query_params.copy()
     params.setdefault("category", FlowCategory.WORK)
@@ -379,14 +446,22 @@ def project_flow(request, project_id):
 
 @api_view(["GET"])
 def indexes(request, meeting_id):
-    """좌측 인덱스. 작업 모드는 문서, 회의 모드는 안건."""
+    """
+    좌측 인덱스. 작업 모드는 문서, 회의 모드는 안건.
+
+    ## 작업 모드는 회의가 아니라 프로젝트·기간으로 봅니다
+
+    경로에 회의 id 가 붙어 있지만 **작업 엣지에는 회의가 없습니다**
+    (`project_flow` 참고 — 작업 플로우의 스코프는 기간입니다). 회의로 좁히면
+    조건에 맞는 행이 하나도 없어 이 목록은 언제나 빈 배열이었습니다.
+    회의 id 는 어느 프로젝트인지를 알아내는 데만 씁니다.
+    """
     meeting = meeting_access(request.user, meeting_id)
     cat = _resolve_category(request.query_params.get("category"))
-    edges = FlowEdge.objects.filter(meeting=meeting, category=cat)
 
     if cat == FlowCategory.MEETING:
         edge_map = {}
-        for e in edges:
+        for e in FlowEdge.objects.filter(meeting=meeting, category=cat):
             if e.agenda_id:
                 edge_map.setdefault(e.agenda_id, []).append(e.id)
         rows = Agenda.objects.filter(meeting=meeting)
@@ -395,11 +470,19 @@ def indexes(request, meeting_id):
             "related_edge_ids": [str(i) for i in edge_map.get(a.id, [])],
         } for a in rows]))
 
+    from_at, to_at = _work_period(request.query_params)
     edge_map = {}
-    for e in edges:
-        if e.document_id:
-            edge_map.setdefault(e.document_id, []).append(e.id)
-    docs = MeetingDocumentRef.objects.filter(id__in=list(edge_map.keys()))
+    for e in FlowEdge.objects.filter(project_id=meeting.project_id, category=cat,
+                                     occurred_at__range=(from_at, to_at)):
+        if e.work_document_id:
+            edge_map.setdefault(e.work_document_id, []).append(e.id)
+
+    from apps.documents.models import Document, Visibility
+
+    # 비공개 문서는 목록에서 뺍니다. 작업 플로우는 팀 관점 화면이라 제목만
+    # 스쳐도 비공개로 둔 뜻이 사라집니다 — 남의 것이면 존재도 알리지 않습니다.
+    docs = Document.objects.filter(id__in=list(edge_map.keys())).filter(
+        Q(visibility=Visibility.TEAM) | Q(owner=request.user))
     return Response(listing([{
         "id": str(d.id), "label": d.title, "kind": "DOCUMENT",
         "related_edge_ids": [str(i) for i in edge_map.get(d.id, [])],
@@ -502,6 +585,113 @@ def flow_edge_detail(request, edge_id):
     return Response(body)
 
 
+@api_view(["GET"])
+def flow_participant(request, project_id, user_id):
+    """
+    플로우 화면 우측 패널 — **사람 한 명이 이 기간에 무엇을 주고받았는가.**
+
+    화면에서 노드(사람)를 누르면 열립니다.
+
+        {이름}의 작업          이름 · 역할 · 출처 태그
+        작업 한눈에 보기        한 문단 요약
+        칩                     작업 3 · 피드백 5 · 수정 6 · 공유 1
+        전달한 내용             종류별로 묶인 목록 (→ 받은 사람 · 시각)
+
+    ## 왜 새 엔드포인트인가
+
+    `GET /flow-edges/{id}` 는 화살표 **하나**짜리입니다. 이 패널은 사람 하나에
+    걸린 화살표 전부를 종류별로 묶어야 해서, 프론트가 만들려면 화살표 수만큼
+    요청을 보내야 합니다. 다섯 명이 각각 열 건이면 쉰 번입니다.
+
+    ## 기간을 받습니다
+
+    작업 플로우는 기간이 스코프입니다(`project_flow` 와 같은 규칙). 기간을 안
+    받으면 패널의 숫자와 캔버스의 숫자가 갈립니다 — 같은 화면에서 다른 값을
+    보여 주면 어느 쪽이 맞는지 알 수 없습니다.
+
+    ## 요약을 지어내지 않습니다
+
+    `summary` 는 **집계한 사실만** 문장으로 만듭니다. LLM 을 부르지 않습니다 —
+    부르면 근거 없는 문장이 섞이고, 그건 이 서비스가 유보로 막아 둔 자리입니다.
+    """
+    project, _ = project_membership(request.user, project_id)
+
+    # 기본 구간은 좌측 인덱스 · 우측 패널과 한 곳에서 정합니다.
+    from_at, to_at = _work_period(request.query_params)
+
+    person = (ProjectMember.objects
+              .filter(project=project, user_id=user_id)
+              .select_related("user").first())
+    if person is None:
+        # 이 프로젝트 사람이 아니면 **404** 입니다. 403 을 주면 "그런 사람이 있긴
+        # 하다" 가 새어 나갑니다.
+        raise BordoError("STATE_NOT_FOUND", "이 프로젝트 참여자가 아닙니다.")
+    user = person.user
+
+    # 사람의 화살표는 `from_node` 안의 `user_id` 로 찾습니다. 대리인 노드도 같은
+    # `user_id` 를 들고 있어(`{uuid}:agent`), 본인 것과 대리인 것이 함께 잡힙니다 —
+    # 화면에서도 둘은 한 사람으로 묶여 보입니다.
+    rows = [e for e in FlowEdge.objects
+            .filter(project=project, category=FlowCategory.WORK,
+                    occurred_at__gte=from_at, occurred_at__lte=to_at)
+            .order_by("-occurred_at")
+            if (e.from_node or {}).get("user_id") == str(user_id)]
+
+    tz = user_tz(request.user)
+    counts, groups = {}, {}
+    for e in rows:
+        counts[e.content_type] = counts.get(e.content_type, 0) + 1
+        groups.setdefault(e.content_type, []).append({
+            "edge_id": str(e.id),
+            "title": e.label,
+            "direction_label": e.direction_label,
+            # 화면에 그대로 찍히는 문자열은 서버가 완성합니다. 클라이언트가
+            # 포맷하면 브라우저 시간대로 나가 같은 항목을 사람마다 다르게 봅니다.
+            "occurred_label": timezone.localtime(e.occurred_at, tz).strftime("%y.%m.%d %H:%M"),
+            "occurred_at": e.occurred_at,
+            "source": e.source or None,
+            "source_url": e.source_url or None,
+        })
+
+    label = {c.value: c.label for c in FlowContentType}
+    return Response({
+        "project_id": str(project.id),
+        "user": {
+            "id": str(user.id),
+            "name": user.name,
+            "avatar_url": user.avatar_url or None,
+            # 화면의 이름 옆 태그. 역할이 비어 있으면 칸을 아예 안 그리도록
+            # None 을 줍니다 — 빈 문자열을 주면 빈 태그가 그려집니다.
+            "role": user.project_role or None,
+            "agent_name": agent_display_name(user),
+        },
+        "period_label": f"{day_label(from_at, tz)} - {day_label(to_at, tz)}",
+        "counts": [{"content_type": k, "label": label.get(k, k), "count": v}
+                   for k, v in sorted(counts.items(), key=lambda kv: -kv[1])],
+        "summary": _participant_summary(user.name, counts, label),
+        "groups": [{"content_type": k, "label": label.get(k, k), "items": v}
+                   for k, v in groups.items()],
+    })
+
+
+def _participant_summary(name: str, counts: dict, label: dict) -> str:
+    """
+    `작업 한눈에 보기` 한 문단.
+
+    **집계한 사실만 씁니다.** LLM 을 부르면 "잘 진행되고 있습니다" 같은 근거 없는
+    문장이 섞이는데, 그건 이 서비스가 유보로 막아 둔 바로 그 자리입니다.
+
+    아무것도 없을 때 빈 문자열을 주지 않습니다. 화면이 빈 칸을 그리면 사용자는
+    못 불러온 것으로 읽습니다.
+    """
+    if not counts:
+        return f"{name} 님은 이 기간에 남긴 작업 기록이 없습니다."
+
+    parts = [f"{label.get(k, k)} {v}건"
+             for k, v in sorted(counts.items(), key=lambda kv: -kv[1])]
+    return f"{name} 님은 이 기간에 " + ", ".join(parts) + "을 남겼습니다."
+
+
 # ─────────────────────────────────────────── AI 브리핑
 @api_view(["GET"])
 def ai_briefing(request, meeting_id):
@@ -526,7 +716,16 @@ def ai_briefing(request, meeting_id):
     requests_to_me = BriefingRequest.objects.filter(meeting=meeting, user=request.user,
                                                     accepted_at__isnull=True)
 
-    if briefing.read_at is None:
+    # `mark_read=false` 로 읽음 처리를 끕니다.
+    #
+    # 플로우 화면은 브리핑 패널을 열든 말든 회의를 열 때 이것을 부릅니다. 그래서
+    # 회의 화면에 잠깐 들른 것만으로 홈의 `Bordo 브리핑 보러가기` 가 사라졌습니다 —
+    # 사용자는 읽은 적이 없는데 읽은 것이 됩니다. 서버는 패널을 열었는지 알 수
+    # 없으므로 **부르는 쪽이 알려 줘야 합니다.**
+    #
+    # 기본은 여전히 읽음입니다. 기본을 끄면 이 값을 안 보내는 쪽에서는 브리핑이
+    # 영영 안 읽힌 상태로 남아 홈 팝업이 매번 뜹니다.
+    if briefing.read_at is None and _flag(request.query_params.get("mark_read"), True):
         briefing.read_at = timezone.now()
         briefing.save(update_fields=["read_at"])
     return Response(AiBriefingSerializer(briefing, context={
