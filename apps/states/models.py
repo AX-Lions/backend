@@ -35,6 +35,19 @@ class Visibility(models.TextChoices):
     PRIVATE = "private", "비공개"
 
 
+class Source(models.TextChoices):
+    """
+    누가 적었나.
+
+    화면이 「개인 AI가 기록함」 뱃지를 달려면 **항목 자체에** 출처가 있어야 합니다.
+    `ActivityEvent.detail` 에만 넣으면 활동 로그에서만 보이고 플로우·현재 상태
+    카드에서는 안 보입니다.
+    """
+    WEB = "web", "웹"
+    MCP = "mcp", "개인 AI"
+    AGENT = "agent", "대리인"
+
+
 class StateBase(UUIDModel, TimeStamped):
     """세 모델의 공통 뼈대."""
     project = models.ForeignKey("orgs.Project", on_delete=models.CASCADE,
@@ -44,6 +57,7 @@ class StateBase(UUIDModel, TimeStamped):
     category = models.CharField(max_length=40, blank=True, default="")
     visibility = models.CharField(max_length=10, choices=Visibility.choices,
                                   default=Visibility.TEAM)
+    source = models.CharField(max_length=8, choices=Source.choices, default=Source.WEB)
 
     class Meta:
         abstract = True

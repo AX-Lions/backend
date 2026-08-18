@@ -226,6 +226,7 @@ publish(project_id, "task.completed", {"task_id": str(task.id)})
 | `apps/calendars` | 일정 · 리마인더 · 공지 **요청**(발송 아님) | **D** |
 | `apps/documents` | 문서 · 버전 · 비밀키 마스킹 | **D** |
 | `apps/discord` | 봇 연동(`views.py`, 서비스 토큰) · **웹 쪽 연결 코드 입력·상태 진단**(`web_views.py`, JWT) | **A** / 웹 쪽은 기반 |
+| `apps/mcp` | `/mcp` (개인 AI 클라이언트) · `brd_` 토큰 · 쓰기 도구 3종 | 재민 |
 
 ### 남의 앱을 건드릴 때
 
@@ -331,6 +332,19 @@ pip install -r requirements.txt
 회의 불참자입니다 — 브리핑·불참 뱃지를 볼 때 이 계정으로 보십시오.
 
 Celery 는 개발 중 `CELERY_TASK_ALWAYS_EAGER=True` 로 Redis 없이 동작시킵니다.
+
+### 개인 AI 붙여 보기 (MCP)
+
+```bash
+# 1. 웹 로그인 JWT 로 토큰 발급 — 응답의 setup_command 를 그대로 붙여 넣습니다
+curl -X POST http://localhost:8000/api/v1/me/mcp-token -H "Authorization: Bearer <jwt>"
+# 2. Claude Code 에서
+claude mcp add --transport http bordo http://localhost:8000/mcp --header "Authorization: Bearer brd_..."
+# 3. /mcp → bordo → connected, 도구 3개. "MCP 연동 붙었어. 기록해 줘" → bordo_record_work
+```
+
+토큰은 **`.mcp.json`(저장소에 커밋됨)에 넣지 마십시오.** `claude mcp add` 기본 위치(개인 설정)면 됩니다.
+`BORDO_PUBLIC_URL` 을 두면 `setup_command` 의 주소가 그 값으로 찍힙니다.
 
 ### 검증
 
@@ -457,6 +471,7 @@ main                 배포 기준
 | 최근 회의 카드 | `main_agendas` · `main_opinions` | `main_decisions` · `zero_summary` · `missed` | 화면이 묻는 건 "무엇을 다뤘나"가 아니라 "무엇이 정해졌나" |
 | 화면에 찍히는 문자열 | 클라이언트가 ISO 를 포맷 | 서버가 완성해 내려줌 (`displayed_at` · `time_range` · `status` · `location` · `meta`) | 브라우저 시간대로 찍으면 같은 회의를 사람마다 다른 시각으로 봅니다 |
 | 대리인 호칭 | `AI 대리인` | **`{이름}의 Bordo`**, 화자일 때 **`Zero`** | `AI 대리인` 은 화면 어디에도 없는 낱말입니다 |
+| MCP 도구·토큰 이름 | `deputy_` · `dpt_` | **`bordo_` · `brd_`** | 도구 이름은 사용자 AI 대화창에 그대로 찍힙니다. 서비스 이름이 Bordo 입니다 |
 
 `used_answers` / `deferred_answers` 는 화면에서 빠졌지만 **응답에는 남깁니다** —
 대리인이 무엇을 근거로 답했는지는 추적성 자산이라 화면에 없다고 지우면 안 됩니다.
@@ -502,6 +517,8 @@ A 가 발송함을 붙이면 그 이벤트를 받아 큐에 넣습니다. 페이
 | `/internal/v1/discord/presence` 는 사람 상태만 | `discord_user_id` 없이 오면 **봇 생존 신호**로 캐시(202) | 봇의 `on_ready` 가 `{status, at}` 만 보내 매번 400 이었습니다. 이 신호로 `GET /teams/{id}/discord/status` 가 봇이 살아 있는지 보여줍니다 |
 | `discord/status` 가 Intent·권한 진단 | 서버 연결 · 봇 생존 · 계정 이은 팀원 수 · warnings | Intent·권한은 봇만 압니다. 서버가 아는 것만 정직하게 냅니다 |
 | `ai-briefing` 조회 = 읽음 | `?mark_read=false` 로 끌 수 있음 (기본은 읽음) | 플로우 화면이 패널을 열든 말든 부르므로, 회의에 잠깐 들른 것만으로 홈 브리핑 버튼이 사라졌습니다 |
+| `/mcp` 도구 13종 · `initialize` 만 | **쓰기 3종** (`bordo_record_work` · `bordo_upload_document` · `bordo_complete_work`) · **dual-era** (legacy `initialize` + modern `server/discover`) · 도구 실행 오류는 `result.isError` | 읽기 도구가 없어야 장기 토큰이 새도 가져갈 게 없습니다. 한쪽 세대만 받으면 클라이언트에 따라 연결이 안 됩니다. `docs/decisions/2026-08-18-mcp-범위.md` |
+| MCP Tool 인자가 `team_id` | `project_id` (생략 시 최근 프로젝트, 결과에 `resolved_by`) | 문서·work 는 프로젝트에 매달립니다. 팀만으로는 어디에 쓸지 정할 수 없습니다 |
 
 ---
 
@@ -512,8 +529,8 @@ A 가 발송함을 붙이면 그 이벤트를 받아 큐에 넣습니다. 페이
 
 | 상태 | 영역 |
 |---|---|
-| 동작함 | 인증 · 팀 · 프로젝트 · 홈 · 회의 CRUD · 플로우(조회 **+ 생성**) · 대리인 설정 · 채팅 · 현재 상태 · 태스크 · 캘린더 · 문서 · Discord `/internal/v1` · WebSocket · 대리인 코어(ReAct · POLICY · 유보 · 브리핑) |
-| 미구현 | MCP(`/mcp`) · 동기화 4 · `Idempotency-Key` · 문서 임베딩 검색 · `DailyChatSummary` 생성기 |
+| 동작함 | 인증 · 팀 · 프로젝트 · 홈 · 회의 CRUD · 플로우(조회 **+ 생성**) · 대리인 설정 · 채팅 · 현재 상태 · 태스크 · 캘린더 · 문서 · Discord `/internal/v1` · WebSocket · 대리인 코어(ReAct · POLICY · 유보 · 브리핑) · **MCP 1단계** (`/mcp` 쓰기 3종 · `brd_` 토큰) |
+| 미구현 | MCP 2단계(읽기 · 동기화 · 대리인 질문 10종) · 동기화 4 · `Idempotency-Key` · 문서 임베딩 검색 · `DailyChatSummary` 생성기 |
 
 > **껍데기 3종은 없어졌습니다.** `ai-briefing` · `pending-questions` · 플로우 엣지 모두
 > 생성 코드가 붙었습니다 — 시드 없이 새 회의를 열어도 화면이 채워집니다.
@@ -533,7 +550,8 @@ A 가 발송함을 붙이면 그 이벤트를 받아 큐에 넣습니다. 페이
   리마인더는 `(event, notification_type)` 유니크로 처리했습니다.
 - 임베딩 검색은 2차입니다. 문서 검색은 지금 `icontains` 입니다.
 - `DailyChatSummary` 는 빈 껍데기입니다. 조회 계약만 확정해 뒀고 생성기는 B 담당입니다.
-- MCP(`/mcp`)와 동기화는 2차 범위라 없습니다.
+- MCP 는 **쓰기 3종만** 있습니다. 읽기·동기화·`bordo_ask_agent` 는 2단계이며, 읽기를 붙일 때는
+  **토큰 만료**가 같이 와야 합니다 (`apps/mcp/tools/write.py` 머리말).
 
 ---
 
@@ -548,5 +566,5 @@ A 가 발송함을 붙이면 그 이벤트를 받아 큐에 넣습니다. 페이
    좌측 인덱스에서 화살표로 점프할 수 있습니다
 4. `DailyChatSummary` 생성기 (B 담당)
 5. `Idempotency-Key` — 지금은 도메인 멱등 키로만 막고 있습니다 (아래 「알려진 미구현」)
-6. MCP(`/mcp`) · 동기화 4 — **2차 범위**
+6. MCP 2단계 — 읽기 도구 + 토큰 만료 · 동기화 4 · `bordo_ask_agent`
 7. 문서 임베딩 검색 — 2차. 지금은 `icontains` 입니다
