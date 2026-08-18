@@ -11,8 +11,9 @@ class WorkItemSerializer(serializers.ModelSerializer):
         model = WorkItem
         fields = ("id", "project_id", "title", "category", "summary", "status",
                   "progress", "blockers", "owner_id", "owner_name", "visibility",
-                  "expected_end_at", "created_at", "updated_at")
-        read_only_fields = ("id", "project_id", "owner_id", "created_at", "updated_at")
+                  "source", "expected_end_at", "created_at", "updated_at")
+        read_only_fields = ("id", "project_id", "owner_id", "source",
+                            "created_at", "updated_at")
 
 
 class PlanItemSerializer(serializers.ModelSerializer):
@@ -23,8 +24,10 @@ class PlanItemSerializer(serializers.ModelSerializer):
         model = PlanItem
         fields = ("id", "project_id", "title", "category", "priority",
                   "planned_start_at", "planned_end_at", "dependencies", "status",
-                  "owner_id", "owner_name", "visibility", "created_at", "updated_at")
-        read_only_fields = ("id", "project_id", "owner_id", "created_at", "updated_at")
+                  "owner_id", "owner_name", "visibility", "source", "created_at",
+                  "updated_at")
+        read_only_fields = ("id", "project_id", "owner_id", "source",
+                            "created_at", "updated_at")
 
 
 class ThoughtItemSerializer(serializers.ModelSerializer):
@@ -35,5 +38,7 @@ class ThoughtItemSerializer(serializers.ModelSerializer):
         model = ThoughtItem
         fields = ("id", "project_id", "topic", "content", "category", "confidence",
                   "requires_discussion", "status", "owner_id", "owner_name",
-                  "visibility", "promoted_from_question_id", "created_at", "updated_at")
-        read_only_fields = ("id", "project_id", "owner_id", "created_at", "updated_at")
+                  "visibility", "source", "promoted_from_question_id", "created_at",
+                  "updated_at")
+        read_only_fields = ("id", "project_id", "owner_id", "source",
+                            "created_at", "updated_at")
