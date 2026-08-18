@@ -374,3 +374,48 @@ class ConcurrentBuildTest(Base):
             with patch("apps.agent.services.llm.client", spy):
                 build_debate_points(str(m.id), force=True)
             self.assertIsNotNone(spy.seen)
+
+
+class FallbackRetryTest(Base):
+    """모델이 한 번 실패했다고 회의가 끝날 때까지 안건 베낀 쟁점만 남으면 안 됩니다."""
+
+    def _build(self, client):
+        from unittest.mock import patch
+
+        from apps.agent.tasks import build_debate_points
+        with patch("apps.agent.services.llm.client", client):
+            build_debate_points(str(self.m.id))
+
+    def setUp(self):
+        self.m = self.meeting()
+        Agenda.objects.create(meeting=self.m, title="QA 일정", sort_order=1)
+        self.past_utterance()
+
+    def test_fallback_is_retried(self):
+        self._build(Fake(error="503 overloaded"))
+        made = DebatePoint.objects.get(meeting=self.m)
+        self.assertFalse(made.created_by_agent)
+
+        good = Fake(ANSWER)
+        self._build(good)
+        self.assertIsNotNone(good.seen, "대체본만 있으면 다시 시도해야 합니다")
+        self.assertTrue(DebatePoint.objects.filter(meeting=self.m,
+                                                   created_by_agent=True).exists())
+
+    def test_real_prediction_is_not_redone(self):
+        self._build(Fake(ANSWER))
+        spy = Fake(ANSWER)
+        self._build(spy)
+        self.assertIsNone(spy.seen, "이미 예측이 있으면 모델을 다시 부르지 않습니다")
+
+    def test_lock_is_released_after_failure(self):
+        from apps.agent.services import contention
+        from unittest.mock import patch
+
+        from apps.agent.tasks import build_debate_points
+        with patch.object(contention, "build_for", side_effect=RuntimeError("boom")):
+            build_debate_points(str(self.m.id))
+        # 열쇠가 남아 있으면 다음 시도가 통째로 막힙니다
+        good = Fake(ANSWER)
+        self._build(good)
+        self.assertIsNotNone(good.seen)
