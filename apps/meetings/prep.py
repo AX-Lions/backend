@@ -41,6 +41,15 @@ from .models import (Attendance, DebatePoint, DebateStance, MeetingParticipant,
 # 초안 저장을 따로 받아야 하는데 화면에 그런 버튼이 없습니다.
 STATUS_LABEL = {"ANSWERED": "답변완료", "NEEDED": "답변필요"}
 
+#: 이번 회의에만 덮어쓸 수 있는 설정.
+#
+# 화면의 세부 설정 토글 6개와 1:1 입니다. `agent_name` · `active_version` 은
+# 넣지 않습니다 — 회의 하나 때문에 대리인 호칭이 바뀌면 다른 회의의 플로우
+# 노드와 이름이 갈리고, 버전은 평소 설정의 이력이라 회의가 건드릴 것이 아닙니다.
+OVERRIDE_BOOLS = ("mention_feasibility", "allow_schedule_change",
+                  "allow_midmeeting_question",
+                  "disclose_work", "disclose_plan", "disclose_thought")
+
 #: 불참을 등록할 수 있는 회의 상태.
 #
 # 끝난 회의에 대리 참석을 켤 수 있으면 브리핑이 이미 만들어진 뒤에 참석자 상태가
@@ -246,6 +255,52 @@ def setup_block(participant, user) -> dict:
 # ═══════════════════════════════════════════ 엔드포인트
 
 
+def clean_overrides(raw) -> dict:
+    """
+    보낸 것만 남깁니다. 모르는 키는 **400** 입니다.
+
+    조용히 버리면 화면은 저장됐다고 하는데 대리인은 그 설정을 안 봅니다.
+    사용자가 껐다고 믿는 것이 계속 나가는 쪽이 훨씬 나쁩니다.
+    """
+    from apps.agent.models import AgentTone
+
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise BordoError("VALIDATION_ERROR", "settings 는 객체여야 합니다.")
+
+    out, bad = {}, []
+    for key, value in raw.items():
+        if key in OVERRIDE_BOOLS:
+            out[key] = bool(value)
+        elif key == "tone":
+            tone = str(value or "").upper()
+            if tone not in AgentTone.values:
+                raise BordoError("VALIDATION_ERROR", "고를 수 없는 말투입니다.",
+                                 details={"tone": sorted(AgentTone.values)})
+            out[key] = tone
+        else:
+            bad.append(key)
+    if bad:
+        raise BordoError("VALIDATION_ERROR", "이 회의에서 바꿀 수 없는 설정입니다.",
+                         details={"unknown": bad,
+                                  "allowed": sorted(OVERRIDE_BOOLS) + ["tone"]})
+    return out
+
+
+def clean_prompts(raw) -> list[str]:
+    """`null` 은 호출부가 걸러 냅니다. 여기 오는 것은 배열뿐입니다."""
+    if not isinstance(raw, list):
+        raise BordoError("VALIDATION_ERROR",
+                         "prompts 는 배열입니다. 평소 것을 그대로 쓰려면 null 을 보내십시오.")
+    out = []
+    for item in raw:
+        body = str(item or "").strip()
+        if body:
+            out.append(body[:2000])
+    return out
+
+
 def load_point(user, point_id):
     """`(point, participant)`. 회의 참석자만 입장을 적을 수 있습니다."""
     point = (DebatePoint.objects.filter(pk=point_id)
@@ -297,6 +352,60 @@ def stance(request, point_id):
             {"meeting_id": str(point.meeting_id), "debate_point_id": str(point.id),
              "user_id": str(request.user.id)})
     return Response(point_row(point, row), status=201 if created else 200)
+
+
+@api_view(["PUT"])
+def agent_setup(request, meeting_id):
+    """
+    「Bordo 활동 설정」 저장.
+
+    **보낸 것만 바꿉니다.** 화면에 `적용하기` 가 셋(현재 설정 사용 · 이번에만
+    다르게 · 추가 설정)이라 전량 교체로 두면 한 버튼이 다른 버튼의 입력을 지웁니다.
+
+        mode: "STANDING"   덮어쓴 것을 전부 지우고 평소 설정으로 돌아간다
+        mode: "ONCE"       settings·prompts 를 이번 회의에만 적용한다
+        (mode 없음)        보낸 키만 바꾼다
+    """
+    meeting, p = participant_of(request.user, meeting_id)
+    require_open(meeting)
+
+    fields = []
+    mode = str(request.data.get("mode") or "").upper()
+    if mode and mode not in ("STANDING", "ONCE"):
+        raise BordoError("VALIDATION_ERROR", "mode 는 STANDING 또는 ONCE 입니다.",
+                         details={"mode": mode})
+
+    if mode == "STANDING":
+        # `현재 설정 사용` — 되돌리기입니다. 함께 온 settings 는 무시합니다.
+        p.settings_override = {}
+        p.prompt_override = None
+        fields += ["settings_override", "prompt_override"]
+    else:
+        if "settings" in request.data:
+            p.settings_override = clean_overrides(request.data["settings"])
+            fields.append("settings_override")
+        if "prompts" in request.data:
+            raw = request.data["prompts"]
+            # `null` 은 "평소 것 그대로", `[]` 는 "아무 프롬프트도 안 씀" 입니다.
+            # 둘을 같게 다루면 전부 지운 사람의 대리인이 평소 지시를 그대로 씁니다.
+            p.prompt_override = None if raw is None else clean_prompts(raw)
+            fields.append("prompt_override")
+
+    if "extra_note" in request.data:
+        p.delegate_prompt = str(request.data["extra_note"] or "").strip()[:2000]
+        fields.append("delegate_prompt")
+
+    if "sources" in request.data:
+        from .views import _clean_sources
+        p.allowed_sources = _clean_sources(request.data["sources"])
+        fields.append("allowed_sources")
+
+    if fields:
+        p.save(update_fields=fields + ["updated_at"])
+        publish(meeting.project_id, "meeting.agent_setup.saved",
+                {"meeting_id": str(meeting.id), "user_id": str(request.user.id),
+                 "changed": fields})
+    return Response(setup_block(p, request.user))
 
 
 @api_view(["GET"])

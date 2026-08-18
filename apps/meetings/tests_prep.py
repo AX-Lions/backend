@@ -9,6 +9,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import User
+from apps.agent.models import AgentSettings
 from apps.meetings.models import (Attendance, DebatePoint, DebateStance, Meeting,
                                   MeetingParticipant, MeetingStatus)
 from apps.orgs.models import Project, ProjectMember, Team, TeamMember
@@ -267,3 +268,84 @@ class StanceTest(Base):
         res = self.api.put(f"/api/v1/debate-points/{uuid.uuid4()}/stance",
                            {"body": "x"}, format="json")
         self.assertEqual(res.json()["error"]["code"], "DEBATE_POINT_NOT_FOUND")
+
+
+class AgentSetupTest(Base):
+
+    def setUp(self):
+        super().setUp()
+        self.m = self.meeting()
+        self.api.post(self.url(self.m))
+        AgentSettings.objects.create(user=self.me)
+
+    def surl(self):
+        return self.url(self.m, "agent-setup")
+
+    def part(self):
+        return MeetingParticipant.objects.get(meeting=self.m, user=self.me)
+
+    def test_once_overrides_only_what_was_sent(self):
+        res = self.api.put(self.surl(),
+                           {"mode": "ONCE", "settings": {"disclose_work": False}},
+                           format="json")
+        self.assertEqual(res.status_code, 200, res.content)
+        body = res.json()
+        self.assertEqual(body["mode"], "ONCE")
+        self.assertFalse(body["settings"]["disclose_work"])
+        # 안 보낸 것은 평소 값 그대로
+        self.assertTrue(body["settings"]["disclose_plan"])
+        self.assertEqual(self.part().settings_override, {"disclose_work": False})
+
+    def test_standing_clears_everything(self):
+        p = self.part()
+        p.settings_override = {"disclose_work": False}
+        p.prompt_override = ["일회성"]
+        p.save()
+
+        body = self.api.put(self.surl(), {"mode": "STANDING"}, format="json").json()
+        self.assertEqual(body["mode"], "STANDING")
+        p = self.part()
+        self.assertEqual(p.settings_override, {})
+        self.assertIsNone(p.prompt_override)
+
+    def test_extra_note_does_not_wipe_settings(self):
+        """`적용하기` 가 셋이라 한 버튼이 다른 버튼의 입력을 지우면 안 됩니다."""
+        self.api.put(self.surl(), {"mode": "ONCE", "settings": {"disclose_plan": False}},
+                     format="json")
+        self.api.put(self.surl(), {"extra_note": "일정은 확정하지 마"}, format="json")
+        p = self.part()
+        self.assertEqual(p.settings_override, {"disclose_plan": False})
+        self.assertEqual(p.delegate_prompt, "일정은 확정하지 마")
+
+    def test_empty_prompt_list_is_not_the_same_as_null(self):
+        self.api.put(self.surl(), {"prompts": []}, format="json")
+        self.assertEqual(self.part().prompt_override, [])
+        self.api.put(self.surl(), {"prompts": None}, format="json")
+        self.assertIsNone(self.part().prompt_override)
+
+    def test_unknown_setting_key_is_400(self):
+        res = self.api.put(self.surl(),
+                           {"settings": {"agent_name": "다른 이름"}}, format="json")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.json()["error"]["details"]["unknown"], ["agent_name"])
+
+    def test_bad_tone_is_400(self):
+        res = self.api.put(self.surl(), {"settings": {"tone": "SHOUTY"}}, format="json")
+        self.assertEqual(res.status_code, 400)
+
+    def test_bad_mode_is_400(self):
+        res = self.api.put(self.surl(), {"mode": "WHATEVER"}, format="json")
+        self.assertEqual(res.status_code, 400)
+
+    def test_sources_reuse_existing_validation(self):
+        res = self.api.put(self.surl(), {"sources": ["work", "nope"]}, format="json")
+        self.assertEqual(res.status_code, 400)
+        ok = self.api.put(self.surl(), {"sources": ["work"]}, format="json")
+        self.assertEqual(ok.json()["sources"], ["work"])
+
+    def test_standing_settings_do_not_change(self):
+        """이번 회의 설정이 평소 설정을 건드리면 다음 회의에서 켜 둔 줄 알았던 것이 꺼져 있습니다."""
+        self.api.put(self.surl(), {"mode": "ONCE", "settings": {"disclose_work": False}},
+                     format="json")
+        row = AgentSettings.objects.get(user=self.me)
+        self.assertTrue(row.disclose_work)
