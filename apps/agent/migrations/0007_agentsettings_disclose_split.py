@@ -8,8 +8,14 @@ from django.db import migrations, models
 
 
 def split(apps, schema_editor):
+    """
+    **옛 칸을 읽어야 합니다.** 새 칸을 조건에 쓰면 바로 위 `AddField` 가
+    `default=True` 로 막 만든 값이라 언제나 0건이 잡히고, 그대로 `RemoveField` 가
+    옛 값을 지웁니다 — 공개를 꺼 뒀던 사람이 전부 켜진 채로 남고 되돌릴 근거도
+    사라집니다. `RemoveField` 보다 앞이라 여기서는 옛 칸을 아직 읽을 수 있습니다.
+    """
     AgentSettings = apps.get_model("agent", "AgentSettings")
-    AgentSettings.objects.filter(disclose_work=False, disclose_plan=False, disclose_thought=False).update(
+    AgentSettings.objects.filter(disclose_work_plan_thought=False).update(
         disclose_work=False, disclose_plan=False, disclose_thought=False)
 
 
