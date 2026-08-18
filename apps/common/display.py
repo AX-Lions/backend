@@ -79,3 +79,22 @@ def day_label(dt, tz) -> str:
     """
     d = _local(dt, tz)
     return f"{d.month}/{d.day}" if d else ""
+
+
+def date_label(dt, tz) -> str:
+    """
+    `8월 18일` — 회의 대리 참석 준비 화면 헤더.
+
+    `day_label`(`8/13`)과 나누는 이유는 폭입니다. 좁은 플로우 상단에는 슬래시
+    표기가, 넓은 헤더에는 한국어 표기가 들어갑니다. 한 함수로 합치면 둘 중
+    하나는 반드시 어색해집니다.
+    """
+    d = _local(dt, tz)
+    return f"{d.month}월 {d.day}일" if d else ""
+
+
+def meeting_when(start, end, tz) -> str:
+    """`8월 18일 14:00 - 15:00` — 날짜와 시간대를 한 줄로."""
+    day = date_label(start, tz)
+    span = time_range(start, end, tz)
+    return f"{day} {span}".strip() if day or span else ""
