@@ -15,6 +15,8 @@ from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 
+from apps.agent.services.flow import agent_display_name, agent_display_names
+from apps.common.display import user_tz
 from apps.common.events import publish
 from apps.common.pagination import cursor_page
 from apps.common.permissions import project_membership, team_membership
@@ -139,8 +141,17 @@ def room_context(user, rooms):
         if row.user.avatar_url and len(avatar_map[row.room_id]) < 4:
             avatar_map[row.room_id].append(row.user.avatar_url)
 
+    # 대리인 방 이름은 **저장된 title 이 아니라 주인의 지금 호칭**입니다.
+    #
+    # 개인 설정에서 대리인 이름을 바꿨는데 방 제목만 옛 이름으로 남으면,
+    # 사용자는 이름이 저장되지 않은 줄 압니다. 방 제목을 그때그때 갈아 주는
+    # 마이그레이션 대신 조회 시점에 맞춥니다 — 이 두 종류는 어차피 이름을
+    # 못 바꾸는 방(`UNRENAMABLE`)이라 저장된 값을 지킬 이유가 없습니다.
+    owner_ids = {r.agent_owner_id for r in rooms if r.agent_owner_id}
+
     return {"unread_map": unread_map, "important_map": important_map,
-            "last_map": last_map, "avatar_map": avatar_map}
+            "last_map": last_map, "avatar_map": avatar_map,
+            "agent_name_map": agent_display_names(owner_ids)}
 
 
 def _has_unconfirmed_important(room, member, user):
@@ -377,7 +388,11 @@ def rooms(request):
             hidden_at=None, left_at=None)
         return Response(_room_body(request.user, existing), status=200)
 
-    title = other.display_name if rtype == RoomType.DIRECT else f"{other.display_name}의 AI 대리인"
+    # 대리인 방 제목은 저장해 두되 목록에서는 조회 시점에 다시 만듭니다
+    # (`RoomSummarySerializer.get_title`). 여기서도 같은 규칙을 써야 저장된 값과
+    # 보이는 값이 처음부터 어긋나지 않습니다.
+    title = (other.display_name if rtype == RoomType.DIRECT
+             else agent_display_name(other))
     try:
         with transaction.atomic():
             room = ChatRoom.objects.create(
@@ -586,6 +601,23 @@ def _resolve_pending_question(request, room):
     return q
 
 
+def _day_window(raw, tz, field="date"):
+    """
+    `YYYY-MM-DD` 하루의 시작과 끝.
+
+    **요청한 사람의 시간대로 자릅니다.** 서버 `TIME_ZONE` 은 UTC 라 그것으로
+    자르면 한국에서 자정 넘어 보낸 말이 전날로 묶입니다 — 화면은 브라우저
+    시간대로 날짜 구분선을 그리므로, 그 구분선을 눌러도 그 메시지가 안 나옵니다.
+    시간대가 다른 팀이 이 서비스의 전제라 UTC 고정은 답이 될 수 없습니다.
+    """
+    try:
+        day = datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        raise BordoError("VALIDATION_ERROR", f"{field} 는 YYYY-MM-DD 입니다.")
+    start = datetime.combine(day, time.min, tzinfo=tz)
+    return day, start, start + timedelta(days=1)
+
+
 def _message_page(request, room, member):
     """
     커서 페이징.
@@ -603,13 +635,8 @@ def _message_page(request, room, member):
 
     qs = visible_messages(room, member)
     if date:
-        try:
-            day = datetime.strptime(date, "%Y-%m-%d").date()
-        except ValueError:
-            raise BordoError("VALIDATION_ERROR", "date 는 YYYY-MM-DD 입니다.")
-        start = timezone.make_aware(datetime.combine(day, time.min),
-                                    timezone.get_current_timezone())
-        qs = qs.filter(sent_at__gte=start, sent_at__lt=start + timedelta(days=1))
+        _, start, end = _day_window(date, user_tz(request.user))
+        qs = qs.filter(sent_at__gte=start, sent_at__lt=end)
         rows = list(qs.order_by("sent_at"))
         return {"results": MessageSerializer(
             rows, many=True, context=message_context(request.user, rows)).data,
@@ -617,7 +644,7 @@ def _message_page(request, room, member):
             "has_older": visible_messages(room, member).filter(
                 sent_at__lt=start).exists(),
             "has_newer": visible_messages(room, member).filter(
-                sent_at__gte=start + timedelta(days=1)).exists()}
+                sent_at__gte=end).exists()}
 
     rows, next_before = cursor_page(
         qs, before=before, limit=request.query_params.get("limit"),
@@ -823,19 +850,22 @@ def attachment_detail(request, attachment_id):
 def active_dates(request, room_id):
     """달력에서 `채팅한 날짜만 검은 색`. 없는 날은 못 누르게 합니다."""
     room, member = room_access(request.user, room_id)
-    month = request.query_params.get("month") or timezone.now().strftime("%Y-%m")
+    # 달의 경계도 보는 사람 기준입니다. 서버 시간대로 자르면 월초·월말 하루가
+    # 옆 달로 넘어가, 달력에서 그 날만 못 누릅니다.
+    tz = user_tz(request.user)
+    month = (request.query_params.get("month")
+             or timezone.localtime(timezone=tz).strftime("%Y-%m"))
     try:
         first = datetime.strptime(month + "-01", "%Y-%m-%d").date()
     except ValueError:
         raise BordoError("VALIDATION_ERROR", "month 는 YYYY-MM 입니다.")
     nxt = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
 
-    tz = timezone.get_current_timezone()
-    start = timezone.make_aware(datetime.combine(first, time.min), tz)
-    end = timezone.make_aware(datetime.combine(nxt, time.min), tz)
+    start = datetime.combine(first, time.min, tzinfo=tz)
+    end = datetime.combine(nxt, time.min, tzinfo=tz)
     qs = visible_messages(room, member)
 
-    dates = sorted({timezone.localtime(s).date().isoformat() for s in
+    dates = sorted({s.astimezone(tz).date().isoformat() for s in
                     qs.filter(sent_at__gte=start, sent_at__lt=end)
                     .values_list("sent_at", flat=True)})
     return Response({
@@ -856,11 +886,10 @@ def daily_summary(request, room_id):
     화면이 `요약 준비 중` 과 `요약할 게 없음` 을 다르게 그려야 합니다.
     """
     room, member = room_access(request.user, room_id)
-    raw = request.query_params.get("date") or timezone.localtime().date().isoformat()
-    try:
-        day = datetime.strptime(raw, "%Y-%m-%d").date()
-    except ValueError:
-        raise BordoError("VALIDATION_ERROR", "date 는 YYYY-MM-DD 입니다.")
+    tz = user_tz(request.user)
+    raw = (request.query_params.get("date")
+           or timezone.localtime(timezone=tz).date().isoformat())
+    day, start, end = _day_window(raw, tz)
 
     row = DailyChatSummary.objects.filter(room=room, date=day).first()
     if row:
@@ -869,10 +898,8 @@ def daily_summary(request, room_id):
         body = {"date": raw, "one_line": "", "my_todos": [], "schedules": [],
                 "generated_at": None}
 
-    tz = timezone.get_current_timezone()
-    start = timezone.make_aware(datetime.combine(day, time.min), tz)
     body["message_count"] = visible_messages(room, member).filter(
-        sent_at__gte=start, sent_at__lt=start + timedelta(days=1)).count()
+        sent_at__gte=start, sent_at__lt=end).count()
     body["status"] = "READY" if row and row.generated_at else "PENDING"
     return Response(body)
 
@@ -894,7 +921,10 @@ def search(request, room_id):
             .order_by("-sent_at")[:100])
     rows = list(rows)
     ctx = message_context(request.user, rows)
+    # 결과를 누르면 이 `date` 로 목록을 다시 부릅니다. `?date=` 를 자르는 기준과
+    # 같은 시간대로 찍어야 눌렀을 때 그 메시지가 있는 날이 열립니다.
+    tz = user_tz(request.user)
     return Response(listing([{
         "message": MessageSerializer(m, context=ctx).data,
-        "date": timezone.localtime(m.sent_at).date().isoformat(),
+        "date": m.sent_at.astimezone(tz).date().isoformat(),
     } for m in rows]))
