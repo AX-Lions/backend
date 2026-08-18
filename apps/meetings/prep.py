@@ -246,6 +246,59 @@ def setup_block(participant, user) -> dict:
 # ═══════════════════════════════════════════ 엔드포인트
 
 
+def load_point(user, point_id):
+    """`(point, participant)`. 회의 참석자만 입장을 적을 수 있습니다."""
+    point = (DebatePoint.objects.filter(pk=point_id)
+             .select_related("meeting").first())
+    if point is None:
+        raise BordoError("DEBATE_POINT_NOT_FOUND",
+                         details={"debate_point_id": str(point_id)})
+    _, p = participant_of(user, point.meeting_id)
+    return point, p
+
+
+@api_view(["PUT", "DELETE"])
+def stance(request, point_id):
+    """
+    논쟁점에 대한 나의 입장 — 저장(덮어쓰기) · 삭제.
+
+    `PUT` 인 이유는 **사람마다 하나**이기 때문입니다. 같은 쟁점에 내 입장이 둘이면
+    대리인이 어느 쪽으로 말할지 정할 수 없습니다. 두 번 보내면 갱신입니다.
+    """
+    point, participant = load_point(request.user, point_id)
+
+    if request.method == "DELETE":
+        deleted, _ = DebateStance.objects.filter(point=point, user=request.user).delete()
+        if not deleted:
+            raise BordoError("STATE_NOT_FOUND", "아직 적어 둔 입장이 없습니다.")
+        return Response(status=204)
+
+    require_open(point.meeting)
+
+    body = str(request.data.get("body") or "").strip()
+    if not body:
+        raise BordoError("VALIDATION_ERROR",
+                         "입장을 적어 주십시오. 비워 두려면 삭제하십시오.")
+
+    option_key = str(request.data.get("option_key") or "").strip()
+    if option_key:
+        keys = [str(o.get("key") or "") for o in (point.options or [])]
+        if option_key not in keys:
+            # 조용히 버리면 사용자는 A 를 골랐는데 대리인은 아무것도 안 고른 채
+            # 말합니다. 무엇을 고를 수 있었는지까지 돌려줍니다.
+            raise BordoError("VALIDATION_ERROR", "그 논쟁점에 없는 선택지입니다.",
+                             details={"option_key": option_key, "allowed": keys})
+
+    row, created = DebateStance.objects.update_or_create(
+        point=point, user=request.user,
+        defaults={"body": body, "option_key": option_key})
+
+    publish(point.meeting.project_id, "meeting.debate.stance.saved",
+            {"meeting_id": str(point.meeting_id), "debate_point_id": str(point.id),
+             "user_id": str(request.user.id)})
+    return Response(point_row(point, row), status=201 if created else 200)
+
+
 @api_view(["GET"])
 def prep(request, meeting_id):
     """

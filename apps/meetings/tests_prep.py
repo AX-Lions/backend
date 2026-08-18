@@ -208,3 +208,62 @@ class PrepReadTest(Base):
         self.assertTrue(setup["standing_settings"]["disclose_work"])
         self.assertEqual(setup["overridden_keys"], ["disclose_work"])
         self.assertEqual(setup["extra_note"], "이번엔 일정 얘기 하지 마")
+
+
+class StanceTest(Base):
+
+    def setUp(self):
+        super().setUp()
+        self.m = self.meeting()
+        self.api.post(self.url(self.m))
+        self.p = DebatePoint.objects.create(
+            meeting=self.m, source_key="k1", order=1,
+            title="개발 범위를 축소할 것인가?",
+            options=[{"key": "A", "title": "축소"}, {"key": "B", "title": "유지"}])
+
+    def surl(self):
+        return f"/api/v1/debate-points/{self.p.id}/stance"
+
+    def test_save_and_overwrite(self):
+        res = self.api.put(self.surl(), {"body": "축소가 맞아요", "option_key": "A"},
+                           format="json")
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(res.json()["status_label"], "답변완료")
+
+        again = self.api.put(self.surl(), {"body": "생각이 바뀌었어요"}, format="json")
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(DebateStance.objects.filter(point=self.p, user=self.me).count(), 1)
+        self.assertEqual(again.json()["stance"]["body"], "생각이 바뀌었어요")
+        self.assertIsNone(again.json()["stance"]["option_key"])
+
+    def test_empty_body_is_400(self):
+        res = self.api.put(self.surl(), {"body": "   "}, format="json")
+        self.assertEqual(res.status_code, 400)
+
+    def test_unknown_option_is_400_with_choices(self):
+        res = self.api.put(self.surl(), {"body": "x", "option_key": "Z"}, format="json")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.json()["error"]["details"]["allowed"], ["A", "B"])
+
+    def test_delete(self):
+        self.api.put(self.surl(), {"body": "축소"}, format="json")
+        self.assertEqual(self.api.delete(self.surl()).status_code, 204)
+        self.assertFalse(DebateStance.objects.filter(point=self.p).exists())
+        # 없는 것을 지우면 404 — 조용히 204 를 주면 저장이 안 된 것을 못 알아챕니다
+        self.assertEqual(self.api.delete(self.surl()).status_code, 404)
+
+    def test_ended_meeting_rejects_new_stance(self):
+        Meeting.objects.filter(pk=self.m.pk).update(status=MeetingStatus.ENDED)
+        res = self.api.put(self.surl(), {"body": "늦었어요"}, format="json")
+        self.assertEqual(res.status_code, 409)
+
+    def test_non_participant_cannot_write(self):
+        self.api.force_authenticate(self.mate)
+        res = self.api.put(self.surl(), {"body": "남의 회의"}, format="json")
+        self.assertEqual(res.status_code, 404)
+
+    def test_unknown_point(self):
+        import uuid
+        res = self.api.put(f"/api/v1/debate-points/{uuid.uuid4()}/stance",
+                           {"body": "x"}, format="json")
+        self.assertEqual(res.json()["error"]["code"], "DEBATE_POINT_NOT_FOUND")

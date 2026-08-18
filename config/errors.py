@@ -41,6 +41,8 @@ ERROR_CODES = {
     "DOCUMENT_NOT_FOUND":            (404, "문서를 찾을 수 없습니다.", False),
     "DOCUMENT_ACCESS_DENIED":        (403, "문서에 접근할 수 없습니다.", False),
     "STATE_NOT_FOUND":               (404, "대상을 찾을 수 없습니다.", False),
+    # 회의 대리 참석 준비
+    "DEBATE_POINT_NOT_FOUND":        (404, "논쟁점을 찾을 수 없습니다.", False),
     # 정책 / 대리인
     "POLICY_DENIED":                 (403, "정책에 의해 거부되었습니다.", False),
     "POLICY_HUMAN_APPROVAL_REQUIRED":(409, "사용자 승인이 필요합니다.", False),
