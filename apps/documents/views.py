@@ -132,6 +132,20 @@ def documents(request, project_id):
 
 
 def _mask_sections(sections):
+    """
+    섹션 **세 칸 모두** 가립니다.
+
+    본문만 가리고 있었습니다(#78). 제목이나 한 줄 요약에 키를 적으면 저장부터
+    그대로 들어가고, 조회 응답에도 그대로 나갔습니다.
+
+    이 자리가 특히 위험한 이유는 **가려지지 않은 값이 조용히 퍼지기** 때문입니다.
+    섹션 제목과 한 줄 요약은 문서 검색 결과에 실리고, 그 검색은 대리인이
+    근거를 모을 때 부르는 것입니다. 회의에서 대리인이 남 앞에서 그것을
+    읽어 버리면 되돌릴 방법이 없습니다.
+
+    `masked_secrets` 에도 안 잡혀서, 화면은 "가린 것 없음" 이라고 말하고
+    있었습니다. **가려졌다고 표시되는데 실제로는 안 가려진 것**이 가장 나쁩니다.
+    """
     if not isinstance(sections, list):
         raise BordoError("VALIDATION_ERROR", "sections 는 배열입니다.")
     out, total = [], 0
@@ -139,11 +153,11 @@ def _mask_sections(sections):
         if not isinstance(s, dict):
             raise BordoError("VALIDATION_ERROR",
                              "sections 항목은 {heading, one_line_summary, body} 입니다.")
-        body, n = mask_secrets(s.get("body") or "")
-        total += n
-        out.append({"heading": s.get("heading") or "",
-                    "one_line_summary": s.get("one_line_summary") or "",
-                    "body": body})
+        row = {}
+        for field in ("heading", "one_line_summary", "body"):
+            row[field], n = mask_secrets(s.get(field) or "")
+            total += n
+        out.append(row)
     return out, total
 
 
