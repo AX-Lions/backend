@@ -92,6 +92,13 @@ class AccountLinkTest(Base):
         self.owner.refresh_from_db()
         self.assertEqual(self.owner.discord_user_id, "")
 
+    def test_too_many_tries_is_429(self):
+        """6자리 코드를 무한히 넣어 볼 수 있으면 남의 Discord 계정을 가로챌 수 있습니다."""
+        last = None
+        for _ in range(11):
+            last = self.api.post("/api/v1/me/discord/link", {"connect_code": "ZZZZZZ"}, format="json")
+        self.assertEqual(last.status_code, 429)
+
     def test_requires_login(self):
         self.assertEqual(APIClient().post("/api/v1/me/discord/link", {}).status_code, 401)
 

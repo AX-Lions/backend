@@ -23,12 +23,17 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from apps.common.permissions import team_membership
+from apps.common.throttle import check_rate
 from apps.orgs.models import TeamRole
 from config.errors import BordoError
 
 from .models import GuildLink, LinkCode
 
 ADMINS = (TeamRole.OWNER, TeamRole.ADMIN)
+
+#: 코드는 6자리(16^6)에 10분 수명입니다. 상한 없이 두면 그 안에 다 넣어 볼 수 있고,
+#: 맞히면 남의 Discord 계정을 내 Bordo 계정에 붙이게 됩니다.
+CODE_TRIES_PER_MINUTE = 10
 
 #: 봇 생존 신호가 캐시에 남는 키·수명. 봇이 `on_ready`/`on_resumed` 에서 보냅니다.
 BOT_PRESENCE_KEY = "discord:bot:presence"
@@ -45,18 +50,22 @@ def _consume_code(user, raw):
     """
     from apps.accounts.models import User
 
+    check_rate(f"discord-code:{user.id}", CODE_TRIES_PER_MINUTE)
     code = str(raw or "").strip().upper()
     if not code:
         raise BordoError("VALIDATION_ERROR", "connect_code 는 필수입니다.")
-    row = LinkCode.objects.filter(code=code).first()
-    if row is None:
-        raise BordoError("DISCORD_CODE_INVALID")
-    if row.used_at is not None:
-        raise BordoError("DISCORD_CODE_ALREADY_USED")
-    if row.expires_at <= timezone.now():
-        raise BordoError("DISCORD_CODE_EXPIRED")
 
     with transaction.atomic():
+        # 행을 잠그고 검사합니다. 같은 코드가 동시에 두 번 오면(더블 클릭, 또는 코드를
+        # 본 두 사람) 둘 다 "안 쓰였다" 를 보고 둘 다 통과합니다. 1회용이 뜻을 잃습니다.
+        row = LinkCode.objects.select_for_update().filter(code=code).first()
+        if row is None:
+            raise BordoError("DISCORD_CODE_INVALID")
+        if row.used_at is not None:
+            raise BordoError("DISCORD_CODE_ALREADY_USED")
+        if row.expires_at <= timezone.now():
+            raise BordoError("DISCORD_CODE_EXPIRED")
+
         # 한 Discord 계정이 두 Bordo 계정에 이어지면 봇의 발언이 누구 것인지 정할 수
         # 없습니다. 이전에 이어진 계정에서 떼어 내고 이 사람에게 붙입니다.
         (User.all_objects.filter(discord_user_id=row.discord_user_id)
