@@ -22,10 +22,13 @@
 """
 from __future__ import annotations
 
+import logging
+
 from django.utils import timezone
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
+from apps.agent.tasks import build_debate_points
 from apps.common.display import meeting_when, user_tz
 from apps.common.events import publish
 from apps.common.permissions import meeting_access
@@ -56,6 +59,8 @@ OVERRIDE_BOOLS = ("mention_feasibility", "allow_schedule_change",
 # 바뀝니다 — 화면은 `Bordo 대리 참석 예정` 이라고 하는데 회의는 어제 끝난 것입니다.
 OPEN_STATUSES = (MeetingStatus.DRAFT, MeetingStatus.SCHEDULED,
                  MeetingStatus.CONFIRMED, MeetingStatus.ACTIVE)
+
+logger = logging.getLogger("bordo.meetings")
 
 
 def participant_of(user, meeting_id):
@@ -110,6 +115,17 @@ def register_absence(user, meeting_id):
         p.save(update_fields=["delegated", "attendance", "updated_at"])
         publish(meeting.project_id, "meeting.absence.registered",
                 {"meeting_id": str(meeting.id), "user_id": str(user.id)})
+
+    # 준비 화면이 열리자마자 쟁점을 보여줘야 합니다. 화면에서 따로 부르게 하면
+    # 열 때마다 모델이 돌고, 두 번째 사람이 열었을 때 예측이 달라집니다.
+    #
+    # **기다리지 않습니다.** 여기서 터지면 등록 자체가 실패한 것으로 읽힙니다 —
+    # 불참은 이미 저장돼 있는데 화면은 안 눌린 줄 압니다.
+    try:
+        build_debate_points.delay(str(meeting.id))
+    except Exception:                                          # noqa: BLE001
+        logger.exception("논쟁점 생성 호출 실패 meeting=%s", meeting.id)
+
     return meeting, p, changed
 
 

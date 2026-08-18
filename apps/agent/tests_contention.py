@@ -210,3 +210,50 @@ class RebuildTest(Base):
         b = contention._source_key("개발 범위를 축소할 것인가?")
         self.assertEqual(a, b)
         self.assertNotEqual(a, contention._source_key("QA 일정을 연기할 것인가?"))
+
+
+class TaskTest(Base):
+
+    def test_absence_fills_the_prep_screen(self):
+        """화면에서 따로 부르게 하면 열 때마다 모델이 돌고 두 번째 사람은 다른 예측을 봅니다."""
+        from unittest.mock import patch
+
+        from apps.agent.tasks import build_debate_points
+
+        self.past_utterance()
+        m = self.meeting()
+        Agenda.objects.create(meeting=m, title="QA 일정", sort_order=1)
+
+        with patch("apps.agent.services.llm.client", Fake(ANSWER)):
+            build_debate_points(str(m.id))
+        self.assertEqual(DebatePoint.objects.filter(meeting=m).count(), 1)
+
+    def test_second_person_does_not_re_predict(self):
+        from unittest.mock import patch
+
+        from apps.agent.tasks import build_debate_points
+
+        self.past_utterance()
+        m = self.meeting()
+        with patch("apps.agent.services.llm.client", Fake(ANSWER)):
+            build_debate_points(str(m.id))
+            spy = Fake(ANSWER)
+            with patch("apps.agent.services.llm.client", spy):
+                build_debate_points(str(m.id))
+            self.assertIsNone(spy.seen, "이미 만들어져 있으면 모델을 다시 부르지 않습니다")
+
+    def test_failure_does_not_bubble_up(self):
+        from unittest.mock import patch
+
+        from apps.agent.tasks import build_debate_points
+
+        m = self.meeting()
+        with patch("apps.agent.services.contention.build_for",
+                   side_effect=RuntimeError("boom")):
+            build_debate_points(str(m.id))     # 불참 등록은 이미 끝나 있습니다
+
+    def test_unknown_meeting_is_ignored(self):
+        import uuid
+
+        from apps.agent.tasks import build_debate_points
+        build_debate_points(str(uuid.uuid4()))
