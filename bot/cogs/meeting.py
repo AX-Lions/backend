@@ -121,13 +121,20 @@ class MeetingCog(commands.Cog):
             type=discord.ChannelType.public_thread,
         )
 
-        result = await self.backend.post("/internal/v1/meetings/start",
-            json={
-                "guild_id": str(interaction.guild_id),
-                "meeting_id": meeting_id,
-                "thread_id": str(thread.id),
-            }
-        )
+        payload = {
+            "guild_id": str(interaction.guild_id),
+            "meeting_id": meeting_id,
+            "thread_id": str(thread.id),
+        }
+        result = await self.backend.post("/internal/v1/meetings/start", json=payload)
+
+        if result is None:
+            # BackendClient가 이미 재시도했는데도 완전히 실패했다는 뜻이지만,
+            # 마지막 시도가 서버에서는 실제로 성공하고 응답만 유실됐을 수도
+            # 있다. 같은 thread_id로 한 번 더 보내면 Backend의 중복 처리
+            # (discord_channel_id로 기존 회의 찾기)가 안전하게 확인해준다 —
+            # 진짜 실패였으면 여기서도 그대로 None/에러가 온다.
+            result = await self.backend.post("/internal/v1/meetings/start", json=payload)
 
         if result is None:
             await interaction.followup.send(
