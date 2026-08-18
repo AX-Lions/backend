@@ -158,3 +158,50 @@ class AbsenceTest(Base):
         res = self.post("/meetings/absence",
                         {"thread_id": THREAD, "discord_user_id": "dc-nobody"})
         self.assertEqual(res.json()["error"]["code"], "USER_NOT_FOUND")
+
+
+class DelegateOnBuildsDebateTest(Base):
+    """
+    Discord 로 대리 참석을 켜도 준비 화면이 채워지는가.
+
+    상태만 웹과 맞추고 예측 파이프라인을 웹 경로에만 걸어 두면, 지금 살아 있는
+    대리 참석 경로 대부분이 준비 화면을 빈 칸으로 봅니다.
+    """
+
+    def test_delegate_on_queues_prediction(self):
+        from unittest.mock import patch
+
+        with patch("apps.agent.tasks.build_debate_points.delay") as spy:
+            r = self.post("/delegate/on", {"discord_user_id": "dc-mate",
+                                           "scope": "전체"})
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertTrue(spy.called, "예측이 안 걸리면 준비 화면이 빈 칸입니다")
+        queued = {c.args[0] for c in spy.call_args_list}
+        self.assertIn(str(self.meeting.id), queued)
+
+    def test_internal_absence_queues_too(self):
+        from unittest.mock import patch
+
+        with patch("apps.agent.tasks.build_debate_points.delay") as spy:
+            self.post("/meetings/absence", {"thread_id": THREAD,
+                                            "discord_user_id": "dc-mate"})
+        self.assertTrue(spy.called)
+
+    def test_delegate_off_does_not_queue(self):
+        from unittest.mock import patch
+
+        with patch("apps.agent.tasks.build_debate_points.delay") as spy:
+            self.post("/delegate/off", {"discord_user_id": "dc-me"})
+        self.assertFalse(spy.called)
+
+    def test_queue_failure_does_not_break_the_toggle(self):
+        """여기서 터지면 봇은 `안 켜졌다` 로 읽고 사용자에게 다시 하라고 합니다."""
+        from unittest.mock import patch
+
+        with patch("apps.agent.tasks.build_debate_points.delay",
+                   side_effect=RuntimeError("no broker")):
+            r = self.post("/delegate/on", {"discord_user_id": "dc-mate",
+                                           "scope": "전체"})
+        self.assertEqual(r.status_code, 200)
+        self.p_mate.refresh_from_db()
+        self.assertTrue(self.p_mate.delegated)

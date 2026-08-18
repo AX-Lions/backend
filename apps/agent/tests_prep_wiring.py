@@ -180,3 +180,77 @@ class PeerPathTest(Base):
         self.part.save()
         p = react._participant_of(self.meeting.id, self.me)
         self.assertEqual(p.delegate_prompt, "이번엔 일정 얘기 하지 마")
+
+
+class StanceReachesTheMeetingTest(Base):
+    """
+    **준비해 둔 입장이 실제로 회의에서 나오는가.**
+
+    프롬프트에 실리는 것만 확인하면 부족합니다. 루프가 끝나면 반드시 judge 를
+    지나는데, 프롬프트에 답이 적혀 있으면 모델은 도구를 한 번도 안 부르고 바로
+    답합니다 — 그러면 근거가 0건이라 R1(근거없음)에 걸려 유보가 나갑니다.
+    입장을 적어 두는 상황이 대부분 기록이 없는 경우라, 바로 그때 입을 다뭅니다.
+    """
+
+    def _stance(self, body="남은 기간을 보면 축소가 맞습니다"):
+        from apps.agent.models import AgentSettings
+        AgentSettings.objects.get_or_create(user=self.me)
+        point = DebatePoint.objects.create(
+            meeting=self.meeting, source_key="k1", order=1,
+            title="개발 범위를 축소할 것인가?",
+            options=[{"key": "A", "title": "핵심 기능만 구현"}])
+        return DebateStance.objects.create(point=point, user=self.me,
+                                           option_key="A", body=body)
+
+    def _run(self, text="남은 기간을 보면 축소가 맞습니다.", **kw):
+        from apps.agent.services.llm import LLMResponse
+
+        class Fake:
+            def __init__(self):
+                self.system = ""
+
+            def chat(self, messages, tools=None, system=""):
+                self.system = system
+                return LLMResponse(text=text)
+
+        fake = Fake()
+        return react.run(principal=self.me, question="범위 축소 어떻게 생각하세요?",
+                         client=fake, **kw), fake
+
+    def test_agent_answers_instead_of_deferring(self):
+        self._stance()
+        out, fake = self._run(meeting=self.meeting)
+        self.assertTrue(out.answered,
+                        f"준비해 둔 입장이 있는데 유보됐습니다: {out.reason}")
+        self.assertIn("축소", out.text)
+        self.assertIn("미리 정해 둔 입장", fake.system)
+
+    def test_stance_is_recorded_as_evidence(self):
+        """무엇을 보고 답했는지가 남아야 나중에 되짚을 수 있습니다."""
+        self._stance()
+        out, _ = self._run(meeting=self.meeting)
+        kinds = [e.get("source_type") for e in (out.run.evidence or [])]
+        self.assertIn("stance", kinds)
+
+    def test_without_a_stance_it_still_defers(self):
+        """근거 없이 답하는 경로를 새로 만든 것이 아닙니다."""
+        from apps.agent.models import AgentSettings
+        AgentSettings.objects.get_or_create(user=self.me)
+        out, _ = self._run(meeting=self.meeting)
+        self.assertFalse(out.answered)
+        self.assertEqual(out.reason, "NO_EVIDENCE")
+
+    def test_peer_path_also_answers(self):
+        """대리인끼리 묻는 경로만 유보되면 그 경로가 우회로가 됩니다."""
+        self._stance()
+        out, _ = self._run(meeting=None, scope_meeting_id=self.meeting.id)
+        self.assertTrue(out.answered, out.reason)
+
+    def test_empty_stance_body_is_not_evidence(self):
+        from apps.agent.models import AgentSettings
+        AgentSettings.objects.get_or_create(user=self.me)
+        point = DebatePoint.objects.create(meeting=self.meeting, source_key="k1",
+                                           order=1, title="쟁점?")
+        DebateStance.objects.create(point=point, user=self.me, body="   ")
+        out, _ = self._run(meeting=self.meeting)
+        self.assertFalse(out.answered)

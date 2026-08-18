@@ -60,6 +60,13 @@ OVERRIDE_BOOLS = ("mention_feasibility", "allow_schedule_change",
                   "allow_midmeeting_question",
                   "disclose_work", "disclose_plan", "disclose_thought")
 
+#: 응답에는 실리지만 이 회의에서 바꿀 수 없는 것. 되돌려받아도 조용히 버립니다.
+#:
+#: 정말 모르는 키는 그대로 400 입니다 — 오타를 조용히 버리면 화면은 저장됐다고
+#: 하는데 대리인은 그 설정을 안 봅니다.
+READ_ONLY_KEYS = ("disclose_work_plan_thought", "agent_name", "active_version",
+                  "updated_at")
+
 #: 불참을 등록할 수 있는 회의 상태.
 #
 # 끝난 회의에 대리 참석을 켤 수 있으면 브리핑이 이미 만들어진 뒤에 참석자 상태가
@@ -216,7 +223,28 @@ def point_row(point, stance) -> dict:
     }
 
 
-def debate_block(meeting, user) -> dict:
+def debate_notice(rows, delegated: bool) -> str:
+    """
+    화면 부제.
+
+    세 가지를 가릅니다. 하나로 뭉치면 **거짓말이 됩니다** —
+    안건을 베낀 것에 `Bordo가 예상했어요` 를 붙이거나, 만들고 있는 중에
+    `없어요` 라고 단정하게 됩니다.
+    """
+    if rows:
+        if any(r["created_by_agent"] for r in rows):
+            return (f"Bordo가 회의 자료와 이전 논의를 바탕으로 {len(rows)}개의 "
+                    f"논쟁점을 예상했어요.")
+        # 규칙으로 안건을 옮겨 온 것입니다. 예측이라고 말하면 안 됩니다.
+        return f"회의 안건 {len(rows)}개예요. 미리 입장을 적어 두면 대리인이 그대로 전합니다."
+    if delegated:
+        # 불참을 등록하면 곧바로 예측이 걸립니다. 아직 없다고 단정하면 사용자는
+        # 새로고침할 이유를 못 찾습니다.
+        return "Bordo가 논쟁점을 예상하고 있어요. 잠시 후 다시 확인해 주세요."
+    return "아직 예상된 논쟁점이 없어요. 회의 자료가 쌓이면 Bordo가 예상해 드려요."
+
+
+def debate_block(meeting, user, delegated: bool = False) -> dict:
     """
     예상 논쟁점과 내 입장.
 
@@ -229,10 +257,8 @@ def debate_block(meeting, user) -> dict:
     rows = [point_row(p, mine.get(str(p.id))) for p in points]
     answered = sum(1 for r in rows if r["status"] == "ANSWERED")
     return {
-        # 화면 부제. 개수가 들어가므로 서버가 완성합니다.
-        "notice": (f"Bordo가 회의 자료와 이전 논의를 바탕으로 {len(rows)}개의 "
-                   f"논쟁점을 예상했어요." if rows else
-                   "아직 예상된 논쟁점이 없어요. 회의 자료가 쌓이면 Bordo가 예상해 드려요."),
+        # 화면 부제. 개수와 출처가 들어가므로 서버가 완성합니다.
+        "notice": debate_notice(rows, delegated),
         "count": len(rows),
         "answered_count": answered,
         "points": rows,
@@ -302,6 +328,11 @@ def clean_overrides(raw) -> dict:
 
     out, bad = {}, []
     for key, value in raw.items():
+        if key in READ_ONLY_KEYS:
+            # `GET /prep` 이 준 `settings` 를 그대로 돌려보내는 것이 정상입니다.
+            # 화면이 그중 바꿀 수 있는 것만 골라 담게 하면, 어느 키가 읽기
+            # 전용인지 클라이언트가 알고 있어야 합니다. 여기서 버립니다.
+            continue
         if key in OVERRIDE_BOOLS:
             out[key] = bool(value)
         elif key == "tone":
@@ -459,7 +490,7 @@ def prep(request, meeting_id):
     meeting, p = participant_of(request.user, meeting_id)
     return Response({
         "header": header_of(meeting, p, request.user),
-        "debate": debate_block(meeting, request.user),
+        "debate": debate_block(meeting, request.user, delegated=p.delegated),
         "agent_setup": setup_block(p, request.user),
     })
 
