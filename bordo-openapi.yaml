@@ -15306,6 +15306,14 @@ components:
                     prompt:
                       type: string
                       description: 이 회의에 한정된 사전 지시
+                    absence_url:
+                      type: string
+                      description: '`회의에 참여하지 않아요` 를 누르면 부를 곳 (`POST`). 클라이언트가 경로를 조립하면 경로가 바뀔 때 두 곳을 고쳐야 한다.'
+                      example: /api/v1/meetings/meeting_3/absence
+                    prep_url:
+                      type: string
+                      description: 그다음 열 「회의 대리 참석 준비」 화면
+                      example: /api/v1/meetings/meeting_3/prep
                     sources:
                       anyOf:
                       - type: array

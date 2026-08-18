@@ -21,6 +21,8 @@ import logging
 
 from celery import shared_task
 
+from django.db import transaction
+
 from apps.common.events import publish
 
 logger = logging.getLogger("bordo.agent")
@@ -261,15 +263,30 @@ def build_debate_points(meeting_id: str, force: bool = False) -> None:
     """
     from apps.meetings.models import DebatePoint, Meeting
 
-    from .services import contention
-
     meeting = Meeting.objects.filter(pk=meeting_id).first()
     if meeting is None:
         logger.warning("회의를 찾을 수 없습니다: %s", meeting_id)
         return
 
-    if not force and DebatePoint.objects.filter(meeting=meeting).exists():
-        return
+    # 두 사람이 거의 동시에 불참을 누르면 둘 다 `없음` 을 보고 둘 다 모델을
+    # 부릅니다. 뒤에 끝난 쪽이 앞에서 만든 쟁점을 지워, 그 사이 화면을 연
+    # 사람이 답을 적던 쟁점이 사라집니다. 회의 행을 잠가 줄을 세웁니다.
+    # (PostgreSQL 에서만 실제로 걸립니다 — SQLite 는 조용히 무시합니다)
+    with transaction.atomic():
+        Meeting.objects.select_for_update().filter(pk=meeting.pk).exists()
+        if not force and DebatePoint.objects.filter(meeting=meeting).exists():
+            return
+        _build(meeting, meeting_id)
+
+
+def _build(meeting, meeting_id: str) -> None:
+    """
+    실제 생성. 회의 행을 잠근 채로 불립니다.
+
+    모델 호출 자체는 `contention.build_for` 안에서 트랜잭션 **밖**으로 나가
+    있습니다 — 여기 잠금은 "누가 만들 것인가" 를 정하는 용도입니다.
+    """
+    from .services import contention
 
     try:
         made = contention.build_for(meeting)

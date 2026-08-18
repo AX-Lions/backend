@@ -337,3 +337,40 @@ class RebuildSafetyTest(Base):
             ANSWER.replace(TITLE, "QA 일정을 연기할 것인가, 유지할 것인가?")))
         orders = sorted(DebatePoint.objects.filter(meeting=m).values_list("order", flat=True))
         self.assertEqual(orders, [1, 2])
+
+
+class ConcurrentBuildTest(Base):
+    """두 사람이 거의 동시에 불참을 누를 때."""
+
+    def test_guard_is_inside_the_lock(self):
+        """뒤에 끝난 쪽이 앞에서 만든 쟁점을 지우면, 답을 적던 사람의 쟁점이 사라집니다."""
+        from unittest.mock import patch
+
+        from apps.agent.tasks import build_debate_points
+
+        self.past_utterance()
+        m = self.meeting()
+        with patch("apps.agent.services.llm.client", Fake(ANSWER)):
+            build_debate_points(str(m.id))
+        first = set(DebatePoint.objects.filter(meeting=m).values_list("id", flat=True))
+
+        spy = Fake(ANSWER.replace(TITLE, "다른 쟁점?"))
+        with patch("apps.agent.services.llm.client", spy):
+            build_debate_points(str(m.id))
+        self.assertIsNone(spy.seen)
+        self.assertEqual(
+            set(DebatePoint.objects.filter(meeting=m).values_list("id", flat=True)), first)
+
+    def test_force_rebuilds(self):
+        from unittest.mock import patch
+
+        from apps.agent.tasks import build_debate_points
+
+        self.past_utterance()
+        m = self.meeting()
+        with patch("apps.agent.services.llm.client", Fake(ANSWER)):
+            build_debate_points(str(m.id))
+            spy = Fake(ANSWER)
+            with patch("apps.agent.services.llm.client", spy):
+                build_debate_points(str(m.id), force=True)
+            self.assertIsNotNone(spy.seen)
