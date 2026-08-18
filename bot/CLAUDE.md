@@ -36,7 +36,7 @@ Discord 이벤트를 Backend로 전달하고, Backend가 결정한 내용만 화
 |---|---|
 | `/bordo-connect` | 계정 연결 코드를 DM으로 발급 |
 | `/bordo-team` | 현재 연결된 팀 조회 |
-| `/meeting-start` | 웹에서 예정된 회의 중 하나를 골라(자동완성) 스레드를 엽니다 |
+| `/meeting-start` | 웹에서 예정된 회의를 골라(자동완성) 열거나, agenda로 즉석 회의를 새로 만듭니다 |
 | `/meeting-end` | 회의 종료 (회의 스레드 안에서 실행) |
 | `/ask-bordo` | 특정 대리인에게 질문 전달 (답변은 비동기) |
 | `/delegate-on` · `/delegate-off` | 내 AI 대리인 자동 참석 전역 토글 |
@@ -57,16 +57,19 @@ Discord 이벤트를 Backend로 전달하고, Backend가 결정한 내용만 화
 
 ## 알려진 공백 (작업 대상)
 
-- `/meeting-start`가 `GET /internal/v1/meetings/scheduled`와 `POST /internal/v1/meetings/start`의
-  `meeting_id` 지원을 전제로 짜여 있음(AX-Lions/backend#89). **둘 다 안전하게 비어있는
-  상태가 아니다:**
-  - `GET /internal/v1/meetings/scheduled`는 아직 없어서 자동완성은 그냥 빈 목록만 돌려준다(안전).
-  - `POST /internal/v1/meetings/start`는 이미 존재하지만 옛 계약(agenda/participants 기반
-    즉석 생성) 그대로다 — `meeting_id`를 읽지도, `title`/`participants`를 응답에 담지도
-    않는다. 지금 이 커맨드를 그대로 배포하면 **실패하지 않고** `project = team.projects
-    .order_by("created_at").first()`로 아무 프로젝트나 골라 제목 "Discord 회의", 참석자
-    0명짜리 엉뚱한 회의를 조용히 만들어버린다. **#89가 배포되기 전까지 이 브랜치를
-    develop 이상으로 배포하지 말 것.**
+- `/meeting-start`는 두 경로로 갈린다. `agenda`를 채우는 **즉석 회의 경로는 지금 당장
+  써도 안전**하다 — Backend가 이미 지원하는 옛 계약(agenda/participants 기반 즉석 생성)
+  을 그대로 쓴다.
+  `meeting_id`를 고르는 **예정 회의 경로는 AX-Lions/backend#89가 배포되기 전까지 쓰면
+  안 된다:**
+  - `GET /internal/v1/meetings/scheduled`가 아직 없어서 평소엔 자동완성이 빈 목록만
+    돌려준다(안전 — 후보가 안 보이니 고를 수도 없다).
+  - 다만 `meeting_id`에 값을 직접 타이핑해 넣으면(자동완성 후보를 거치지 않고), 그 값은
+    `POST /internal/v1/meetings/start`로 그대로 전달된다. 이 엔드포인트는 이미 존재하지만
+    `meeting_id`를 읽지도, `title`/`participants`를 응답에 담지도 않는다 — **실패하지
+    않고** `project = team.projects.order_by("created_at").first()`로 아무 프로젝트나
+    골라 제목 "Discord 회의", 참석자 0명짜리 엉뚱한 회의를 조용히 만들어버린다.
+    #89가 배포되기 전까지는 `meeting_id`를 손으로 입력하지 말라고 팀에 공유해둘 것.
 - 모든 상태가 인메모리 — 재시작하면 진행 중 회의 정보가 사라짐
 - 테스트·린터·빌드 단계 없음
 
