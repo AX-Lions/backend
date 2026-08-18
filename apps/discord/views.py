@@ -26,6 +26,7 @@ import logging
 import secrets
 from datetime import timedelta
 
+from django.core.cache import cache
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
@@ -417,11 +418,26 @@ def discord_messages(request):
 
 @internal(["POST"])
 def discord_presence(request):
-    """온라인 여부. 대리 참석 판단의 보조 신호입니다."""
+    """
+    온라인 여부. 대리 참석 판단의 보조 신호입니다.
+
+    `discord_user_id` 없이 오면 **봇 자신의 생존 신호**입니다 (`on_ready` · `on_resumed`
+    가 `{status, at}` 만 보냅니다). 사람 상태로 해석해 400 을 내던 것을, 캐시에 남겨
+    웹의 연결 진단(`/teams/{id}/discord/status`)이 "봇이 살아 있다" 를 보여주게 합니다.
+    """
     from apps.meetings.models import Attendance, MeetingParticipant, MeetingStatus
 
-    discord_user_id = _require(request.data.get("discord_user_id"), "discord_user_id")
+    from .web_views import BOT_PRESENCE_KEY, BOT_PRESENCE_TTL_SEC
+
     status = str(request.data.get("status") or "").lower()
+    if not str(request.data.get("discord_user_id") or "").strip():
+        cache.set(BOT_PRESENCE_KEY,
+                  {"status": status or "online",
+                   "at": str(request.data.get("at") or timezone.now().isoformat())},
+                  timeout=BOT_PRESENCE_TTL_SEC)
+        return Response({"recorded": "bot_presence"}, status=202)
+
+    discord_user_id = _require(request.data.get("discord_user_id"), "discord_user_id")
 
     from apps.accounts.models import User
     user = User.objects.filter(discord_user_id=discord_user_id).first()

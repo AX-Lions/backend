@@ -17,6 +17,7 @@ from apps.accounts import views as accounts
 from apps.agent import views as agent
 from apps.calendars import views as calendars
 from apps.discord import views as discord_internal
+from apps.discord import web_views as discord_web
 from apps.chat import views as chat
 from apps.documents import views as documents
 from apps.home import views as home
@@ -67,6 +68,11 @@ urlpatterns = [
     path(f"{API}/me/agent/settings/history", agent.settings_history),
     path(f"{API}/me/agent/prompts", agent.prompts),
     path(f"{API}/me/agent/prompts/<uuid:prompt_id>", agent.prompt_detail),
+
+    # ── 12. Discord 연동 (웹) — 봇이 DM 으로 준 코드를 여기서 입력합니다
+    path(f"{API}/me/discord/link", discord_web.me_discord_link),
+    path(f"{API}/teams/<uuid:team_id>/discord/link", discord_web.team_discord_link),
+    path(f"{API}/teams/<uuid:team_id>/discord/status", discord_web.team_discord_status),
 
     # ── 09. 회의 · 플로우
     path(f"{API}/projects/<uuid:project_id>/meetings", meetings.meetings),
@@ -189,8 +195,4 @@ urlpatterns = [
     path(f"{INTERNAL}/outbox-events", discord_internal.outbox_events),
     path(f"{INTERNAL}/outbox-events/<uuid:event_id>/ack", discord_internal.outbox_ack),
     path(f"{INTERNAL}/outbox-events/<uuid:event_id>/fail", discord_internal.outbox_fail),
-
-    # 봇이 아직 쓰는 옛 경로. 명세는 /meetings/start 입니다.
-    # 봇이 옮겨 오면 지웁니다 — 지금 지우면 회의 시작이 통째로 막힙니다.
-    path(f"{INTERNAL}/meetings", discord_internal.meeting_start),
 ]

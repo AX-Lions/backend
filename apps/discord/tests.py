@@ -226,11 +226,11 @@ class MeetingTest(Base):
         r = self._start([{"discord_user_id": "모르는사람", "status": "present"}])
         self.assertEqual(r.status_code, 201)
 
-    def test_legacy_path_still_works(self):
-        """봇이 옮겨 오기 전까지 옛 경로도 받습니다."""
+    def test_legacy_path_is_gone(self):
+        """봇이 /meetings/start 로 옮겨 왔으므로 옛 경로는 없습니다."""
         r = self.post("/meetings", {"guild_id": GUILD, "thread_id": "t-2",
                                     "agenda": "x"})
-        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.status_code, 404)
 
     def test_end_generates_summary_in_backend(self):
         """봇이 요약해서 보내지 않습니다. 원본만 받고 여기서 만듭니다."""
