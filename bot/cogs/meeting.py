@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -134,6 +135,11 @@ class MeetingCog(commands.Cog):
             # 있다. 같은 thread_id로 한 번 더 보내면 Backend의 중복 처리
             # (discord_channel_id로 기존 회의 찾기)가 안전하게 확인해준다 —
             # 진짜 실패였으면 여기서도 그대로 None/에러가 온다.
+            #
+            # BackendClient 자체도 이미 최대 ~16.5초를 들여 재시도한 뒤였다 —
+            # 바로 다시 부르면 아직 복구 중인 Backend에 요청을 곱절로
+            # 몰아넣는 꼴이라, 잠깐 물러났다가 한 번만 더 시도한다.
+            await asyncio.sleep(2.0)
             result = await self.backend.post("/internal/v1/meetings/start", json=payload)
 
         if result is None:
