@@ -17,6 +17,10 @@ ERROR_CODES = {
     "AUTH_EMAIL_DUPLICATED":         (409, "이미 사용 중인 이메일입니다.", False),
     "AUTH_ACCOUNT_INACTIVE":         (401, "비활성화된 계정입니다.", False),
     "AUTH_SERVICE_TOKEN_INVALID":    (401, "서비스 토큰이 올바르지 않습니다.", False),
+    # MCP — 개인 AI 클라이언트
+    "AUTH_MCP_TOKEN_INVALID":        (401, "MCP 토큰이 없거나 폐기됐습니다. 설정 화면에서 다시 발급하십시오.", False),
+    "MCP_ORIGIN_FORBIDDEN":          (403, "허용되지 않은 Origin 입니다.", False),
+    "MCP_RATE_LIMITED":              (429, "MCP 호출이 너무 잦습니다. 잠시 후 다시 시도하십시오.", True),
     # 팀 / 프로젝트
     "TEAM_ACCESS_DENIED":            (403, "해당 팀의 멤버가 아닙니다.", False),
     "TEAM_INVITE_INVALID":           (400, "유효하지 않은 초대 코드입니다.", False),
