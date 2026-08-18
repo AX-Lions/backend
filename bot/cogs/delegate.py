@@ -2,6 +2,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from services.backend import get_error
+
+
 class DelegateCog(commands.Cog):
     def __init__(self, bot, backend, meeting_cog, delegate_on_users):
         self.bot = bot
@@ -29,8 +32,27 @@ class DelegateCog(commands.Cog):
                     thread_id, f"🤖 <@{interaction.user.id}>님이 대리 참석으로 전환했습니다. AI 대리인이 대신 참석합니다."
                 )
     
-        await self.backend.post("/internal/v1/delegate/on", json={"discord_user_id": str(interaction.user.id), "scope": scope})
-        await interaction.followup.send("대리 참석을 활성화했습니다. 앞으로 시작되는 회의에도 자동 적용됩니다.", ephemeral=True)    
+        result = await self.backend.post(
+            "/internal/v1/delegate/on",
+            json={"discord_user_id": str(interaction.user.id), "scope": scope},
+        )
+
+        if result is None:
+            await interaction.followup.send(
+                "대리 참석을 활성화했지만 Backend 동기화에 실패했습니다. 잠시 후 다시 시도해주세요.",
+                ephemeral=True,
+            )
+            return
+
+        error = get_error(result)
+        if error:
+            await interaction.followup.send(
+                f"대리 참석을 활성화했지만 Backend 동기화에 실패했습니다: {error.get('message', '')}",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send("대리 참석을 활성화했습니다. 앞으로 시작되는 회의에도 자동 적용됩니다.", ephemeral=True)
 
     @app_commands.command(name="delegate-off", description="대리 참석을 해제합니다. 어디서든 실행할 수 있습니다.")
     async def delegate_off(self, interaction: discord.Interaction):
@@ -46,5 +68,23 @@ class DelegateCog(commands.Cog):
                     thread_id, f"🙋 <@{interaction.user.id}>님이 대리 참석을 해제하고 직접 참석으로 전환했습니다."
                 )
 
-        await self.backend.post("/internal/v1/delegate/off", json={"discord_user_id": str(interaction.user.id)})
+        result = await self.backend.post(
+            "/internal/v1/delegate/off", json={"discord_user_id": str(interaction.user.id)}
+        )
+
+        if result is None:
+            await interaction.followup.send(
+                "대리 참석을 해제했지만 Backend 동기화에 실패했습니다. 잠시 후 다시 시도해주세요.",
+                ephemeral=True,
+            )
+            return
+
+        error = get_error(result)
+        if error:
+            await interaction.followup.send(
+                f"대리 참석을 해제했지만 Backend 동기화에 실패했습니다: {error.get('message', '')}",
+                ephemeral=True,
+            )
+            return
+
         await interaction.followup.send("대리 참석을 해제했습니다.", ephemeral=True)
