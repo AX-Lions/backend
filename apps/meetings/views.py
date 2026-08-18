@@ -121,21 +121,52 @@ def delegate(request, meeting_id):
 
     토글이라 PATCH 로 두는 편이 맞지만, 활성화 시점에 대리인 설정 스냅샷을 남기고
     참석 상태를 함께 바꾸는 부수효과가 있어 POST 로 둡니다.
+
+    ## 보낸 것만 바꿉니다
+
+    한 요청에 뜻이 셋 실려 있습니다 — 대리 참석 켜고 끄기 · 사전 지시 · 자료 범위.
+    전에는 셋 중 하나만 바꾸려는 호출이 **나머지를 지웠습니다.**
+
+        p.delegate_prompt = request.data.get("prompt", "") or ""
+
+    키가 없어도 빈 문자열로 덮었습니다. 「일정 관련 결정은 제 확인을 받아 주세요」
+    를 적어 둔 사람이 나중에 자료 범위만 고치면 그 지시가 사라졌고, 화면에는
+    저장됐다고 떴습니다. 대리인은 그 지시를 못 받은 채 회의에 들어갑니다.
+
+    `sources` 는 원래 키 유무를 봤는데 `prompt` 만 안 봤습니다. 규칙을 맞춥니다.
+
+    ## `enabled` 는 그대로 둡니다
+
+    키가 없으면 여전히 켜기입니다. 이건 부분 갱신 규칙에서 벗어나지만, 이
+    엔드포인트를 부르는 것 자체가 「맡긴다」 는 뜻으로 쓰여 왔고 `POST .../delegate`
+    에 빈 본문을 보내는 호출이 실제로 있습니다(`scripts/smoke_test.py`).
+    여기서 뜻을 바꾸면 **맡겼다고 생각한 회의가 조용히 안 맡겨집니다** —
+    지금 고치려는 것보다 나쁜 종류의 실패입니다.
+
+    새로 붙는 곳은 `POST /meetings/{id}/absence` 를 쓰십시오. `delegated` 플래그의
+    단일 진입점은 그쪽이고, 이 함수는 홈 팝업이 붙어 있던 옛 경로입니다.
     """
     meeting = meeting_access(request.user, meeting_id)
     p = MeetingParticipant.objects.filter(meeting=meeting, user=request.user).first()
     if not p:
         raise BordoError("STATE_NOT_FOUND", "이 회의의 참석자가 아닙니다.")
+
     enabled = bool(request.data.get("enabled", True))
     p.delegated = enabled
-    p.delegate_prompt = request.data.get("prompt", "") or ""
     p.attendance = Attendance.DELEGATED if enabled else Attendance.PENDING
+    changed = ["delegated", "attendance", "updated_at"]
+
+    # 보낸 것만 담습니다. 안 바뀐 칸을 `update_fields` 에 넣으면 같은 행을
+    # 동시에 고치는 다른 요청의 결과를 옛 값으로 되돌려 씁니다.
+    if "prompt" in request.data:
+        p.delegate_prompt = request.data.get("prompt") or ""
+        changed.append("delegate_prompt")
 
     if "sources" in request.data:
         p.allowed_sources = _clean_sources(request.data["sources"])
+        changed.append("allowed_sources")
 
-    p.save(update_fields=["delegated", "delegate_prompt", "attendance",
-                          "allowed_sources", "updated_at"])
+    p.save(update_fields=changed)
     return Response({"meeting_id": str(meeting.id), "user_id": str(request.user.id),
                      "delegated": p.delegated, "attendance": p.attendance,
                      "prompt": p.delegate_prompt,
