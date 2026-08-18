@@ -182,10 +182,11 @@ class PrepReadTest(Base):
         self.assertIsNone(row["stance"])
         self.assertEqual(row["status_label"], "답변필요")
 
-    def test_empty_notice_when_nothing_predicted(self):
+    def test_notice_says_it_is_still_working(self):
+        """불참을 누르면 곧바로 예측이 걸립니다. `없어요` 라고 단정하면 새로고침할 이유를 못 찾습니다."""
         body = self.api.get(self.url(self.m, "prep")).json()
         self.assertEqual(body["debate"]["count"], 0)
-        self.assertIn("아직", body["debate"]["notice"])
+        self.assertIn("예상하고 있어요", body["debate"]["notice"])
 
     def test_setup_defaults_to_standing(self):
         setup = self.api.get(self.url(self.m, "prep")).json()["agent_setup"]
@@ -325,9 +326,9 @@ class AgentSetupTest(Base):
 
     def test_unknown_setting_key_is_400(self):
         res = self.api.put(self.surl(),
-                           {"settings": {"agent_name": "다른 이름"}}, format="json")
+                           {"settings": {"nope_key": True}}, format="json")
         self.assertEqual(res.status_code, 400)
-        self.assertEqual(res.json()["error"]["details"]["unknown"], ["agent_name"])
+        self.assertEqual(res.json()["error"]["details"]["unknown"], ["nope_key"])
 
     def test_bad_tone_is_400(self):
         res = self.api.put(self.surl(), {"settings": {"tone": "SHOUTY"}}, format="json")
@@ -421,3 +422,53 @@ class LegacyDisclosureKeyTest(Base):
                              {"disclose_work_plan_thought": True}, format="json")
         self.assertEqual(res.json()["changed"], {})
         self.assertEqual(AgentSettings.objects.get(user=self.me).active_version, before)
+
+
+class ReviewFixTest(Base):
+    """리뷰(#88)에서 나온 자리들."""
+
+    def setUp(self):
+        super().setUp()
+        self.m = self.meeting()
+        self.api.post(self.url(self.m))
+        AgentSettings.objects.create(user=self.me)
+
+    def part(self):
+        return MeetingParticipant.objects.get(meeting=self.m, user=self.me)
+
+    def test_derived_key_matches_the_switches(self):
+        """화면은 `공개 안 함` 인데 판정은 통과하는 정반대 상태가 되면 안 됩니다."""
+        p = self.part()
+        p.settings_override = {"disclose_work": False, "disclose_plan": False,
+                               "disclose_thought": False}
+        p.save()
+        s = self.api.get(self.url(self.m, "prep")).json()["agent_setup"]["settings"]
+        self.assertFalse(s["disclose_work_plan_thought"])
+
+        # 하나라도 켜져 있으면 참입니다
+        p.settings_override = {"disclose_work": False}
+        p.save()
+        s = self.api.get(self.url(self.m, "prep")).json()["agent_setup"]["settings"]
+        self.assertTrue(s["disclose_work_plan_thought"])
+
+    def test_get_settings_can_be_put_back_as_is(self):
+        """화면이 어느 키가 읽기 전용인지 알고 있어야 하면 안 됩니다."""
+        got = self.api.get(self.url(self.m, "prep")).json()["agent_setup"]
+        res = self.api.put(self.url(self.m, "agent-setup"),
+                           {"mode": "ONCE", "settings": got["settings"]}, format="json")
+        self.assertEqual(res.status_code, 200, res.content)
+
+    def test_fallback_points_do_not_claim_prediction(self):
+        """`created_by_agent=False` 를 남긴 이유가 바로 이 문구를 막으려던 것입니다."""
+        DebatePoint.objects.create(meeting=self.m, source_key="k1", order=1,
+                                   title="QA 일정 — 어떻게 할 것인가?",
+                                   created_by_agent=False)
+        notice = self.api.get(self.url(self.m, "prep")).json()["debate"]["notice"]
+        self.assertNotIn("예상했어요", notice)
+        self.assertIn("회의 안건", notice)
+
+    def test_agent_points_say_predicted(self):
+        DebatePoint.objects.create(meeting=self.m, source_key="k1", order=1,
+                                   title="쟁점?", created_by_agent=True)
+        notice = self.api.get(self.url(self.m, "prep")).json()["debate"]["notice"]
+        self.assertIn("예상했어요", notice)
