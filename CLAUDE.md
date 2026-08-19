@@ -4,7 +4,23 @@ Bordo 백엔드에서 작업할 때 참고하는 문서입니다.
 `bordo-openapi.yaml` 이 API 계약의 원본이고, 이 문서는 **그 계약을 코드로 옮길 때의 규칙**입니다.
 
 Django 5 + DRF. 상위 맥락은 `../CLAUDE.md` 와 `../.claude/docs/BordoProgress-v03.md`,
-저장소 3곳 공통 협업 규칙은 `CONTRIBUTING.md` 를 보십시오.
+저장소 공통 협업 규칙은 `CONTRIBUTING.md` 를 보십시오.
+
+## 이 저장소에는 서비스가 둘 있습니다
+
+`bot/` 은 Discord 봇입니다(discord.py). 원래 `AX-Lions/discord` 였는데 제출
+저장소 수 제한으로 합쳤습니다 — 이력은 `git log -- bot/` 로 그대로 볼 수 있습니다.
+
+**둘은 다른 프로세스입니다.** 의존성·가상환경·배포·systemd 유닛이 전부 따로고,
+서버에도 **체크아웃을 둘** 둡니다(`bordo/backend` · `bordo/bot-repo`). 한 곳을
+둘이 쓰면 두 배포가 같은 디렉터리에서 `git reset --hard` 를 해 서로를 앞 커밋으로
+되돌립니다.
+
+- **`bot/` 안의 파일은 Discord 담당(강다은)의 영역입니다.** 합쳤다고 경계가
+  사라지지 않습니다 — 대회가 역할 분배를 봅니다.
+- 봇과 서버는 서로를 직접 부르지 않습니다. `/internal/v1` 과 Outbox 로만 오갑니다.
+- `requirements.txt` 를 합치지 마십시오. Django 와 discord.py 는 다른 프로세스이고,
+  합치면 버전 충돌을 서로에게 떠넘기게 됩니다.
 
 ---
 

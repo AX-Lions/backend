@@ -4,12 +4,18 @@
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now bordo-discord
 #
-# 경로가 /home/zanviq/bordo/discord 가 아니면 WorkingDirectory·EnvironmentFile·
+# 경로가 /home/zanviq/bordo/bot-repo/bot 이 아니면 WorkingDirectory·EnvironmentFile·
 # ExecStart·RequiresMountsFor 를 함께 바꾸십시오.
+#
+# **백엔드와 다른 체크아웃입니다.** 저장소는 하나(AX-Lions/backend)지만 서버에는
+# 두 번 받아 둡니다 — 봇 배포와 백엔드 배포가 같은 디렉터리에서 `git reset --hard`
+# 를 하면 서로를 앞 커밋으로 되돌립니다.
+#
+# 봇 코드는 저장소 안 `bot/` 에 있으므로, 체크아웃 루트가 아니라 그 아래를 가리킵니다.
 
 [Unit]
 Description=Bordo Discord 봇
-Documentation=https://github.com/AX-Lions/discord
+Documentation=https://github.com/AX-Lions/backend/tree/main/bot
 
 # 코드가 별도 볼륨에 있습니다. 마운트 전에 뜨면 빈 디렉터리를 보고 죽습니다.
 RequiresMountsFor=/home/zanviq/bordo
@@ -33,15 +39,15 @@ StartLimitBurst=5
 Type=simple
 User=zanviq
 Group=zanviq
-WorkingDirectory=/home/zanviq/bordo/discord
-EnvironmentFile=/home/zanviq/bordo/discord/.env
+WorkingDirectory=/home/zanviq/bordo/bot-repo/bot
+EnvironmentFile=/home/zanviq/bordo/bot-repo/bot/.env
 
 # -u 로 버퍼링을 끕니다.
 #
 # 봇은 log.info 를 discord.log 파일에 쓰고 print 와 트레이스백만 stdout 으로
 # 냅니다. 버퍼링을 켜 두면 그 stdout 마저 프로세스가 죽을 때까지 안 나와서,
 # 정작 죽은 이유를 journalctl 에서 못 봅니다.
-ExecStart=/home/zanviq/bordo/discord/.venv/bin/python -u main.py
+ExecStart=/home/zanviq/bordo/bot-repo/bot/.venv/bin/python -u main.py
 
 # 게이트웨이 연결이 끊기면 discord.py 가 스스로 재접속합니다. 여기서 잡는 건
 # 프로세스가 통째로 죽은 경우입니다.

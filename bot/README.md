@@ -1,3 +1,12 @@
+> **이 폴더는 원래 `AX-Lions/discord` 저장소였습니다.**
+>
+> 제출 저장소 수 제한으로 백엔드에 합쳤습니다. 커밋 이력은 작성자·날짜 그대로
+> 옮겨져 `git log -- bot/` 에서 볼 수 있습니다. **PR 과 이슈는 따라오지 않으므로
+> 원본 저장소를 그대로 둡니다** — https://github.com/AX-Lions/discord
+>
+> 봇은 백엔드와 **다른 프로세스**입니다. 의존성(`bot/requirements.txt`)도
+> 가상환경도 배포도 따로입니다.
+
 # Bordo Discord Bot
 
 AI 협업/대리인 서비스 "Bordo"의 Discord 담당 절반입니다. discord.py로 작성된 단일 파일(`main.py`) 봇으로, Discord 이벤트를 Backend로 릴레이하고 Backend가 결정한 내용을 표시하는 역할을 합니다.
