@@ -275,6 +275,15 @@ class ProposeTaskSkill(SkillBase):
             status=TaskStatus.PENDING_APPROVAL,
             created_by_agent=True,
             created_by_id=ctx.principal_id,
+            # 담당자를 비워 두면 **아무 목록에도 안 잡힙니다.** `GET /me/tasks` 와
+            # 요청함이 `assignee` 로 거르기 때문에, 승인 대기 태스크가 만들어지긴
+            # 하는데 승인할 사람에게 도달하지 못합니다 — 1원칙(사람 최종 승인)의
+            # 승인 큐가 비어 있는 게 아니라 닫혀 있는 상태가 됩니다.
+            #
+            # 주인에게 답니다. 대리인은 자리를 비운 사람을 대신해 참석한 것이라,
+            # 회의에서 나온 할 일의 임자는 그 사람입니다. 다른 사람 몫이면
+            # 승인한 뒤 `POST /tasks/{id}/assign` 으로 넘깁니다.
+            assignee_id=ctx.principal_id,
             source_meeting_id=ctx.meeting_id,
         )
         _flow_artifact(ctx, "task", title)
