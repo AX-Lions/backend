@@ -125,6 +125,14 @@ class BordoCog(commands.Cog):
         if not await self.gate.require(interaction):
             return
 
+        # react.run()이 DB 조회·LLM 호출을 거쳐 동기로 돌아오기까지 몇 초씩
+        # 걸릴 수 있다. defer()의 기본 "생각 중" 표시는 명령을 친 사람에게만
+        # 보이므로, 같이 회의 중인 다른 사람도 볼 수 있게 공개 placeholder를
+        # 먼저 띄우고 도착한 답으로 그 메시지를 그대로 바꿔치운다.
+        placeholder = await interaction.followup.send(
+            f"🤔 **{target.display_name}의 Bordo**가 생각 중입니다..."
+        )
+
         result = await self.backend.post("/internal/v1/deputy/ask", json={
             "requester_discord_id": str(interaction.user.id),
             "target_discord_id": str(target.id),
@@ -132,7 +140,19 @@ class BordoCog(commands.Cog):
             "thread_id": str(interaction.channel_id),
         })
 
-        # Outbox consumer가 아직 없어서, 지금은 응답 본문에 바로 담겨 오는 답변/유보를
-        # 그대로 게시한다. consumer가 붙으면 그때 옮긴다.
-        body = (result or {}).get("body", "답변을 받아오지 못했습니다.")
-        await interaction.followup.send(body)
+        if result is None:
+            await placeholder.edit(content="⚠️ 답변을 받아오지 못했습니다. 잠시 후 다시 시도해주세요.")
+            return
+
+        error = get_error(result)
+        if error:
+            await placeholder.edit(content=error.get("message", "답변을 받아오지 못했습니다."))
+            return
+
+        # answered=False로 내부 실패한 경우(react.py의 _fail())도 "body" 키 자체는
+        # 있고 빈 문자열이라, get()의 기본값은 이 경우를 못 잡는다 — 빈 답을
+        # 그대로 보여주면 실패가 조용히 성공한 것처럼 보인다.
+        body = (result.get("body") or "").strip() if isinstance(result, dict) else ""
+        if not body:
+            body = "답변을 받아오지 못했습니다."
+        await placeholder.edit(content=f"🤖 **{target.display_name}의 Bordo**: {body}")
