@@ -45,6 +45,16 @@ class MeetingCog(commands.Cog):
             return iso_str
         return dt.strftime("%m/%d %H:%M")
 
+    @staticmethod
+    def _agenda_from_thread(channel) -> str:
+        """meeting-start가 스레드 이름을 '[회의] {날짜} | {제목}'로 짓는다.
+        meeting-end는 로컬 메모리 없이 동작하므로, 요약 임베드 제목에 쓸
+        안건을 여기서 복구한다."""
+        name = getattr(channel, "name", "") or ""
+        if " | " in name:
+            return name.split(" | ", 1)[1]
+        return name or "회의"
+
     async def announce_to_thread(self, thread_id: int, text: str) -> None:
         """[TEMP]
         회의 스레드에 상태 변경 등을 안내하는 메시지를 게시한다.
@@ -198,17 +208,9 @@ class MeetingCog(commands.Cog):
 
         thread_id = interaction.channel_id
 
-        if thread_id not in self.active_meeting_threads:
-            await interaction.followup.send(
-                "이 스레드에서 진행 중인 회의가 없습니다. "
-                "회의 스레드 안에서 실행해주세요."
-            )
-            return
-
-        meeting = self.active_meeting_threads.pop(thread_id)
-
-        # 봇은 원본을 만들지 않는다. 대화는 이미 on_message에서 발언마다
-        # Backend로 전달돼 있고, 요약도 Backend가 그 발언들로 만든다.
+        # active_meeting_threads(봇 메모리)를 사전 체크로 쓰지 않는다. 봇이
+        # 재시작하면 이 dict는 비는데, Backend는 discord_channel_id로 회의를
+        # 정확히 알고 있다 — 로컬 기억이 없어도 일단 물어본다.
         async with interaction.channel.typing():
             result = await self.backend.post("/internal/v1/meetings/end",
                 json={
@@ -220,8 +222,6 @@ class MeetingCog(commands.Cog):
             )
 
         if result is None:
-            # 네트워크 오류 등 일시적 실패 — 되돌리면 재시도가 성공할 여지가 있다.
-            self.active_meeting_threads[thread_id] = meeting
             await interaction.followup.send(
                 "회의 종료에 실패했습니다. 잠시 후 다시 시도해주세요.", ephemeral=True
             )
@@ -230,34 +230,46 @@ class MeetingCog(commands.Cog):
         error = get_error(result)
         if error:
             if error.get("code") == "MEETING_NOT_FOUND":
-                # thread_id는 Discord 채널 id라 항상 값이 있어 검증 오류로는 안 걸리고,
-                # 이 코드만큼은 재시도해도 절대 성공하지 않는 영구적 오류다. 되돌리면
-                # 이 회의는 영영 못 끝내므로, Backend가 없어도 봇은 계속 동작해야 한다는
-                # 원칙(CLAUDE.md)대로 Discord 쪽은 정리하고 동기화 실패만 알린다.
-                await interaction.channel.send("🔴 **회의가 종료되었습니다.**")
+                # 사전 체크는 없앴지만, 로컬에 있었는지는 여전히 신호로 쓴다 —
+                # 두 경우를 구분해야 한다.
+                had_local_state = self.active_meeting_threads.pop(thread_id, None) is not None
+                if had_local_state:
+                    # 로컬은 회의가 있다고 알고 있었는데 Backend가 모른다 — 진짜
+                    # 동기화 문제다. Discord 쪽은 이미 진행 중이라고 안내해 둔
+                    # 상태이니 정리하고 알린다.
+                    await interaction.channel.send("🔴 **회의가 종료되었습니다.**")
+                    await interaction.followup.send(
+                        f"회의는 종료했지만 Backend와 동기화하지 못했습니다: "
+                        f"{error.get('message', '')}", ephemeral=True
+                    )
+                    return
+
+                # 로컬도 몰랐고 Backend도 모른다 — 진짜로 이 스레드에 회의가 없다.
                 await interaction.followup.send(
-                    f"회의는 종료했지만 Backend와 동기화하지 못했습니다: "
-                    f"{error.get('message', '')}", ephemeral=True
+                    "이 스레드에서 진행 중인 회의가 없습니다. "
+                    "회의 스레드 안에서 실행해주세요.", ephemeral=True
                 )
                 return
 
-            # 그 외(예: 서비스 토큰 오류처럼 @internal 데코레이터가 뷰 실행 전에
-            # 먼저 던지는 4xx)는 원인만 고치면 재시도로 풀린다. None과 동일하게
-            # 되돌려서 다시 시도할 수 있게 한다.
-            self.active_meeting_threads[thread_id] = meeting
             await interaction.followup.send(
                 error.get("message", "회의 종료에 실패했습니다."), ephemeral=True
             )
             return
 
         if result.get("duplicate"):
+            # 이미 끝난 회의다 — active_meeting_threads에 남아있었다면
+            # 여기서도 정리한다. 안 지우면 delegate.py의 폴백 스캔이 이미
+            # 끝난 회의를 계속 활성 회의로 착각한다.
+            self.active_meeting_threads.pop(thread_id, None)
             await interaction.followup.send("이미 종료된 회의입니다.", ephemeral=True)
             return
+
+        agenda = self._agenda_from_thread(interaction.channel)
 
         summary = result.get("summary")
         if summary:
             embed = discord.Embed(
-                title=f"📝 회의 요약 · {meeting['agenda']}",
+                title=f"📝 회의 요약 · {agenda}",
                 description=summary.get("one_line", ""),
                 color=discord.Color.green(),
             )
@@ -278,3 +290,7 @@ class MeetingCog(commands.Cog):
         await interaction.channel.send("🔴 **회의가 종료되었습니다.**")
 
         await interaction.followup.send("회의를 종료했습니다.")
+
+        # 성공했으니 로컬 캐시도 정리한다(있었다면) — delegate.py의 폴백 스캔이
+        # 끝난 회의를 계속 들고 있지 않도록. 판단 자체는 이 값에 의존하지 않았다.
+        self.active_meeting_threads.pop(thread_id, None)
