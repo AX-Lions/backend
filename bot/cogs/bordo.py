@@ -1,15 +1,44 @@
+import logging
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from services.backend import get_error
 
+log = logging.getLogger("bordo")
+
+#: Discord 메시지 한도. 넘기면 edit()/send() 자체가 400으로 죽는다.
+_MESSAGE_LIMIT = 2000
+
+
 class BordoCog(commands.Cog):
     def __init__(self, bot, backend, gate):
         self.bot = bot
         self.backend = backend
         self.gate = gate
-        
+
+    @staticmethod
+    async def _finish_response(interaction: discord.Interaction, content: str, *, log_ctx: str = "") -> None:
+        """
+        defer()로 만들어진 원본 응답(placeholder)을 최종 내용으로 채운다.
+
+        길이 초과나 일시적 오류로 edit이 실패해도 "생각 중..."인 채로 방치하지
+        않는다 — 방치하면 실패가 실패로 안 보이고 영구히 대기 중인 것처럼 보인다.
+        """
+        if len(content) > _MESSAGE_LIMIT:
+            content = content[:_MESSAGE_LIMIT - 1] + "…"
+        try:
+            await interaction.edit_original_response(content=content)
+        except discord.HTTPException:
+            log.exception("ask-bordo 응답 게시 실패 %s", log_ctx)
+            try:
+                await interaction.edit_original_response(
+                    content="⚠️ 답변을 표시하는 데 실패했습니다."
+                )
+            except discord.HTTPException:
+                log.exception("ask-bordo 실패 안내조차 게시하지 못함 %s", log_ctx)
+
     @app_commands.command(
         name="bordo-connect", 
         description="Bordo 서비스 계정 연결 코드를 DM으로 받습니다."
@@ -125,6 +154,14 @@ class BordoCog(commands.Cog):
         if not await self.gate.require(interaction):
             return
 
+        # defer()가 이미 비-ephemeral이라 Discord 기본 "생각 중" 로딩 메시지도
+        # 이미 공개다. 새 메시지를 또 보내면 로딩 표시가 두 개(Discord 것 +
+        # 이것) 남는데, Discord 것은 이 코드가 채우지 않는 한 영영 안 채워진다.
+        # 그래서 새로 보내지 않고 defer()가 만든 원본 응답 자체를 채운다.
+        await interaction.edit_original_response(
+            content=f"🤔 **{target.display_name}의 Bordo**가 생각 중입니다..."
+        )
+
         result = await self.backend.post("/internal/v1/deputy/ask", json={
             "requester_discord_id": str(interaction.user.id),
             "target_discord_id": str(target.id),
@@ -132,7 +169,25 @@ class BordoCog(commands.Cog):
             "thread_id": str(interaction.channel_id),
         })
 
-        # Outbox consumer가 아직 없어서, 지금은 응답 본문에 바로 담겨 오는 답변/유보를
-        # 그대로 게시한다. consumer가 붙으면 그때 옮긴다.
-        body = (result or {}).get("body", "답변을 받아오지 못했습니다.")
-        await interaction.followup.send(body)
+        if result is None:
+            await self._finish_response(
+                interaction, "⚠️ 답변을 받아오지 못했습니다. 잠시 후 다시 시도해주세요.",
+                log_ctx="(backend.post()가 None)")
+            return
+
+        error = get_error(result)
+        if error:
+            await self._finish_response(
+                interaction, error.get("message", "답변을 받아오지 못했습니다."),
+                log_ctx=f"(error={error.get('code')})")
+            return
+
+        # answered=False로 내부 실패한 경우(react.py의 _fail())도 "body" 키 자체는
+        # 있고 빈 문자열이라, get()의 기본값은 이 경우를 못 잡는다 — 빈 답을
+        # 그대로 보여주면 실패가 조용히 성공한 것처럼 보인다.
+        body = (result.get("body") or "").strip() if isinstance(result, dict) else ""
+        if not body:
+            body = "답변을 받아오지 못했습니다."
+        await self._finish_response(
+            interaction, f"🤖 **{target.display_name}의 Bordo**: {body}",
+            log_ctx=f"(run_id={result.get('run_id') if isinstance(result, dict) else None})")
