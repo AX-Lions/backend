@@ -6,10 +6,11 @@ from services.backend import get_error
 
 
 class DelegateCog(commands.Cog):
-    def __init__(self, bot, backend, meeting_cog):
+    def __init__(self, bot, backend, meeting_cog, gate):
         self.bot = bot
         self.backend = backend
         self.meeting_cog = meeting_cog
+        self.gate = gate
 
     async def _announce_delegate_change(self, user_id: int, result, *, delegated: bool) -> None:
         """대리 참석 전환을 진행 중인 회의 스레드에 알린다.
@@ -62,7 +63,12 @@ class DelegateCog(commands.Cog):
     )
     @app_commands.describe(scope="대리 참석 범위 (메모용, 예: 전체/특정 프로젝트명)")
     async def delegate_on(self, interaction: discord.Interaction, scope: str):
+        # defer가 먼저다 — 3초 응답 시한 안에 게이트의 backend.get()이
+        # 안 끝날 수 있다.
         await interaction.response.defer(ephemeral=True)
+
+        if not await self.gate.require_user(interaction):
+            return
 
         result = await self.backend.post_with_retry(
             "/internal/v1/delegate/on",
@@ -94,6 +100,9 @@ class DelegateCog(commands.Cog):
     @app_commands.command(name="delegate-off", description="대리 참석을 해제합니다. 어디서든 실행할 수 있습니다.")
     async def delegate_off(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+
+        if not await self.gate.require_user(interaction):
+            return
 
         result = await self.backend.post_with_retry(
             "/internal/v1/delegate/off", json={"discord_user_id": str(interaction.user.id)}
