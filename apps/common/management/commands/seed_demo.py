@@ -1213,6 +1213,7 @@ class Command(BaseCommand):
                                    body="오늘 일정 알려줘.")
         ChatMessage.objects.create(
             room=ai_room, sender=owner, sender_name=f"{owner.name}의 Bordo",
+            is_agent=True,
             body="오늘 9시 정기 팀 회의, 13시 디자인 리뷰, 17시 개발팀 Sync가 있습니다.")
 
         # 1:1 방 — 유수인 · 최비성. direct_key가 정렬해서 만드니 누가 먼저
@@ -1240,4 +1241,5 @@ class Command(BaseCommand):
             body="유수인님 대신 여쭤봅니다 — 디자인 시안 오늘 확정되나요?")
         ChatMessage.objects.create(
             room=peer_room, sender=owner, sender_name=f"{owner.name}의 Bordo",
+            is_agent=True,
             body="네, 오늘 중 확정 예정이라고 전달받았습니다.")
