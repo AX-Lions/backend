@@ -255,6 +255,24 @@ def _set_delegate(request, on: bool):
         meeting__status__in=[MeetingStatus.SCHEDULED, MeetingStatus.CONFIRMED,
                              MeetingStatus.ACTIVE])
 
+    """
+    알릴 스레드를 **갱신 전에** 모읍니다.
+
+    봇이 「어느 스레드에 알릴지」 를 자기 메모리에서 찾고 있었는데, 그 기억은
+    봇이 재시작하면 사라집니다. 그러면 **DB 는 정확히 갱신됐는데 스레드에는
+    아무 알림도 안 갑니다** — 대리 참석은 켜졌지만 회의에 있는 사람들은
+    모릅니다. 봇이 배포 중에 두 개로 뜨면 각자 자기가 만든 회의만 알아서
+    같은 일이 생깁니다.
+
+    대상 회의 목록은 이미 이 쿼리가 갖고 있으니 여기서 실어 보냅니다.
+
+    스레드가 안 붙은 회의는 뺍니다 — 알릴 곳이 없습니다. 웹에서 만들고 아직
+    `/meeting-start` 를 안 친 회의가 여기 들어갑니다.
+    """
+    thread_ids = list(qs.exclude(meeting__discord_channel_id="")
+                      .exclude(meeting__discord_channel_id=None)
+                      .values_list("meeting__discord_channel_id", flat=True))
+
     if on:
         # 웹 경로(`/meetings/{id}/absence`)와 같은 값을 씁니다. 같은 행위가
         # 경로에 따라 `ABSENT` 와 `DELEGATED` 로 갈리면, 어디서 눌렀느냐에 따라
@@ -273,7 +291,9 @@ def _set_delegate(request, on: bool):
             delegated=False, attendance=Attendance.PRESENT)
         changed += qs.exclude(meeting__status=MeetingStatus.ACTIVE).update(
             delegated=False, attendance=Attendance.PENDING)
-    return Response({"delegated": on, "meetings_updated": changed})
+    # `thread_ids` 는 **더한 것**입니다. 옛 응답을 읽는 봇도 그대로 돕니다.
+    return Response({"delegated": on, "meetings_updated": changed,
+                     "thread_ids": thread_ids})
 
 
 @internal(["POST"])
