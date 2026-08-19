@@ -1430,4 +1430,43 @@ class Command(BaseCommand):
              "네, 오늘 중 확정 예정이라고 전달받았습니다.",
              now - timedelta(days=2) + timedelta(minutes=2), is_agent=True)
 
+        # ── 방 종류 커버리지 (#137 3번) — DIRECT·PEER_AGENT가 각 1개뿐이라
+        # 목록이 여럿일 때 어떻게 쌓이는지 확인할 수 없었다.
+
+        # DIRECT 2 — 임수연 · 서재민, 메시지 있음.
+        d2_key = direct_key(users["임수연"].id, users["서재민"].id)
+        direct_room2, _ = ChatRoom.objects.get_or_create(
+            type=RoomType.DIRECT, dedupe_key=d2_key,
+            defaults={"created_by": users["임수연"]})
+        for u in (users["임수연"], users["서재민"]):
+            RoomMember.objects.get_or_create(room=direct_room2, user=u)
+        send(direct_room2, users["임수연"], "임수연",
+             "결제 화면 시안 오늘 중 공유드릴게요.", now - timedelta(hours=3))
+        send(direct_room2, users["서재민"], "서재민",
+             "네, 확인되는 대로 API 붙이겠습니다.", now - timedelta(hours=2, minutes=50))
+
+        # DIRECT 3 — 유수인 · 강다은, **일부러 메시지를 안 채운다.** 방은
+        # 만들어졌지만 아직 말이 오간 적 없는 상태 — 「아직 나눈 이야기가
+        # 없습니다」가 실제로 어떻게 보이는지 확인하는 자리다. 채우면 이
+        # 화면을 확인할 방법이 없어진다.
+        d3_key = direct_key(owner.id, users["강다은"].id)
+        empty_direct_room, _ = ChatRoom.objects.get_or_create(
+            type=RoomType.DIRECT, dedupe_key=d3_key, defaults={"created_by": owner})
+        for u in (owner, users["강다은"]):
+            RoomMember.objects.get_or_create(room=empty_direct_room, user=u)
+
+        # PEER_AGENT 2 — 최비성이 임수연의 대리인에게.
+        p2_key = peer_agent_key(users["최비성"].id, users["임수연"].id)
+        peer_room2, _ = ChatRoom.objects.get_or_create(
+            type=RoomType.PEER_AGENT, dedupe_key=p2_key,
+            defaults={"created_by": users["최비성"], "agent_owner": users["임수연"]})
+        for u in (users["최비성"], users["임수연"]):
+            RoomMember.objects.get_or_create(room=peer_room2, user=u)
+        send(peer_room2, users["최비성"], "최비성",
+             "임수연님 대신 여쭤봅니다 — 결제 화면 시안 오늘 나오나요?",
+             now - timedelta(hours=6))
+        send(peer_room2, users["임수연"], f"{users['임수연'].name}의 Bordo",
+             "네, 오늘 중으로 공유드릴 예정이라고 전달받았습니다.",
+             now - timedelta(hours=5, minutes=58), is_agent=True)
+
 
