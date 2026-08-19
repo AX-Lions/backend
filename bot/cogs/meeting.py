@@ -286,9 +286,12 @@ class MeetingCog(commands.Cog):
             # Backend가 이미 종료를 확정했다 — 이 아래 Discord 게시가 실패해도
             # 되살릴 이유가 없는(이미 끝난) 회의다. 게시 전에 먼저 정리해서,
             # 임베드 전송 실패 같은 이후 예외가 캐시 정리 자체를 건너뛰지 않게 한다.
-            self.active_meeting_threads.pop(thread_id, None)
+            meeting = self.active_meeting_threads.pop(thread_id, None)
 
-            agenda = self._agenda_from_thread(interaction.channel)
+            # 로컬에 있었으면(재시작 안 한 일반적인 경우) 거기 있던 온전한 제목을
+            # 쓴다 — 스레드 이름은 100자 제한으로 잘렸을 수 있다. 로컬이 없을
+            # 때만(재시작 등) 스레드 이름 파싱으로 폴백한다.
+            agenda = meeting["agenda"] if meeting else self._agenda_from_thread(interaction.channel)
 
             summary = result.get("summary")
             if summary:
