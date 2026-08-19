@@ -1098,38 +1098,43 @@ class Command(BaseCommand):
                       "excerpt": "디자인 작업을 우선 진행한 후 개발팀에 전달하기로 결정했어요."}],
             result="디자인 시안은 8월 18일까지 확정하기로 했습니다.")
 
+        def send(conversation, sent_at, **kwargs):
+            # AgentMessage.sent_at은 auto_now_add=True라 create()에 넘긴
+            # 값을 Django가 무시하고 저장 시각으로 덮어쓴다. 여기서 의도한
+            # 과거 시각을 남기려면 생성 직후 queryset.update()로 다시
+            # 써야 한다 — update()는 save()를 안 거치고 SQL UPDATE를 바로
+            # 날려서 auto_now_add를 안 건드린다.
+            msg = AgentMessage.objects.create(conversation=conversation, **kwargs)
+            AgentMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+            return msg
+
         conv = AgentConversation.objects.create(
             user=owner, title="이번 주 회의 정리해줘",
             last_message_preview="디자인 시안은 8월 18일까지 확정하기로 했습니다.")
-        AgentMessage.objects.create(
-            conversation=conv, role=AgentMessage.Role.USER,
-            body="이번 주 회의에서 뭐가 정해졌는지 정리해줘.",
-            sent_at=now - timedelta(hours=2, minutes=10))
-        AgentMessage.objects.create(
-            conversation=conv, role=AgentMessage.Role.AGENT, run=run,
-            body=("디자인 시안은 8월 18일까지 확정하기로 했고, 개발 일정은 1주 연장하기로 "
-                 "했습니다. 다음 회의에서는 API 명세를 다시 봅니다."),
-            sent_at=now - timedelta(hours=2, minutes=9))
-        AgentMessage.objects.create(
-            conversation=conv, role=AgentMessage.Role.USER,
-            body="개발 일정 연장은 내가 승인한 거야?",
-            sent_at=now - timedelta(hours=2))
-        AgentMessage.objects.create(
-            conversation=conv, role=AgentMessage.Role.AGENT,
-            body=("아직입니다. 일정 수정 자동 승인 설정이 꺼져 있어서 "
-                 "제가 결정하지 않고 확인을 요청해 뒀습니다."),
-            sent_at=now - timedelta(hours=1, minutes=59))
+        send(conv, now - timedelta(hours=2, minutes=10),
+             role=AgentMessage.Role.USER,
+             body="이번 주 회의에서 뭐가 정해졌는지 정리해줘.")
+        send(conv, now - timedelta(hours=2, minutes=9),
+             role=AgentMessage.Role.AGENT, run=run,
+             body=("디자인 시안은 8월 18일까지 확정하기로 했고, 개발 일정은 1주 연장하기로 "
+                  "했습니다. 다음 회의에서는 API 명세를 다시 봅니다."))
+        send(conv, now - timedelta(hours=2),
+             role=AgentMessage.Role.USER,
+             body="개발 일정 연장은 내가 승인한 거야?")
+        send(conv, now - timedelta(hours=1, minutes=59),
+             role=AgentMessage.Role.AGENT,
+             body=("아직입니다. 일정 수정 자동 승인 설정이 꺼져 있어서 "
+                  "제가 결정하지 않고 확인을 요청해 뒀습니다."))
 
         conv2 = AgentConversation.objects.create(
             user=users["최비성"], title="결제 API 진행 상황 요약",
             last_message_preview="결제수단 코드 추가까지 반영했습니다.")
-        AgentMessage.objects.create(
-            conversation=conv2, role=AgentMessage.Role.USER,
-            body="결제 API 지금 어디까지 됐는지 요약해줘.", sent_at=now - timedelta(days=1))
-        AgentMessage.objects.create(
-            conversation=conv2, role=AgentMessage.Role.AGENT,
-            body="결제수단 코드 추가까지 반영했고, PG사 연동 테스트가 남아있습니다.",
-            sent_at=now - timedelta(days=1) + timedelta(minutes=1))
+        send(conv2, now - timedelta(days=1),
+             role=AgentMessage.Role.USER,
+             body="결제 API 지금 어디까지 됐는지 요약해줘.")
+        send(conv2, now - timedelta(days=1) + timedelta(minutes=1),
+             role=AgentMessage.Role.AGENT,
+             body="결제수단 코드 추가까지 반영했고, PG사 연동 테스트가 남아있습니다.")
 
     def _seed_debate(self, meeting, users, owner, now):
         """회의 전 준비 — 논쟁점을 미리 예측해 두고, 대리 참석 예정인 사람의
