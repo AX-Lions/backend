@@ -340,38 +340,53 @@ def _arrows(edges, type_order=None):
 
     묶는 걸 서버가 하는 이유 — 필터가 걸린 상태에서 클라이언트가 세면
     화면마다 숫자가 갈립니다. 집계 기준은 한 곳에만 있어야 합니다.
+
+    ## 받는 사람마다 따로 묶습니다 (이슈 #136)
+
+    전에는 `key = (frm, tos)`로 **받는 사람 조합 전체**를 키로 썼습니다.
+    그러면 같은 A→B 전달인데도 다른 사람이 같이 낀 회차(A→(B,C))와 안 낀
+    회차(A→B)가 서로 다른 화살표가 되어, 한 쌍에 선이 여러 개 남았습니다 —
+    바로 위 docstring이 약속한 "쌍마다 하나"가 안 지켜졌습니다. 받는 사람
+    하나하나에 대해 따로 버킷을 만들어(fan-out) 진짜 쌍 단위로 묶습니다.
+    같은 전달(broadcast)이 여러 쌍에 동시에 잡히는 건 의도입니다 — "A가
+    B와 몇 번 오갔나"와 "A가 C와 몇 번 오갔나"는 서로 다른 질문입니다.
     """
     buckets = {}
     for e in edges:
         frm = (e.from_node or {}).get("id")
-        tos = tuple(n.get("id") for n in (e.to_nodes or []))
-        key = (frm, tos)
-        b = buckets.setdefault(key, {
-            "id": f"{frm}->{'|'.join(t for t in tos if t)}",
-            "from_node_id": frm,
-            "to_node_ids": list(tos),
-            "direction_label": e.direction_label,
-            "counts": {},
-            "total_count": 0,
-            "avatars": [],
-            "extra_participant_count": e.extra_participant_count,
-            "latest_occurred_at": e.occurred_at,
-            "opacity": e.opacity,
-            "surfaces": set(),
-        })
-        slot = b["counts"].setdefault(e.content_type,
-                                     {"content_type": e.content_type,
-                                      "label": FlowContentType(e.content_type).label,
-                                      "count": 0, "edge_ids": []})
-        slot["count"] += 1
-        slot["edge_ids"].append(str(e.id))
-        b["total_count"] += 1
-        b["surfaces"].add(e.surface)
-        if e.occurred_at and e.occurred_at > b["latest_occurred_at"]:
-            b["latest_occurred_at"] = e.occurred_at
-            b["opacity"] = e.opacity            # 진하기는 가장 최근 것을 따릅니다
-        for n in (e.to_nodes or []):
-            url = n.get("avatar_url")
+        frm_name = (e.from_node or {}).get("name", "")
+        for to_node in (e.to_nodes or []):
+            if not to_node:
+                continue
+            to = to_node.get("id")
+            key = (frm, to)
+            b = buckets.setdefault(key, {
+                "id": f"{frm}->{to}",
+                "from_node_id": frm,
+                "to_node_ids": [to],
+                "direction_label": f"{frm_name} → {to_node.get('name', '')}",
+                "counts": {},
+                "total_count": 0,
+                "avatars": [],
+                # 쌍 단위로 쪼갠 뒤라 "화면에 안 보이는 나머지 인원" 개념이
+                # 없다 — 버킷 자체가 항상 정확히 두 사람이다.
+                "extra_participant_count": 0,
+                "latest_occurred_at": e.occurred_at,
+                "opacity": e.opacity,
+                "surfaces": set(),
+            })
+            slot = b["counts"].setdefault(e.content_type,
+                                         {"content_type": e.content_type,
+                                          "label": FlowContentType(e.content_type).label,
+                                          "count": 0, "edge_ids": []})
+            slot["count"] += 1
+            slot["edge_ids"].append(str(e.id))
+            b["total_count"] += 1
+            b["surfaces"].add(e.surface)
+            if e.occurred_at and e.occurred_at > b["latest_occurred_at"]:
+                b["latest_occurred_at"] = e.occurred_at
+                b["opacity"] = e.opacity        # 진하기는 가장 최근 것을 따릅니다
+            url = to_node.get("avatar_url")
             if url and url not in b["avatars"]:
                 b["avatars"].append(url)
 
