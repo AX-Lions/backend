@@ -1,5 +1,6 @@
 import logging
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -162,12 +163,19 @@ class BordoCog(commands.Cog):
             content=f"🤔 **{target.display_name}의 Bordo**가 생각 중입니다..."
         )
 
-        result = await self.backend.post("/internal/v1/deputy/ask", json={
-            "requester_discord_id": str(interaction.user.id),
-            "target_discord_id": str(target.id),
-            "question": question,
-            "thread_id": str(interaction.channel_id),
-        })
+        # ReAct 실행은 최대 20초(OPENAI_TIMEOUT_SEC) × 6단계(MAX_STEPS)라
+        # BackendClient 기본 timeout(5초)·재시도(2회) 안에 못 끝나는 게
+        # 보통이다. 재시도는 특히 해롭다 — 실패해서가 아니라 응답이 느려서
+        # 다시 보내는 거라, 이미 진행 중인 ReAct 실행을 그대로 중복 실행
+        # 시킨다(#132). 이 호출만 타임아웃을 늘리고 재시도를 끈다.
+        result = await self.backend.post(
+            "/internal/v1/deputy/ask", json={
+                "requester_discord_id": str(interaction.user.id),
+                "target_discord_id": str(target.id),
+                "question": question,
+                "thread_id": str(interaction.channel_id),
+            },
+            timeout=aiohttp.ClientTimeout(total=90), max_retries=0)
 
         if result is None:
             await self._finish_response(
