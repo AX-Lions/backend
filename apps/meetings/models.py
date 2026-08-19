@@ -215,9 +215,23 @@ class MeetingParticipant(TimeStamped):
         """
         return not self.settings_override and self.prompt_override is None
 
+    #: 낱개로 덮어쓰면 파생값도 다시 계산해야 하는 키들.
+    DISCLOSURE_KEYS = ("disclose_work", "disclose_plan", "disclose_thought")
+
     def effective_settings(self, base: dict) -> dict:
-        """평소 설정 위에 이 회의 것만 얹습니다."""
-        return {**(base or {}), **(self.settings_override or {})}
+        """
+        평소 설정 위에 이 회의 것만 얹습니다.
+
+        **파생 키(`disclose_work_plan_thought`)를 다시 계산합니다.** 그냥 덮으면
+        낱개 셋을 모두 끈 회의에서도 옛 키가 켜진 채로 남아, 화면은 `공개 안 함`
+        인데 판정은 통과하는 정반대 상태가 됩니다. 읽는 쪽(준비 화면)과 쓰는
+        쪽(대리인 실행)이 각자 계산하면 언젠가 한쪽만 고쳐집니다.
+        """
+        merged = {**(base or {}), **(self.settings_override or {})}
+        if any(k in (self.settings_override or {}) for k in self.DISCLOSURE_KEYS):
+            merged["disclose_work_plan_thought"] = any(
+                merged.get(k, True) for k in self.DISCLOSURE_KEYS)
+        return merged
 
 
 class Agenda(UUIDModel, TimeStamped):

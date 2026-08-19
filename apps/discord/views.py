@@ -33,6 +33,7 @@ from django.utils import timezone
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.response import Response
 
+from apps.common.events import publish
 from apps.common.parsing import parse_dt
 from apps.common.views import listing
 from config.errors import BordoError
@@ -47,6 +48,13 @@ logger = logging.getLogger("bordo.discord")
 #: 게시에 걸리는 시간보다 넉넉해야 같은 것이 두 번 나가지 않고, 봇이 죽었을 때
 #: 다시 잡히는 시간보다는 짧아야 합니다. Discord 게시는 보통 1초 안입니다.
 VISIBILITY_TIMEOUT_SEC = 60
+
+#: `/meeting-start` 자동완성이 보여줄 구간과 개수.
+#
+# 지난달 회의까지 뜨면 고를 수가 없습니다. 지금 시각 언저리만 봅니다.
+SCHEDULED_PAST_HOURS = 1
+SCHEDULED_AHEAD_HOURS = 6
+SCHEDULED_LIMIT = 25
 
 def internal(methods):
     """`@api_view` + 인증 해제 + 서비스 토큰 검사를 한 번에."""
@@ -216,6 +224,22 @@ def teams_link(request):
 
 # ═══════════════════════════════════════════ 대리 참석
 
+def _queue_debate_points(meeting_ids) -> None:
+    """
+    논쟁점 예측을 걸어 둡니다. **기다리지 않습니다.**
+
+    여기서 터지면 대리 참석 토글 자체가 실패한 것으로 읽히는데, 상태는 이미
+    저장돼 있습니다. 봇은 "안 켜졌다" 로 읽고 사용자에게 다시 하라고 합니다.
+    """
+    from apps.agent.tasks import build_debate_points
+
+    for meeting_id in meeting_ids:
+        try:
+            build_debate_points.delay(str(meeting_id))
+        except Exception:                                      # noqa: BLE001
+            logger.exception("논쟁점 생성 호출 실패 meeting=%s", meeting_id)
+
+
 def _set_delegate(request, on: bool):
     from apps.meetings.models import Attendance, MeetingParticipant, MeetingStatus
 
@@ -235,7 +259,13 @@ def _set_delegate(request, on: bool):
         # 웹 경로(`/meetings/{id}/absence`)와 같은 값을 씁니다. 같은 행위가
         # 경로에 따라 `ABSENT` 와 `DELEGATED` 로 갈리면, 어디서 눌렀느냐에 따라
         # 화면 뱃지가 `불참` 과 `Bordo 대리 참석 예정` 으로 달라집니다.
+        meeting_ids = list(qs.values_list("meeting_id", flat=True))
         changed = qs.update(delegated=True, attendance=Attendance.DELEGATED)
+
+        # 예측도 같이 겁니다. 상태만 맞추고 파이프라인을 웹 경로에만 걸어 두면,
+        # **Discord 로 대리 참석을 켠 사람은 준비 화면이 언제까지나 빈 칸**입니다.
+        # 지금 살아 있는 대리 참석 경로가 대부분 이쪽입니다.
+        _queue_debate_points(meeting_ids)
     else:
         # 되돌릴 때는 회의 상태로 나눕니다. 열리지도 않은 회의를 `PRESENT` 로
         # 두면 참석자 목록에 이미 와 있는 사람으로 그려집니다.
@@ -258,13 +288,85 @@ def delegate_off(request):
 
 # ═══════════════════════════════════════════ 회의
 
+#: 아직 안 열린 회의. 여기 있는 것만 스레드를 붙일 수 있습니다.
+#
+# `CONFIRMED` 를 빼면 안 됩니다 — 캘린더에서 일정을 확정하면 회의가 그 상태로
+# 올라가는데(`apps/calendars/views.py`), 그게 가장 흔한 경로입니다.
+# `SCHEDULED` 만 허용하면 **확정한 회의를 Discord 에서 못 엽니다.**
+START_READY = ("DRAFT", "SCHEDULED", "CONFIRMED")
+
+
+def _participant_rows(meeting):
+    """봇이 스레드 첫 안내에 쓰는 참석자 목록."""
+    from apps.meetings.models import MeetingParticipant
+
+    return [{
+        "discord_user_id": p.user.discord_user_id or None,
+        "user_id": str(p.user_id),
+        "user_name": p.user_name,
+        "delegated": p.delegated,
+        "attendance": p.attendance,
+    } for p in (MeetingParticipant.objects
+                .filter(meeting=meeting).select_related("user"))]
+
+
+@internal(["GET"])
+def meetings_scheduled(request):
+    """
+    아직 스레드가 안 붙은 **예정 회의** 목록.
+
+    `/meeting-start` 의 자동완성이 씁니다. 이 경로가 생기기 전에는 봇이 회의를
+    즉석에서 만들었는데, 웹이 원본이고 Discord 는 회의 공간을 제공하는 구조라
+    **웹에서 만든 회의에 스레드만 붙이는** 쪽이 맞습니다 (이슈 #89).
+
+    ## 왜 시각으로 좁히는가
+
+    지난달 회의까지 자동완성에 뜨면 고를 수가 없습니다. 지금 시각 언저리만
+    보여주고, **가까운 순**으로 정렬합니다 — 오름차순으로 두면 한참 전에 잡아
+    둔 회의가 목록 맨 앞을 차지합니다.
+    """
+    from apps.meetings.models import Meeting
+
+    team = _team_of(request.query_params.get("guild_id"))
+    now = timezone.now()
+    rows = list(Meeting.objects
+                .filter(project__team=team, status__in=START_READY,
+                        discord_channel_id="",
+                        scheduled_at__range=(now - timedelta(hours=SCHEDULED_PAST_HOURS),
+                                             now + timedelta(hours=SCHEDULED_AHEAD_HOURS)))
+                .select_related("project")
+                .order_by("scheduled_at")[:SCHEDULED_LIMIT])
+    rows.sort(key=lambda m: abs((m.scheduled_at - now).total_seconds()))
+
+    return Response(listing([{
+        "meeting_id": str(m.id),
+        "project_id": str(m.project_id),
+        "project_name": m.project_name,
+        "title": m.title,
+        "status": m.status,
+        "scheduled_at": m.scheduled_at,
+        "participants": _participant_rows(m),
+    } for m in rows]))
+
+
 @internal(["POST"])
 def meeting_start(request):
     """
-    회의를 시작합니다.
+    회의를 시작합니다 — 웹에서 만들어 둔 회의에 **스레드를 붙입니다.**
 
-    봇이 스레드를 만든 뒤 부릅니다. `thread_id` 를 채널로 잡는 이유는 발언이
-    스레드 안에서 오가기 때문입니다.
+    `meeting_id` 가 오면 그 회의를 씁니다. 안 오면 옛 방식대로 즉석에서
+    만듭니다(아래 참고).
+
+    ## `meeting_id` 가 왔는데 못 찾으면 **즉석 생성으로 빠지지 않습니다**
+
+    지금까지는 `meeting_id` 를 아예 안 읽어서, 봇이 보내도 무시하고 아무
+    프로젝트에 제목 `Discord 회의` 짜리 빈 회의를 만들었습니다. 봇의 버그와
+    정상 동작이 구별되지 않아 이슈 #89 가 생겼습니다.
+
+    ## 즉석 생성은 옛 봇을 위해 남겨 둡니다
+
+    봇이 새 방식으로 배포되기 전에 지우면 그 사이 회의 시작이 통째로 막힙니다.
+    배포가 끝나면 지웁니다.
     """
     from apps.meetings.models import (Attendance, Meeting, MeetingParticipant,
                                       MeetingStatus)
@@ -280,7 +382,13 @@ def meeting_start(request):
     if existing:
         return Response({"meeting_id": str(existing.id),
                          "project_id": str(existing.project_id),
+                         "title": existing.title,
+                         "participants": _participant_rows(existing),
                          "duplicate": True}, status=200)
+
+    meeting_id = str(request.data.get("meeting_id") or "").strip()
+    if meeting_id:
+        return _attach_thread(team, meeting_id, thread_id)
 
     project = team.projects.order_by("created_at").first()
     if project is None:
@@ -322,7 +430,45 @@ def meeting_start(request):
                                           else Attendance.PRESENT)))
 
     return Response({"meeting_id": str(meeting.id),
-                     "project_id": str(project.id)}, status=201)
+                     "project_id": str(project.id),
+                     "title": meeting.title,
+                     "participants": _participant_rows(meeting)}, status=201)
+
+
+def _attach_thread(team, meeting_id, thread_id):
+    """
+    웹에서 만들어 둔 회의에 스레드를 붙이고 시작 상태로 올립니다.
+
+    **참석자를 새로 만들지 않습니다.** 웹에서 회의를 만들 때 프로젝트 참여자
+    전원이 이미 등록돼 있습니다. 여기서 봇이 보낸 멘션으로 덮으면 초대받은
+    사람이 목록에서 사라집니다.
+    """
+    from apps.meetings.models import Meeting, MeetingStatus
+
+    meeting = (Meeting.objects.filter(pk=meeting_id)
+               .select_related("project").first())
+    # 남의 팀 회의를 스레드에 붙이지 못하게 팀까지 봅니다. 없는 것과 남의 것을
+    # 같은 오류로 답합니다 — 다르게 주면 회의 id 를 넣어 보는 것만으로 다른
+    # 팀에 그런 회의가 있는지 알 수 있습니다.
+    if meeting is None or meeting.project.team_id != team.id:
+        raise BordoError("MEETING_NOT_FOUND", details={"meeting_id": meeting_id})
+
+    if meeting.status not in START_READY:
+        raise BordoError("MEETING_ALREADY_STARTED",
+                         "이미 시작했거나 끝난 회의입니다.",
+                         details={"meeting_id": meeting_id, "status": meeting.status})
+
+    meeting.discord_channel_id = thread_id
+    meeting.status = MeetingStatus.ACTIVE
+    meeting.started_at = timezone.now()
+    meeting.save(update_fields=["discord_channel_id", "status", "started_at",
+                                "updated_at"])
+    publish(meeting.project_id, "meeting.started",
+            {"meeting_id": str(meeting.id), "thread_id": thread_id})
+    return Response({"meeting_id": str(meeting.id),
+                     "project_id": str(meeting.project_id),
+                     "title": meeting.title,
+                     "participants": _participant_rows(meeting)}, status=200)
 
 
 @internal(["POST"])
