@@ -103,10 +103,26 @@ class Command(BaseCommand):
         main = projects[0]
 
         # ── 오늘 일정 3건 (Discord 에서 열립니다)
+        """
+        오늘 일정은 **시드 주인의 시간대**로 잡습니다.
+
+        `now` 는 UTC 입니다(`TIME_ZONE = "UTC"`). 그대로 `hour=9` 를 찍으면
+        UTC 9시가 되는데, 홈의 「오늘 일정」은 **보는 사람의 시간대**로 하루를
+        자릅니다. 한국에서 열면 그 셋이 전부 어제나 내일로 밀려 **오늘 일정이
+        비어 있습니다.**
+
+        시연에서 제일 먼저 보는 칸이고, 「회의에 참여하지 않아요」 로 들어가는
+        준비 화면의 유일한 입구이기도 합니다.
+        """
+        import zoneinfo
+
+        owner_tz = zoneinfo.ZoneInfo(owner.timezone or "Asia/Seoul")
+        local_now = now.astimezone(owner_tz)
+
         upcoming = {}
         for hour, title in [(9, "정기 팀 회의"), (13, "디자인 리뷰"), (17, "개발팀 Sync")]:
-            at = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-            if at < now:
+            at = local_now.replace(hour=hour, minute=0, second=0, microsecond=0)
+            if at < local_now:
                 at += timedelta(days=1)
             m, created = Meeting.objects.get_or_create(
                 project=main, title=title, scheduled_at=at,
