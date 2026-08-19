@@ -94,6 +94,10 @@ urlpatterns = [
     # 플로우 노드(사람)를 눌렀을 때 우측 패널이 부릅니다.
     path(f"{API}/projects/<uuid:project_id>/flow/participants/<uuid:user_id>",
          meetings.flow_participant),
+    # 회의 스코프 버전 (이슈 #136) — node_id가 대리인이면 `{uuid}:agent`
+    # 형태라 uuid 컨버터를 못 쓴다.
+    path(f"{API}/meetings/<uuid:meeting_id>/participants/<str:node_id>/flow",
+         meetings.meeting_participant_flow),
     path(f"{API}/meetings/<uuid:meeting_id>/indexes", meetings.indexes),
     path(f"{API}/meetings/<uuid:meeting_id>/summary-table", meetings.summary_table),
     path(f"{API}/meetings/<uuid:meeting_id>/context", meetings.context),
