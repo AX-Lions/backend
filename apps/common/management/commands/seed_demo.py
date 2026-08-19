@@ -44,7 +44,25 @@ class Command(BaseCommand):
     @transaction.atomic
     def handle(self, *args, **opts):
         if opts["reset"]:
-            # 팀을 먼저 지웁니다.
+            # DIRECT 채팅방을 먼저 지웁니다.
+            #
+            # `ChatRoom.created_by` · `ChatMessage.sender` 는 SET_NULL 입니다 —
+            # 한쪽이 계정을 지워도 상대방 대화 기록은 남아야 하므로(「삭제
+            # 방식은 대상마다 다릅니다」 표 참고) 일부러 CASCADE 로 안
+            # 걸었습니다. TEAM·PROJECT 방은 team·project 가, AI·PEER_AGENT
+            # 방은 agent_owner 가 CASCADE 라 Team/User 를 지우면 알아서
+            # 같이 지워지는데, DIRECT 방만 어느 필드로도 안 걸려서 유저를
+            # 지운 뒤에도 고아로 남습니다. 데모 리셋은 우리가 만든 방까지
+            # 전부 우리 책임이니, 유저를 지우기 전에(멤버십으로 추적 가능할
+            # 때) DIRECT 방을 먼저 지웁니다.
+            from apps.chat.models import ChatRoom, RoomType
+
+            ChatRoom.objects.filter(
+                type=RoomType.DIRECT,
+                memberships__user__email__endswith="@bordo.dev",
+            ).distinct().delete()
+
+            # 팀을 그다음에 지웁니다.
             #
             # 사람부터 지우면 `Team.created_by` · `Project.created_by` ·
             # `Meeting.created_by` 가 PROTECT 라 막힙니다. 만든 사람만 사라지고
