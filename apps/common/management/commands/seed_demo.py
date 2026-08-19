@@ -339,6 +339,7 @@ class Command(BaseCommand):
         self._seed_debate(upcoming["디자인 리뷰"], users, owner, now)
         self._seed_briefing_cards(meeting, agendas, users, owner, now)
         self._seed_chat_rooms(team, users, owner, now)
+        self._seed_away_handled(projects, users, owner, now)
         self._seed_chat_read_state(projects, users, owner, now)
         self._touch_rooms()
 
@@ -1332,6 +1333,70 @@ class Command(BaseCommand):
                     .order_by("-sent_at").first())
             if last:
                 touch(room, last.sent_at)
+
+    def _seed_away_handled(self, projects, users, owner, now):
+        """
+        "자리 비운 사이 Bordo가 나눈 대화" 목록 (#137 1번). 왼쪽 목록 맨 위,
+        가장 큰 자리인데 지금까지 시드에 answered_while_away=True 인 메시지가
+        하나도 없어서 항상 비어 있었다.
+
+        `GET /chat/away-handled` 는 sender=본인 · is_agent=True ·
+        answered_while_away=True 만 본다(`apps/chat/views.py::away_handled`).
+        이 플래그를 실제로 세우는 곳은 `act.py` 의 `SendMessageSkill` 실행
+        중 하나뿐이라(PEER_AGENT 방 한정), 다른 방 종류까지 섞으려면 시드가
+        같은 모양을 직접 만드는 수밖에 없다.
+        """
+        from apps.chat.models import ChatMessage, ChatRoom, RoomType
+        from apps.chat.services import direct_key
+
+        main = projects[0]
+
+        def reply(room, body, sent_at, *, away=True):
+            msg = ChatMessage.objects.create(
+                room=room, sender=owner, sender_name=f"{owner.name}의 Bordo",
+                is_agent=True, body=body, answered_while_away=away)
+            ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+            return msg
+
+        def ask(room, sname, body, sent_at):
+            msg = ChatMessage.objects.create(
+                room=room, sender=users[sname], sender_name=sname, body=body)
+            ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+            return msg
+
+        # DIRECT(유수인·최비성) — 이 방 하나에 2건을 몰아 handled_count>=2를
+        # 만든다. 두 번째는 유보 — judge.MESSAGES[Reason.NO_EVIDENCE]와
+        # 같은 문구를 그대로 써서 실제 유보 답변과 같은 모양으로 남긴다.
+        direct_room = ChatRoom.objects.get(
+            type=RoomType.DIRECT, dedupe_key=direct_key(owner.id, users["최비성"].id))
+        ask(direct_room, "최비성", "결제 API 응답 필드에 상태 코드도 들어가나요?",
+            now - timedelta(hours=10))
+        reply(direct_room, "네, status 필드로 들어갑니다.",
+              now - timedelta(hours=9, minutes=58))
+        ask(direct_room, "최비성", "환불 처리 기한도 API로 조회되나요?",
+            now - timedelta(hours=9))
+        reply(direct_room, "관련 기록을 찾지 못해 답변을 보류했습니다.",
+              now - timedelta(hours=8, minutes=58))
+
+        # TEAM 단체방.
+        team_room = ChatRoom.objects.get(type=RoomType.TEAM)
+        ask(team_room, "강다은", "유수인님, 이번 주 디자인 리뷰 자료 어디 있나요?",
+            now - timedelta(hours=20))
+        reply(team_room, "피그마 '디자인 최종안' 문서에 있습니다.",
+              now - timedelta(hours=19, minutes=58))
+
+        # PROJECT(main) 단체방 — 부재 중이 아니었던 agent 응답도 여기 하나
+        # 섞는다. is_agent=True인데 answered_while_away=False라, 두 필드가
+        # 왜 나뉘어 있는지가 화면에서 확인돼야 한다.
+        project_room = ChatRoom.objects.get(type=RoomType.PROJECT, project=main)
+        ask(project_room, "서재민", "우측 패널 너비는 언제쯤 고쳐지나요?",
+            now - timedelta(hours=15))
+        reply(project_room, "이번 주 안에 반영 예정입니다.",
+              now - timedelta(hours=14, minutes=58))
+        ask(project_room, "임수연", "프로필 이미지 원형 통일 반영됐나요?",
+            now - timedelta(hours=1))
+        reply(project_room, "네, 오늘 반영했습니다.",
+              now - timedelta(minutes=58), away=False)
 
     def _seed_chat_read_state(self, projects, users, owner, now):
         """
