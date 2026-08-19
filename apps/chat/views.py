@@ -151,6 +151,9 @@ def room_context(user, rooms):
 
     return {"unread_map": unread_map, "important_map": important_map,
             "last_map": last_map, "avatar_map": avatar_map,
+            # 알림을 껐는지는 **보는 사람 기준**입니다. 한 사람이 껐다고 남의
+            # 목록에서도 꺼지면 안 됩니다.
+            "muted_map": {rid: bool(m.muted_at) for rid, m in memberships.items()},
             "agent_name_map": agent_display_names(owner_ids)}
 
 
@@ -463,7 +466,8 @@ def room_detail(request, room_id):
 
 @api_view(["POST"])
 def room_members(request, room_id):
-    """대화상대 추가. 단체방만 됩니다."""
+    """대화상대 추가. 단체방만 됩니다.
+"""
     room, _ = room_access(request.user, room_id)
     if room.type not in GROUP_TYPES:
         raise BordoError("CHAT_ROOM_TYPE_NOT_ALLOWED",
@@ -928,3 +932,26 @@ def search(request, room_id):
         "message": MessageSerializer(m, context=ctx).data,
         "date": m.sent_at.astimezone(tz).date().isoformat(),
     } for m in rows]))
+
+
+@api_view(["PATCH"])
+def room_mute(request, room_id):
+    """
+    이 방 알림 끄기·켜기.
+
+    **방 나가기와 다릅니다.** 나가면 목록에서 사라지고 새 메시지도 안 보이는데,
+    알림만 끄는 것은 대화는 계속 보되 소리로 부르지 말라는 뜻입니다.
+
+    미읽음 수는 그대로 셉니다. 안 세면 "알림을 껐다" 와 "다 읽었다" 가 화면에서
+    구별되지 않습니다.
+    """
+    room, member = room_access(request.user, room_id)
+    want = request.data.get("muted")
+    if want is None:
+        raise BordoError("VALIDATION_ERROR", "muted 는 필수입니다.")
+
+    now = timezone.now()
+    member.muted_at = now if want else None
+    member.save(update_fields=["muted_at", "updated_at"])
+    return Response({"room_id": str(room.id), "muted": bool(member.muted_at),
+                     "muted_at": member.muted_at})

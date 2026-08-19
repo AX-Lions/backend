@@ -170,6 +170,7 @@ urlpatterns = [
     path(f"{API}/chat/rooms", chat.rooms),
     path(f"{API}/chat/rooms/<uuid:room_id>", chat.room_detail),
     path(f"{API}/chat/rooms/<uuid:room_id>/members", chat.room_members),
+    path(f"{API}/chat/rooms/<uuid:room_id>/mute", chat.room_mute),
     path(f"{API}/chat/rooms/<uuid:room_id>/members/<uuid:user_id>",
          chat.room_member_detail),
     path(f"{API}/chat/rooms/<uuid:room_id>/messages", chat.messages),
