@@ -16,7 +16,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 
 from apps.agent.services.flow import agent_display_name, agent_display_names
-from apps.common.display import user_tz
+from apps.common.display import country_of, user_tz
 from apps.common.events import publish
 from apps.common.pagination import cursor_page
 from apps.common.permissions import project_membership, team_membership
@@ -133,13 +133,26 @@ def room_context(user, rooms):
             "sent_at": last.sent_at,
         }
 
-    avatar_map = {}
+    avatar_map, member_map = {}, {}
     rows = (RoomMember.objects.filter(room_id__in=ids, left_at__isnull=True)
             .select_related("user").order_by("created_at"))
+    member_agent_names = agent_display_names({r.user_id for r in rows})
     for row in rows:
         avatar_map.setdefault(row.room_id, [])
         if row.user.avatar_url and len(avatar_map[row.room_id]) < 4:
             avatar_map[row.room_id].append(row.user.avatar_url)
+        # 방 머리 시계 줄의 재료. 한 번에 모아 두지 않으면 방 목록 하나에
+        # 참여자 수만큼 쿼리가 더 나갑니다.
+        member_map.setdefault(row.room_id, []).append({
+            "id": str(row.user_id),
+            "name": row.user.name,
+            "avatar_url": row.user.avatar_url or "",
+            "timezone": row.user.timezone,
+            "country": country_of(row.user.timezone),
+            "presence": row.user.presence,
+            "agent_name": member_agent_names.get(row.user_id, ""),
+            "is_me": row.user_id == user.id,
+        })
 
     # 대리인 방 이름은 **저장된 title 이 아니라 주인의 지금 호칭**입니다.
     #
@@ -151,6 +164,7 @@ def room_context(user, rooms):
 
     return {"unread_map": unread_map, "important_map": important_map,
             "last_map": last_map, "avatar_map": avatar_map,
+            "member_map": member_map,
             "agent_name_map": agent_display_names(owner_ids)}
 
 
@@ -928,3 +942,49 @@ def search(request, room_id):
         "message": MessageSerializer(m, context=ctx).data,
         "date": m.sent_at.astimezone(tz).date().isoformat(),
     } for m in rows]))
+
+
+@api_view(["GET"])
+def away_handled(request):
+    """
+    자리를 비운 사이 **내 대리인이 대신 받은 대화.**
+
+    좌측 목록의 `중요 채팅` 자리를 이것으로 바꿉니다. 그쪽은 내가 미리 별을
+    찍어 둔 것만 모이는데, 자리를 비우기 전에 무엇이 중요해질지 알 수 있으면
+    애초에 자리를 안 비웁니다. 돌아와서 먼저 봐야 하는 것은 없는 동안 오간
+    말입니다.
+
+    **방 기준으로 묶어 개수까지 셉니다.** 화면이 방마다 메시지를 받아 세게
+    두면 목록 하나 그리려고 방 수만큼 요청이 나갑니다.
+
+    `is_agent` 로만 거르지 않습니다 — 옆에서 시켜서 한 말도 대리인이 보낸
+    것이라, 그것까지 섞이면 무엇을 확인해야 하는지가 흐려집니다.
+    """
+    user = request.user
+    rows = (ChatMessage.objects
+            .filter(sender=user, is_agent=True, answered_while_away=True,
+                    deleted_at__isnull=True,
+                    room__memberships__user=user,
+                    room__memberships__left_at__isnull=True)
+            .select_related("room").order_by("-sent_at"))
+
+    grouped = {}
+    for m in rows:
+        slot = grouped.setdefault(m.room_id, {"room": m.room, "count": 0, "last": m})
+        slot["count"] += 1
+
+    ctx = room_context(user, [g["room"] for g in grouped.values()])
+    results = []
+    for slot in sorted(grouped.values(), key=lambda g: g["last"].sent_at, reverse=True):
+        room, last = slot["room"], slot["last"]
+        body = RoomSummarySerializer(room, context=ctx).data
+        results.append({
+            "room_id": str(room.id),
+            "title": body["title"],
+            "path_label": body.get("path_label") or "",
+            "handled_count": slot["count"],
+            "last_reply": {"id": str(last.id),
+                           "preview": last.body[:80] or "(첨부)",
+                           "sent_at": last.sent_at},
+        })
+    return Response(listing(results))
