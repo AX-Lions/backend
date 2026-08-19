@@ -928,3 +928,77 @@ def search(request, room_id):
         "message": MessageSerializer(m, context=ctx).data,
         "date": m.sent_at.astimezone(tz).date().isoformat(),
     } for m in rows]))
+
+
+@api_view(["GET"])
+def room_search(request):
+    """
+    방 찾기. **방 하나 안의 메시지를 찾는 `rooms/{id}/search` 와 다릅니다.**
+
+    사이드바 돋보기가 쓰던 것은 검색이 아니라 이미 받아 온 목록을 좁히는
+    것이었습니다(프론트 `ChatListPanel`). 방이 늘면 목록에 안 실린 방은 아무리
+    쳐도 안 나옵니다.
+
+    ## 무엇으로 찾는가
+
+    화면이 좁히던 것과 **같은 셋**입니다 — 방 이름 · 팀/프로젝트 이름 ·
+    최근 메시지. 서버가 다른 기준으로 찾으면 같은 글자를 쳤는데 목록을 좁힐
+    때와 검색할 때 결과가 달라집니다.
+
+    ## 대리인 방 이름은 저장값이 아닙니다
+
+    `{이름}의 Bordo` 는 조회할 때 조립합니다(`agent_display_name`). 저장된
+    제목으로만 찾으면 화면에 보이는 이름을 그대로 쳤는데 안 걸립니다.
+    그래서 그 방들만 파이썬에서 한 번 더 봅니다 — 사람당 하나뿐이라 양이
+    적습니다.
+
+    ## 안 보이는 방은 안 찾습니다
+
+    나갔거나(`left_at`) 목록에서 숨긴(`hidden_at`) 방은 뺍니다. 나중에 초대된
+    사람은 입장 이후 메시지만 보므로, 메시지로 찾을 때도 그 규칙을 그대로
+    지납니다 — 안 그러면 검색 결과로 못 볼 대화가 새어 나갑니다.
+    """
+    q = (request.query_params.get("q") or "").strip()
+    if not q:
+        raise BordoError("VALIDATION_ERROR", "q 는 비울 수 없습니다.")
+
+    memberships = {m.room_id: m for m in
+                   RoomMember.objects.filter(user=request.user,
+                                             left_at__isnull=True,
+                                             hidden_at__isnull=True)}
+    if not memberships:
+        return Response(listing([]))
+
+    mine = list(ChatRoom.objects.filter(id__in=list(memberships))
+                .order_by("-last_message_at", "-created_at"))
+
+    by_name = {r.id for r in mine
+               if q.lower() in " ".join(filter(None, [r.title, r.team_name,
+                                                      r.project_name])).lower()}
+
+    # 대리인 방은 조립된 이름으로 한 번 더 봅니다.
+    owner_ids = {r.agent_owner_id for r in mine if r.agent_owner_id}
+    agent_names = agent_display_names(owner_ids)
+    by_name |= {r.id for r in mine
+                if r.agent_owner_id
+                and q.lower() in (agent_names.get(r.agent_owner_id) or "").lower()}
+
+    by_message = set()
+    for row in (ChatMessage.objects
+                .filter(room_id__in=list(memberships), body__icontains=q,
+                        deleted_at__isnull=True)
+                .values("room_id", "sent_at")):
+        member = memberships[row["room_id"]]
+        if member.visible_from and row["sent_at"] < member.visible_from:
+            continue
+        by_message.add(row["room_id"])
+
+    hit = by_name | by_message
+    rows = [r for r in mine if r.id in hit]
+    ctx = room_context(request.user, rows)
+    body = RoomSummarySerializer(rows, many=True, context=ctx).data
+    for item, room in zip(body, rows):
+        # 왜 걸렸는지 알려 줍니다. 이름이 안 겹치는데 목록에 뜨면 화면이
+        # 「왜 이 방이 나왔지」 를 설명할 방법이 없습니다.
+        item["matched"] = ("NAME" if room.id in by_name else "MESSAGE")
+    return Response(listing(body))
