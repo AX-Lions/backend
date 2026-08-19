@@ -51,6 +51,7 @@ urlpatterns = [
     # ── 02. 사용자
     path(f"{API}/users/me", accounts.me),
     path(f"{API}/users/me/preferences", accounts.preferences),
+    path(f"{API}/me/presence", accounts.presence),
 
     # ── 03. 팀
     path(f"{API}/teams", orgs.teams),
@@ -165,6 +166,7 @@ urlpatterns = [
 
     # ── 16. 채팅
     path(f"{API}/chat/sidebar", chat.sidebar),
+    path(f"{API}/chat/away-handled", chat.away_handled),
     path(f"{API}/chat/important", chat.important),
     path(f"{API}/chat/candidates", chat.candidates),
     path(f"{API}/chat/rooms", chat.rooms),

@@ -116,7 +116,11 @@ class SendMessageSkill(SkillBase):
 
             msg = ChatMessage.objects.create(
                 room=room, sender=me, sender_name=me.name,
-                is_agent=True, body=body)
+                is_agent=True, body=body,
+                # 주인이 자리를 비운 사이 받은 말인지 표시합니다. `is_agent`
+                # 만으로는 못 가릅니다 — 옆에서 시켜서 한 말도 대리인이 보낸
+                # 것이라, 돌아와서 「없는 동안 오간 대화」를 볼 때 섞입니다.
+                answered_while_away=getattr(me, "presence", "ACTIVE") == "AWAY")
             touch(room, msg.sent_at)
 
         return SkillResult(ok=True, message=f"{target.name} 님에게 전달했습니다.",

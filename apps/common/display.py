@@ -98,3 +98,53 @@ def meeting_when(start, end, tz) -> str:
     day = date_label(start, tz)
     span = time_range(start, end, tz)
     return f"{day} {span}".strip() if day or span else ""
+
+
+#: 시간대 → 한국어 국가명.
+#:
+#: **서버가 문자열로 내려줍니다.** `Europe/Berlin` → `독일` 은 표를 들고 있어야
+#: 하는 변환이고, 그 표를 화면마다 하나씩 두면 같은 사람이 화면에 따라 다른
+#: 나라에 있게 됩니다.
+#:
+#: 팀이 실제로 쓰는 지역만 적습니다. 전 세계 표를 들이면 유지가 안 되고,
+#: 모르는 값은 지역 이름을 그대로 돌려주는 편이 거짓 국가명보다 낫습니다.
+_COUNTRY_BY_ZONE = {
+    "Asia/Seoul": "대한민국", "Asia/Tokyo": "일본", "Asia/Shanghai": "중국",
+    "Asia/Singapore": "싱가포르", "Asia/Kolkata": "인도", "Asia/Dubai": "아랍에미리트",
+    "Europe/Berlin": "독일", "Europe/Paris": "프랑스", "Europe/London": "영국",
+    "Europe/Madrid": "스페인", "Europe/Amsterdam": "네덜란드", "Europe/Warsaw": "폴란드",
+    "America/New_York": "미국", "America/Chicago": "미국", "America/Denver": "미국",
+    "America/Los_Angeles": "미국", "America/Toronto": "캐나다",
+    "America/Vancouver": "캐나다", "America/Sao_Paulo": "브라질",
+    "Australia/Sydney": "호주", "Pacific/Auckland": "뉴질랜드", "UTC": "UTC",
+}
+
+
+def country_of(tz_name: str) -> str:
+    """
+    `Europe/Berlin` → `독일`.
+
+    모르는 지역이면 슬래시 뒤의 도시 이름을 그대로 돌려줍니다 — 빈 문자열을
+    주면 화면에 나라 칸만 비고, 아무 나라나 찍으면 틀린 정보가 남습니다.
+    """
+    name = (tz_name or "").strip()
+    if not name:
+        return ""
+    hit = _COUNTRY_BY_ZONE.get(name)
+    if hit:
+        return hit
+    return name.rsplit("/", 1)[-1].replace("_", " ")
+
+
+def avatar_of(url) -> str | None:
+    """
+    사진이 없으면 `null` 입니다.
+
+    모델은 빈 문자열을 기본값으로 두는데, 그대로 내보내면 어떤 자리는 `null` 이고
+    어떤 자리는 `""` 라 화면이 "사진 없음" 을 두 가지로 판정해야 합니다. 실제로
+    두 모양이 함께 나가고 있었습니다.
+
+    `null` 로 통일합니다. 빈 문자열은 "값이 있는데 비어 있다" 로도 읽혀서,
+    기본 얼굴을 그릴지 말지를 화면이 매번 다시 정하게 만듭니다.
+    """
+    return (url or "").strip() or None
