@@ -364,6 +364,7 @@ class Command(BaseCommand):
         self._seed_chat_rooms(team, users, owner, now)
         self._seed_away_handled(projects, users, owner, now)
         self._seed_message_variety(projects, users, owner, meeting, now)
+        self._seed_search_and_summary(users, now)
         self._seed_chat_read_state(projects, users, owner, now)
         self._touch_rooms()
 
@@ -1571,6 +1572,56 @@ class Command(BaseCommand):
         pq.answered_at = answer.sent_at
         pq.answer_body = answer.body
         pq.save(update_fields=["answered_at", "answer_body"])
+
+    def _seed_search_and_summary(self, users, now):
+        """
+        방 안 검색 · 날짜별 요약 (#137 7번).
+
+        - 검색: 같은 낱말이 한 날짜에만 몰려 있으면 결과가 항상 0~1건이라
+          목록이 여러 줄인 모습을 확인할 수 없다. "회의"가 team_room에서
+          서로 다른 날짜 셋에 걸쳐 나오게 메시지를 몇 개 더 넣는다.
+        - 일별 요약: `status`는 저장 필드가 아니라 조회 시점에 계산된다
+          (`DailyChatSummary` 행이 있고 `generated_at`이 있으면 READY,
+          없으면 무조건 PENDING — 대화가 없는 날도 행이 없을 뿐 같은
+          PENDING이다). READY 행을 두 개 만든다 — 하나는 my_todos·
+          schedules를 채우고, 하나는 my_todos를 일부러 비워 둔다.
+          그 외 날짜/방은 아무 행도 안 만들어 PENDING·대화 없음 두
+          갈래를 그대로 남겨 둔다(억지로 채우지 말라는 지침 그대로).
+        """
+        from apps.chat.models import ChatMessage, ChatRoom, DailyChatSummary, RoomType
+
+        team_room = ChatRoom.objects.get(type=RoomType.TEAM)
+
+        def send(body, days_ago):
+            msg = ChatMessage.objects.create(
+                room=team_room, sender=users["강다은"], sender_name="강다은", body=body)
+            sent_at = now - timedelta(days=days_ago)
+            ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+            return sent_at
+
+        d5 = send("다음 주 회의 시간도 이 방에서 공지할게요.", 5)
+        d3 = send("오늘 회의는 30분 당겨졌습니다.", 3)
+        # (일부러 sent_at을 안 받는다 — 이미 team_room에 8/19자 "회의" 메시지가
+        # 있어서, 그 날짜와 굳이 겹치지 않게 셋째 날짜 하나만 더한다.)
+
+        # READY 1 — 오늘 것으로 채운다(this 방에 이미 있는 8/19 메시지들을 요약).
+        DailyChatSummary.objects.create(
+            room=team_room, date=now.date(),
+            one_line="회의 시간 조정과 학술제 부스 배치 공유가 있었습니다.",
+            my_todos=["학술제 부스 배치도 확인하기", "금요일 전체 회고 일정 확정하기"],
+            schedules=[{"at": now.isoformat(), "title": "전체 회고", "kind": "MEETING"}],
+            generated_at=now)
+
+        # READY 2 — my_todos를 일부러 비워 둔다. "할 일 없는 요약 날"도
+        # 실제로 있어야 화면이 빈 목록을 어떻게 그리는지 확인할 수 있다.
+        DailyChatSummary.objects.create(
+            room=team_room, date=d3.date(),
+            one_line="회의 시간이 30분 당겨졌다는 공지가 있었습니다.",
+            my_todos=[], schedules=[], generated_at=d3)
+
+        # d5 날짜와 그 외 모든 방·날짜는 아무 행도 안 만든다 — PENDING으로
+        # 남아 대화가 있었는데 아직 요약이 없는 경우(d5)와, 대화 자체가
+        # 없는 날(다른 대부분의 날짜) 둘 다를 자연스럽게 남겨 둔다.
 
     def _seed_chat_read_state(self, projects, users, owner, now):
         """
