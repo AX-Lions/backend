@@ -7,7 +7,6 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from services.backend import BackendClient
-from services.openai_service import OpenAIService
 from cogs.general import GeneralCog
 from cogs.meeting import MeetingCog
 from cogs.delegate import DelegateCog
@@ -19,11 +18,6 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 SERVICE_TOKEN = os.getenv("BORDO_SERVICE_TOKEN")
 BACKEND_BASE_URL = os.getenv("BORDO_BACKEND_URL", "http://localhost:8000")
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.5")
-
-openai_service = OpenAIService(OPENAI_API_KEY, OPENAI_MODEL)
 
 # discord.log 파일에 로그 생성
 logging.basicConfig(filename="discord.log", encoding="utf-8", level=logging.INFO)
@@ -68,8 +62,7 @@ async def setup_hook():
 
     general_cog = GeneralCog(
         bot,
-        backend,
-        openai_service
+        backend
     )
 
     outbox_cog = OutboxCog(
@@ -134,8 +127,5 @@ async def on_resumed():
 if __name__ == "__main__":
     if not DISCORD_TOKEN or not SERVICE_TOKEN:
         raise RuntimeError("DISCORD_TOKEN / BORDO_SERVICE_TOKEN 환경변수가 필요합니다.")
-
-    if not OPENAI_API_KEY:
-        log.warning("OPENAI_API_KEY가 없습니다. [TEMP] 멘션 시 일반 채팅 응답 기능은 동작하지 않습니다.")
 
     bot.run(DISCORD_TOKEN, log_handler=None)

@@ -8,10 +8,9 @@ log = logging.getLogger("bordo")
 
 
 class GeneralCog(commands.Cog):
-    def __init__(self, bot, backend, openai_service):
+    def __init__(self, bot, backend):
         self.bot = bot
         self.backend = backend
-        self.openai_service = openai_service
 
         self.seen_message_ids: set[str] = set()
 
@@ -23,15 +22,8 @@ class GeneralCog(commands.Cog):
         if message.guild is None:
             return  # DM은 대상 밖 (guild_id 필요한 idempotency_key 구성 불가)
 
-        # [TEMP] 봇을 멘션하면 일반 채팅으로 LLM이 직접 답한다.
-        if self.bot.user in message.mentions:
-            async with message.channel.typing():
-                reply = await self.openai_service.llm_chat_reply(
-                    message.content,
-                    message.author.display_name
-                )
-
-            await message.reply(reply, mention_author=False)
+        # 멘션이 와도 봇이 직접 답하지 않는다. 그대로 Backend로 넘기면
+        # 대리인(ReAct·POLICY·유보)이 대상 판정까지 한다 — 봇은 판단하지 않는다.
 
         # TODO: 연결된 팀의 채널인지 확인 후 아니면 return (권한 없는 채널은 무시)
 
