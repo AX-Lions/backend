@@ -23,7 +23,7 @@ class DiscordMessagesTest(TestCase):
     @classmethod
     def setUpTestData(cls):
         cls.me = User.objects.create_user(email="me@bordo.dev", password="x" * 10,
-                                          name="강다은", discord_user_id="dc-me")
+                                          name="강다은", discord_user_id="1234567890")
         cls.team = Team.objects.create(name="AX Lions", created_by=cls.me)
         cls.project = Project.objects.create(team=cls.team, team_name=cls.team.name,
                                              name="Bordo", created_by=cls.me)
@@ -44,7 +44,7 @@ class DiscordMessagesTest(TestCase):
 
     def body(self, **kw):
         base = {"guild_id": "guild-1", "channel_id": "ch-1",
-                "author_discord_id": "dc-me", "content": "안녕하세요",
+                "author_discord_id": "1234567890", "content": "안녕하세요",
                 "created_at": timezone.now().isoformat(),
                 "thread_id": "thread-1"}
         base.update(kw)
@@ -78,6 +78,33 @@ class DiscordMessagesTest(TestCase):
         r = self.post(self.body(thread_id="thread-없음"))
         self.assertEqual(r.status_code, 202)
         self.assertEqual(r.data["skipped"], "no_active_meeting")
+
+    # ── 멘션
+
+    def test_mentions_become_names(self):
+        """
+        `targeting.pick` 이 원문만 봅니다. 스노플레이크 숫자를 한국어 이름
+        목록과 맞춰야 하면 대개 `아무에게도 향하지 않음` 을 골라, 멘션으로 부른
+        대리인이 입을 안 엽니다.
+        """
+        self.post(self.body(content="<@1234567890> 이거 어떻게 생각해?",
+                            mentions=["1234567890"]))
+        self.assertEqual(Utterance.objects.get().body, "강다은 이거 어떻게 생각해?")
+
+    def test_nickname_form_is_handled(self):
+        """별명이 있으면 `<@!123>` 으로 옵니다."""
+        self.post(self.body(content="<@!1234567890> 확인 부탁", mentions=["1234567890"]))
+        self.assertEqual(Utterance.objects.get().body, "강다은 확인 부탁")
+
+    def test_unlinked_person_is_left_alone(self):
+        """지우면 누구를 부른 것인지 사라지고, 아무 이름이나 넣으면 없는 사람이 등장합니다."""
+        self.post(self.body(content="<@999999999> 저기요", mentions=["999999999"]))
+        self.assertEqual(Utterance.objects.get().body, "<@999999999> 저기요")
+
+    def test_works_without_the_mentions_field(self):
+        """옛 봇은 이 키를 안 보냅니다. 본문에서 찾아냅니다."""
+        self.post(self.body(content="<@1234567890> 안녕", mentions=None))
+        self.assertEqual(Utterance.objects.get().body, "강다은 안녕")
 
     def test_empty_body_is_skipped(self):
         r = self.post(self.body(content="   "))
