@@ -14,7 +14,8 @@ from rest_framework.test import APIClient
 from apps.accounts.models import User
 from apps.meetings.models import (Attendance, Meeting, MeetingParticipant,
                                   MeetingStatus, MeetingSummary)
-from apps.orgs.models import Project, ProjectMember, Team, TeamMember, TeamRole
+from apps.orgs.models import (Project, ProjectMember, RecentProject, Team,
+                              TeamMember, TeamRole)
 
 # 2026-08-12 11:32 KST. UTC 로 적어 두고 환산 결과를 봅니다 —
 # 로컬 시간대로 적으면 테스트가 실행 환경을 따라 흔들립니다.
@@ -112,3 +113,56 @@ class TodayScheduleAbsenceTest(HomeDisplayTest):
         self.assertTrue(d["absence_url"].endswith("/absence"))
         self.assertTrue(d["prep_url"].endswith("/prep"))
         self.assertIn(row["meeting_id"], d["absence_url"])
+
+
+class ShortcutsDiscordTest(TestCase):
+    """
+    사이드바 `Discord 바로가기`.
+
+    `guild_id` 가 하드코딩 `""` 라 팀을 연결해도 버튼이 영영 비활성이었습니다
+    (`connected: false`). 반대로 연결 안 된 팀에서 켜지면 없는 서버로 보냅니다.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.me = User.objects.create_user(email="d@bordo.dev", password="x" * 10,
+                                          name="강다은", timezone="Asia/Seoul")
+        cls.team = Team.objects.create(name="AX Lions", created_by=cls.me)
+        TeamMember.objects.create(team=cls.team, user=cls.me, team_role=TeamRole.OWNER)
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(self.me)
+
+    def _discord(self):
+        r = self.client.get("/api/v1/home")
+        self.assertEqual(r.status_code, 200)
+        return r.data["shortcuts"]["discord"]
+
+    def test_not_connected_without_a_guild_link(self):
+        self.assertEqual(self._discord(), {"connected": False})
+
+    def test_connected_after_the_team_is_linked(self):
+        from apps.discord.models import GuildLink
+
+        GuildLink.objects.create(guild_id="guild-1", team=self.team)
+        body = self._discord()
+        self.assertTrue(body["connected"])
+        self.assertEqual(body["guild_id"], "guild-1")
+        self.assertIn("guild-1", body["url"])
+
+    def test_prefers_the_team_of_the_recently_opened_project(self):
+        """두 팀 다 연결돼 있으면 방금까지 보던 팀이 맞습니다."""
+        from apps.discord.models import GuildLink
+
+        other = Team.objects.create(name="다른 팀", created_by=self.me)
+        TeamMember.objects.create(team=other, user=self.me, team_role=TeamRole.MEMBER)
+        GuildLink.objects.create(guild_id="guild-first", team=self.team)
+        GuildLink.objects.create(guild_id="guild-other", team=other)
+
+        project = Project.objects.create(team=other, team_name=other.name,
+                                         name="다른 프로젝트", created_by=self.me)
+        ProjectMember.objects.create(project=project, user=self.me)
+        RecentProject.objects.create(user=self.me, project=project)
+
+        self.assertEqual(self._discord()["guild_id"], "guild-other")

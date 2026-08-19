@@ -32,6 +32,42 @@ def _my_project_ids(user):
     return list(joined)
 
 
+def _discord_guild_id(user) -> str:
+    """
+    사이드바 `Discord 바로가기` 가 열 서버.
+
+    홈은 팀을 가로지르는 화면이라 "지금 보고 있는 팀" 을 서버가 모릅니다
+    (프론트가 `localStorage` 로 들고 있습니다). 그래서 **최근에 연 프로젝트의
+    팀**을 먼저 봅니다 — 방금까지 그 팀 일을 하고 있었으니 Discord 도 그쪽일
+    가능성이 높습니다. 없으면 먼저 들어간 팀 순으로 내려갑니다.
+
+    연결된 팀이 없으면 빈 문자열입니다. 호출부가 이 값으로 `connected` 를
+    가르므로, 여기서 아무 값이나 돌려주면 연결 안 된 팀에서도 버튼이 켜져
+    Discord 의 없는 서버로 보냅니다.
+    """
+    from apps.discord.models import GuildLink
+
+    team_ids = list(TeamMember.objects.filter(user=user)
+                    .order_by("created_at").values_list("team_id", flat=True))
+    if not team_ids:
+        return ""
+
+    links = dict(GuildLink.objects.filter(team_id__in=team_ids)
+                 .values_list("team_id", "guild_id"))
+    if not links:
+        return ""
+
+    recent = (RecentProject.objects.filter(user=user)
+              .select_related("project").order_by("-opened_at").first())
+    if recent and links.get(recent.project.team_id):
+        return links[recent.project.team_id]
+
+    for tid in team_ids:
+        if links.get(tid):
+            return links[tid]
+    return ""
+
+
 def _shortcuts(user):
     """
     사이드바 하단 `바로가기버튼모음`.
@@ -45,7 +81,7 @@ def _shortcuts(user):
     from apps.chat.services import ensure_ai_room
 
     room = ensure_ai_room(user)
-    guild_id = ""       # A 담당(Discord 연동)이 붙으면 팀 연결에서 읽어옵니다.
+    guild_id = _discord_guild_id(user)
     return {
         "agent_room_id": str(room.id),
         "discord": ({"guild_id": guild_id, "connected": True,
