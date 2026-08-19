@@ -187,12 +187,20 @@ def document_detail(request, document_id):
                     details={"your_version": want, "current_version": doc.version},
                     status=409)
 
+        # `masked` 는 **이번 요청에서 새로 지운 건수**이고, 필드는 문서 전체의
+        # 누적 건수입니다. 둘을 그냥 대입하면 본문을 안 보낸 요청에서 0 이
+        # 덮어써집니다 — 제목만 고쳐도 화면의 `지운 비밀키 N건` 이 0 이 되어
+        # 사용자는 마스킹이 풀린 것으로 읽습니다. 본문은 계속 가려져 있으므로
+        # 보안 구멍은 아니고, **화면만 거짓말하는** 상태입니다.
         masked = 0
+        touched = False
         if "content" in request.data:
             doc.content, masked = mask_secrets(request.data["content"] or "")
+            touched = True
         if "sections" in request.data:
             doc.sections, n = _mask_sections(request.data["sections"])
             masked += n
+            touched = True
         for f in ("title", "category", "visibility"):
             if f in request.data:
                 setattr(doc, f, request.data[f])
@@ -200,7 +208,15 @@ def document_detail(request, document_id):
         with transaction.atomic():
             doc.hash = content_hash(doc.content)
             doc.summary = _summarize(doc.content, doc.sections)
-            doc.masked_secrets = masked
+            # 본문이 새로 왔을 때만 다시 셉니다. 안 온 요청에서는 그대로 둡니다.
+            #
+            # 한쪽(본문 또는 섹션)만 보내면 안 보낸 쪽의 몫이 빠집니다. 이미
+            # 마스킹된 글에서는 다시 셀 수가 없어서인데(`mask_secrets` 가 0 을
+            # 돌려줍니다), 정확히 세려면 부분별 건수를 따로 저장해야 합니다.
+            # 표시용 숫자 하나를 위해 칸을 늘리기보다, 제목만 고쳤을 때 0 이
+            # 되는 실제 증상을 먼저 없앱니다.
+            if touched:
+                doc.masked_secrets = masked
             doc.version += 1
             doc.indexed = False          # 내용이 바뀌었으니 색인을 다시 타야 합니다
             doc.save()
