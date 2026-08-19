@@ -185,3 +185,55 @@ class MessageOwnershipTest(TestCase):
         m = self.messages()[0]
         self.assertFalse(m["is_mine"])
         self.assertFalse(m["is_from_my_agent"])
+
+
+class RoomMemberListTest(TestCase):
+    """
+    방 하나의 참여자 목록.
+
+    사람을 넣고 내보내는 주소는 있는데 누가 있는지 읽을 수가 없어, 명단이
+    없으면 내보내기 화면을 만들 방법이 없었습니다.
+    """
+
+    def setUp(self):
+        self.me = User.objects.create_user(email="r@bordo.dev", password="x" * 10,
+                                           name="유수인", timezone="Asia/Seoul")
+        self.mate = User.objects.create_user(email="r2@bordo.dev", password="x" * 10,
+                                             name="강다은", timezone="Europe/Berlin")
+        self.gone = User.objects.create_user(email="r3@bordo.dev", password="x" * 10,
+                                             name="나간 사람")
+        self.room = direct_room(self.me, self.mate)
+        RoomMember.objects.create(room=self.room, user=self.gone,
+                                  left_at=timezone.now())
+        self.client = APIClient()
+        self.client.force_authenticate(self.me)
+
+    def members(self):
+        r = self.client.get(f"/api/v1/chat/rooms/{self.room.id}/members")
+        self.assertEqual(r.status_code, 200, r.data)
+        return r.data["results"]
+
+    def test_lists_who_is_in_the_room(self):
+        self.assertEqual({m["name"] for m in self.members()}, {"유수인", "강다은"})
+
+    def test_leaves_out_people_who_left(self):
+        """내보내기 목록에 이미 나간 사람이 뜨면 안 됩니다."""
+        self.assertNotIn("나간 사람", {m["name"] for m in self.members()})
+
+    def test_same_shape_as_the_room_list(self):
+        """한 방만 다시 물었을 때 다른 모양이 오면 같은 줄을 두 번 만들어야 합니다."""
+        one = self.members()[0]
+        listed = self.client.get("/api/v1/chat/rooms").data["results"][0]["members"][0]
+        self.assertTrue(set(listed) <= set(one))
+
+    def test_carries_country_and_presence(self):
+        User.objects.filter(pk=self.mate.pk).update(presence="AWAY")
+        by_name = {m["name"]: m for m in self.members()}
+        self.assertEqual(by_name["강다은"]["country"], "독일")
+        self.assertEqual(by_name["강다은"]["presence"], "AWAY")
+
+    def test_outsider_gets_404(self):
+        """참여자가 아닌 방은 존재도 알리지 않습니다."""
+        self.client.force_authenticate(self.gone)
+        r = self.client.get(f"/api/v1/chat/rooms/{self.room.id}/members")
+        self.assertEqual(r.status_code, 404)

@@ -475,10 +475,41 @@ def room_detail(request, room_id):
     return Response({"room_id": str(room.id), "action": "LEFT", "at": now})
 
 
-@api_view(["POST"])
+@api_view(["GET", "POST"])
 def room_members(request, room_id):
-    """대화상대 추가. 단체방만 됩니다."""
+    """
+    방 참여자 목록(GET) · 대화상대 추가(POST).
+
+    ## 읽는 자리가 없어서 넣는 자리도 못 썼습니다
+
+    사람을 넣는 주소와 내보내는 주소는 있는데 **누가 있는지 읽을 수가
+    없었습니다.** 명단 없이 내보내기 화면을 만들 방법이 없어, 그 두 주소가
+    화면에서 한 번도 안 불렸습니다.
+
+    나간 사람은 뺍니다. 기록은 `left_at` 으로 남기지만 여기는 **지금 방에 있는
+    사람**을 묻는 자리라, 섞으면 내보내기 목록에 이미 나간 사람이 뜹니다.
+
+    방 목록의 `members[]` 와 같은 모양입니다. 한 방만 다시 물을 때 화면이
+    다른 모양을 받으면 같은 줄을 두 번 만들어야 합니다.
+    """
     room, _ = room_access(request.user, room_id)
+
+    if request.method == "GET":
+        rows = (RoomMember.objects.filter(room=room, left_at__isnull=True)
+                .select_related("user").order_by("created_at"))
+        names = agent_display_names([r.user_id for r in rows])
+        return Response(listing([{
+            "id": str(r.user_id),
+            "name": r.user.name,
+            "avatar_url": r.user.avatar_url or None,
+            "timezone": r.user.timezone,
+            "country": country_of(r.user.timezone),
+            "presence": r.user.presence,
+            "agent_name": names.get(r.user_id, ""),
+            "is_me": r.user_id == request.user.id,
+            "joined_at": r.created_at,
+        } for r in rows]))
+
     if room.type not in GROUP_TYPES:
         raise BordoError("CHAT_ROOM_TYPE_NOT_ALLOWED",
                          "1:1 방에 사람을 더하면 기존 대화가 제3자에게 열립니다. "
