@@ -147,6 +147,21 @@ STATIC_URL = "static/"
 # collectstatic 이 모아 둘 위치. 없으면 배포에서 collectstatic 이 ImproperlyConfigured 로
 # 죽고, 넘어가더라도 admin 이 CSS 없이 뜹니다. 개발에서는 쓰이지 않습니다.
 STATIC_ROOT = Path(os.environ.get("DJANGO_STATIC_ROOT") or BASE_DIR / "staticfiles")
+
+# 채팅 첨부를 둘 자리.
+#
+# **`MEDIA_URL` 로 그대로 서빙하지 않습니다.** 주소만 알면 누구나 받게 되는데,
+# 채팅 첨부는 그 방 참여자만 봐야 합니다. 내려받기는 권한을 보는 뷰
+# (`GET /chat/attachments/{id}/download`)를 지납니다.
+MEDIA_ROOT = Path(os.environ.get("DJANGO_MEDIA_ROOT") or BASE_DIR / "media")
+MEDIA_URL = "/media/"
+
+#: 첨부 한 개의 상한. 넘으면 400 입니다.
+#:
+#: 상한이 없으면 실수로 올린 큰 파일 하나가 디스크를 채우고, 그때부터 모든
+#: 업로드가 함께 실패합니다.
+CHAT_ATTACHMENT_MAX_BYTES = int(os.environ.get("CHAT_ATTACHMENT_MAX_BYTES",
+                                               20 * 1024 * 1024))
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # ─────────────────────────────────────────── DRF

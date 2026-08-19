@@ -127,7 +127,7 @@ class AgentNameTest(Base):
                                 {"agent_name": "제로"}, content_type="application/json")
 
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json()["settings"]["agent_name"], "제로")
+        self.assertEqual(res.json()["agent_name"], "제로")
 
     def test_clearing_it_is_allowed(self):
         """지운 사람에게 '이름을 넣으십시오' 라고 하면 되돌릴 방법이 없습니다."""

@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from apps.common.display import avatar_of
+
 from .models import Favorite, InviteCode, Project, Team, TeamMember
 
 
@@ -9,7 +11,9 @@ class TeamSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Team
-        fields = ("id", "name", "description", "created_by", "my_role",
+        # `timezone` 을 냅니다. 저장만 하고 안 돌려주면 화면이 방금 고른 값이
+        # 들어갔는지 확인할 방법이 없습니다.
+        fields = ("id", "name", "description", "timezone", "created_by", "my_role",
                   "categories", "member_count", "created_at")
         read_only_fields = ("id", "created_by", "member_count", "created_at")
 
@@ -22,12 +26,17 @@ class TeamMemberSerializer(serializers.ModelSerializer):
     name = serializers.CharField(source="user.name", read_only=True)
     timezone = serializers.CharField(source="user.timezone", read_only=True)
     project_role = serializers.CharField(source="user.project_role", read_only=True)
-    avatar_url = serializers.CharField(source="user.avatar_url", read_only=True)
+    # 없으면 `null`. 빈 문자열과 섞이면 화면이 기본 얼굴을 그릴지 말지를
+    # 자리마다 다시 정해야 합니다.
+    avatar_url = serializers.SerializerMethodField()
 
     class Meta:
         model = TeamMember
         fields = ("user_id", "name", "avatar_url", "team_role", "project_role",
                   "timezone", "joined_at")
+
+    def get_avatar_url(self, obj):
+        return avatar_of(obj.user.avatar_url)
 
 
 class ProjectSummarySerializer(serializers.ModelSerializer):
