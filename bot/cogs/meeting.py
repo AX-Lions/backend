@@ -13,9 +13,10 @@ log = logging.getLogger("bordo")
 
 class MeetingCog(commands.Cog):
 
-    def __init__(self, bot, backend):
+    def __init__(self, bot, backend, gate):
         self.bot = bot
         self.backend = backend
+        self.gate = gate
 
         # [기존] _active_meeting_threads
         self.active_meeting_threads: dict[int, dict] = {}
@@ -124,7 +125,13 @@ class MeetingCog(commands.Cog):
     @app_commands.autocomplete(meeting_id=_meeting_id_autocomplete)
     @app_commands.guild_only()
     async def meeting_start(self, interaction: discord.Interaction, meeting_id: str):
+        # defer가 먼저다 — 게이트의 backend.get()이 캐시 미스일 때 몇 초씩
+        # 걸릴 수 있는데, Discord는 상호작용을 3초 안에 확인 응답 안 하면
+        # 토큰을 무효화한다.
         await interaction.response.defer()
+
+        if not await self.gate.require_guild(interaction):
+            return
 
         # 제목은 Backend가 갖고 있는 예정된 회의에서 나온다 — 이 시점엔 아직 모르니
         # 임시 이름으로 스레드부터 만들고, 응답을 받은 뒤 실제 제목으로 바꾼다.
