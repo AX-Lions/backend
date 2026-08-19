@@ -5,6 +5,9 @@
 연결했으면(`User.discord_user_id` 없음) 명령을 막는다. 판정은 항상
 Backend가 한다 — 여기서는 `GET /internal/v1/teams/current` 응답을
 그대로 캐싱만 한다(봇은 판단하지 않는다).
+
+`/bordo-connect`·`/bordo-team-connect`·`/bordo-team`은 게이트 자체를
+여는 명령이라 예외로 둔다 — 안 그러면 아무도 연결을 시작할 수 없다.
 """
 import asyncio
 import collections
@@ -124,3 +127,51 @@ class GateService:
             # 기능이다. 여기서 난 예외가 새 나가면 delegate-on/off·ask-bordo
             # 같은 진짜 명령 실행 자체가 죽는다.
             log.exception("역할 부여 실패 guild=%s user=%s", guild.id, member.id)
+
+    async def require_guild(self, interaction: discord.Interaction) -> bool:
+        """이 서버가 팀에 연결돼 있으면 True. 아니면 안내를 보내고 False.
+
+        `interaction.response.defer()`를 **먼저 부른 뒤** 호출해야 한다.
+        `backend.get()`은 캐시가 비어 있으면(5분마다, 재시작 직후) 재시도까지
+        합쳐 몇 초씩 걸릴 수 있는데, Discord는 상호작용을 3초 안에 확인
+        응답하지 않으면 토큰 자체를 무효화한다 — defer보다 게이트를 먼저
+        부르면 그 3초를 넘겨서 "응답 없음" 오류가 날 수 있다. 그래서 여기서는
+        `followup.send()`로 안내한다(`response`는 이미 defer가 썼다고 가정)."""
+        if interaction.guild_id is None:
+            return True  # DM 등 길드 밖에서 부른 명령은 이 게이트 대상이 아니다
+
+        if await self.guild_linked(interaction.guild_id):
+            return True
+
+        await interaction.followup.send(
+            "이 서버는 아직 Bordo 팀에 연결되지 않았습니다. "
+            "서버 관리 권한이 있는 사람이 `/bordo-team-connect`로 먼저 연결해주세요.",
+            ephemeral=True,
+        )
+        return False
+
+    async def require_user(self, interaction: discord.Interaction) -> bool:
+        """이 사람이 계정을 연결했으면 True(연결됐으면 역할도 함께 챙겨준다).
+        아니면 안내를 보내고 False. `require_guild`와 마찬가지로
+        `interaction.response.defer()` 뒤에 호출해야 한다."""
+        linked = await self.user_linked(interaction.user.id)
+
+        if not linked:
+            await interaction.followup.send(
+                "먼저 `/bordo-connect`로 Bordo 계정을 연결해주세요.",
+                ephemeral=True,
+            )
+            return False
+
+        if isinstance(interaction.user, discord.Member):
+            await self._grant_role(interaction.user)
+
+        return True
+
+    async def require(self, interaction: discord.Interaction) -> bool:
+        """길드·개인 게이트를 순서대로 확인한다. 길드부터 보는 이유 —
+        서버 자체가 안 묶여 있으면 그 안 누구의 개인 연결 여부도 의미가
+        없다."""
+        if not await self.require_guild(interaction):
+            return False
+        return await self.require_user(interaction)
