@@ -29,7 +29,7 @@ python main.py
 
 ## Discord Developer Portal 설정
 
-- **Privileged Gateway Intent**: `MESSAGE CONTENT INTENT` 활성화 필요
+- **Privileged Gateway Intent**: `MESSAGE CONTENT INTENT`·`PRESENCE INTENT`·`SERVER MEMBERS INTENT` 활성화 필요 (멤버 인텐트가 없으면 길드 멤버 캐시가 비어 있어 presence 이벤트 자체가 안 옵니다)
 - **봇 초대 스코프**: `bot`, `applications.commands` 둘 다 필요 (후자가 빠지면 슬래시 명령이 에러 없이 등록되지 않음)
 - **필요 권한**: View Channels, Send Messages, Send Messages in Threads, Embed Links, Create Public Threads, Manage Events, Read Message History
 
