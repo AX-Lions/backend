@@ -110,8 +110,17 @@ class Command(BaseCommand):
                 at += timedelta(days=1)
             m, created = Meeting.objects.get_or_create(
                 project=main, title=title, scheduled_at=at,
+                # `discord_channel_id` 를 **비워 둡니다.**
+                #
+                # 스레드는 `/meeting-start` 가 붙입니다. 시드가 미리 채워 두면
+                # 자동완성이 「아직 스레드가 안 붙은 회의」 만 내려주므로
+                # (`#96`) **시드 직후 그 목록이 비어 봇 시연 첫 단계가
+                # 막힙니다.**
+                #
+                # 셋이 같은 값이던 것도 문제였습니다 — 이 값으로 회의를 찾는
+                # 곳이 아무거나 잡습니다.
                 defaults={"project_name": main.name, "created_by": owner,
-                          "duration_min": 60, "discord_channel_id": "556677889900",
+                          "duration_min": 60,
                           "status": MeetingStatus.CONFIRMED})
             if created:
                 MeetingSummary.objects.get_or_create(meeting=m)
@@ -285,6 +294,7 @@ class Command(BaseCommand):
         self._seed_debate(upcoming["디자인 리뷰"], users, owner, now)
         self._seed_briefing_cards(meeting, agendas, users, owner, now)
         self._seed_chat_rooms(team, users, owner, now)
+        self._touch_rooms()
 
         self.stdout.write(self.style.SUCCESS(
             f"\n시드 완료\n"
@@ -754,10 +764,15 @@ class Command(BaseCommand):
             main_opinions=[{"speaker": "최비성", "text": "통로가 좁으면 안전 문제로 이어질 수 있습니다"},
                           {"speaker": "강다은의 Bordo", "text": "후원사 등급 기준은 이미 계약서에 명시돼 있습니다"}])
 
+        # `participant` 는 주인이지만 **말한 것은 대리인**입니다. `is_agent` 가
+        # 없으면 회의록에서 둘을 가를 수 없어, 대리인이 대신 한 말이 본인이 직접
+        # 한 말로 읽힙니다 — 돌아온 사람이 「나는 그런 말 한 적 없는데」 를
+        # 수습하게 되는 자리입니다 (`#114` 로 생긴 칸).
         def say(minute, pname, body, agent=False):
             Utterance.objects.create(
                 meeting=meeting, participant=users[pname],
                 participant_name=f"{pname}의 Bordo" if agent else pname,
+                is_agent=agent,
                 body=body, spoken_at=started_at + timedelta(minutes=minute))
 
         say(0, "유수인", "학술제 준비 점검 회의 시작할게요. 부스 배치랑 후원사 로고 건 보겠습니다.")
@@ -848,10 +863,15 @@ class Command(BaseCommand):
             main_opinions=[{"speaker": "최비성", "text": "정산 시각이 흔들리면 신뢰도가 떨어집니다"},
                           {"speaker": "임수연", "text": "환불 문구가 화면마다 달라서 사용자가 헷갈려해요"}])
 
+        # `participant` 는 주인이지만 **말한 것은 대리인**입니다. `is_agent` 가
+        # 없으면 회의록에서 둘을 가를 수 없어, 대리인이 대신 한 말이 본인이 직접
+        # 한 말로 읽힙니다 — 돌아온 사람이 「나는 그런 말 한 적 없는데」 를
+        # 수습하게 되는 자리입니다 (`#114` 로 생긴 칸).
         def say(minute, pname, body, agent=False):
             Utterance.objects.create(
                 meeting=meeting, participant=users[pname],
                 participant_name=f"{pname}의 Bordo" if agent else pname,
+                is_agent=agent,
                 body=body, spoken_at=started_at + timedelta(minutes=minute))
 
         say(0, "최비성", "결제 모듈 정산·환불 정책 점검할게요.")
@@ -928,10 +948,15 @@ class Command(BaseCommand):
         """
         started = meeting.started_at
 
+        # `participant` 는 주인이지만 **말한 것은 대리인**입니다. `is_agent` 가
+        # 없으면 회의록에서 둘을 가를 수 없어, 대리인이 대신 한 말이 본인이 직접
+        # 한 말로 읽힙니다 — 돌아온 사람이 「나는 그런 말 한 적 없는데」 를
+        # 수습하게 되는 자리입니다 (`#114` 로 생긴 칸).
         def say(minute, pname, body, agent=False):
             name = f"{pname}의 Bordo" if agent else pname
             Utterance.objects.create(
                 meeting=meeting, participant=users[pname], participant_name=name,
+                is_agent=agent,
                 body=body, spoken_at=started + timedelta(minutes=minute))
 
         # ── 안건 1: 회의 일정 조율
@@ -1136,7 +1161,21 @@ class Command(BaseCommand):
         입장을 미리 받아 둔다. 지금까지 하나도 없어서 준비 화면이 항상 비어
         있었다. 논쟁점 하나는 일부러 입장을 안 받아 둔다 — 유보가 화면에
         어떻게 나오는지 봐야 한다."""
-        from apps.meetings.models import DebatePoint, DebateStance
+        from apps.meetings.models import (Attendance, DebatePoint, DebateStance,
+                                          MeetingParticipant)
+
+        """
+        **입장을 적어 둔 사람의 대리 참석을 켭니다.**
+
+        `targeting.candidates()` 가 `delegated=True` 인 사람만 후보로 삼습니다.
+        꺼진 채로 두면 회의에서 그 사람에게 물어도 대리인이 깨어나지 않고,
+        **적어 둔 입장이 한 번도 안 쓰입니다.**
+
+        준비 화면을 채워 놓고 회의에서 안 쓰이는 그림이 되는데, 그게 이
+        서비스에서 제일 보여 주면 안 되는 장면입니다.
+        """
+        MeetingParticipant.objects.filter(meeting=meeting, user=owner).update(
+            delegated=True, attendance=Attendance.DELEGATED)
 
         p1 = DebatePoint.objects.create(
             meeting=meeting, source_key="design-deadline", order=1,
@@ -1189,11 +1228,35 @@ class Command(BaseCommand):
             note="8/18 마감이면 QA 기간이 3일뿐인데 괜찮을까요?",
             due_at=now + timedelta(days=2), task=task, occurred_at=meeting.ended_at)
 
+    def _touch_rooms(self):
+        """
+        방마다 `last_message_at` 을 **마지막 메시지 시각**으로 채웁니다.
+
+        안 채우면 사이드바가 정렬도 미리보기도 못 합니다. 채우려고 만든 방이
+        맨 아래에 깔리는데, 시연에서 제일 먼저 열어야 하는 방들입니다.
+
+        방을 만드는 곳이 여럿이라(`_seed_chat_rooms` · 작업 플로우 · 피드백)
+        **끝에서 한 번에 돕니다.** 만드는 자리마다 부르게 두면 새 방이 생길
+        때마다 한 줄을 빠뜨릴 자리가 늘어납니다.
+
+        지금 시각이 아니라 마지막 메시지 시각을 씁니다 — 지금으로 두면 방 일곱이
+        전부 같은 시각이 되어 사이드바 정렬이 무의미해집니다.
+        """
+        from apps.chat.models import ChatMessage, ChatRoom
+        from apps.chat.services import touch
+
+        for room in ChatRoom.objects.all():
+            last = (ChatMessage.objects.filter(room=room, deleted_at__isnull=True)
+                    .order_by("-sent_at").first())
+            if last:
+                touch(room, last.sent_at)
+
     def _seed_chat_rooms(self, team, users, owner, now):
         """팀 전체방·나의 AI 대리인방·1:1방·대리인에게 직접 묻는 방. 지금까지
         프로젝트방 하나만 있었다."""
         from apps.chat.models import ChatMessage, ChatRoom, RoomMember, RoomType
-        from apps.chat.services import direct_key, ensure_ai_room, ensure_team_room, peer_agent_key
+        from apps.chat.services import (direct_key, ensure_ai_room, ensure_team_room,
+                                peer_agent_key)
 
         team_room = ensure_team_room(team)
         for pname, body in [
@@ -1206,8 +1269,17 @@ class Command(BaseCommand):
         ai_room = ensure_ai_room(owner)
         ChatMessage.objects.create(room=ai_room, sender=owner, sender_name=owner.name,
                                    body="오늘 일정 알려줘.")
+        # `sender` 는 주인이지만 **말한 것은 대리인**입니다.
+        #
+        # 없으면 화면이 본인이 보낸 메시지로 그립니다. 「자리를 비운 사이
+        # 대리인이 대신 답했다」 가 이 서비스가 보여 줘야 하는 장면인데,
+        # 시연 데이터에서 그것이 사라집니다.
+        #
+        # `SendMessageSkill` 도 `is_agent=True` 로 만듭니다 — 시드가 실제 경로와
+        # 다른 모양을 만들면 화면이 시드에서만 다르게 보입니다.
         ChatMessage.objects.create(
             room=ai_room, sender=owner, sender_name=f"{owner.name}의 Bordo",
+            is_agent=True,
             body="오늘 9시 정기 팀 회의, 13시 디자인 리뷰, 17시 개발팀 Sync가 있습니다.")
 
         # 1:1 방 — 유수인 · 최비성. direct_key가 정렬해서 만드니 누가 먼저
@@ -1235,4 +1307,7 @@ class Command(BaseCommand):
             body="유수인님 대신 여쭤봅니다 — 디자인 시안 오늘 확정되나요?")
         ChatMessage.objects.create(
             room=peer_room, sender=owner, sender_name=f"{owner.name}의 Bordo",
+            is_agent=True,
             body="네, 오늘 중 확정 예정이라고 전달받았습니다.")
+
+
