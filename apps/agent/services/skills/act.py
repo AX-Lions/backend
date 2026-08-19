@@ -123,6 +123,40 @@ class SendMessageSkill(SkillBase):
                            data={"room_id": str(room.id), "message_id": str(msg.id)})
 
 
+def _record_utterance(meeting, owner, body: str):
+    """
+    대리인 발언을 회의록에 남깁니다.
+
+    ## 왜 봇이 되돌려 보내지 않고 여기서 만드는가
+
+    봇은 자기가 올린 메시지를 되받지 않습니다(`bot/cogs/general.py` 의 봇 필터).
+    걸러 주지 않기로 하면 이번엔 대리인이 자기 말에 다시 답합니다. 그래서
+    왕복을 늘리는 대신 만든 쪽에서 남깁니다 — 왕복이 하나 늘면 그 왕복이
+    실패할 때 발언이 **조용히** 사라집니다.
+
+    Discord 를 안 쓰는 회의에서도 같은 문제가 있는데, 봇 쪽 해결로는 그것을
+    못 덮습니다.
+
+    `participant` 는 대리인이 아니라 **주인**입니다. 회의록에서 "누구를 대신한
+    말인가" 가 사라지면 돌아온 사람이 자기 몫을 찾을 수 없습니다.
+    """
+    from apps.meetings.models import Utterance
+
+    from .. import flow
+
+    return Utterance.objects.create(
+        meeting=meeting,
+        participant=owner,
+        participant_name=(flow.agent_display_name(owner) if owner else "Bordo")[:100],
+        body=body,
+        # 비워 두면 안 됩니다. `Utterance.Meta.ordering` 이 `spoken_at` 이라
+        # NULL 인 줄이 회의록 맨 앞으로 올라가, 대리인이 회의가 시작하기도 전에
+        # 말한 것처럼 보입니다.
+        spoken_at=timezone.now(),
+        is_agent=True,
+    )
+
+
 class SpeakInMeetingSkill(SkillBase):
     """
     회의에 발언합니다.
@@ -161,18 +195,25 @@ class SpeakInMeetingSkill(SkillBase):
         # 나갑니다 — 회의에 같은 말이 두 번 뜨면 어지럽습니다.
         key = f"speak:{ctx.run_id}" if ctx.run_id else f"speak:{timezone.now().timestamp()}"
 
-        event, created = OutboxEvent.objects.get_or_create(
-            team_id=meeting.project.team_id, idempotency_key=key,
-            defaults=dict(
-                kind=OutboxEvent.Kind.MESSAGE,
-                channel_id=meeting.discord_channel_id or "",
-                payload={"body": body,
-                         "speaker": getattr(me, "name", ""),
-                         "is_agent": True,
-                         "meeting_id": str(meeting.id)},
-                run_id=ctx.run_id,
-            ),
-        )
+        # 발송함과 회의록을 **한 트랜잭션에** 넣습니다. 둘이 갈라지면 회의에는
+        # 말이 나갔는데 요약에는 없거나(요약에서 대리인만 빠집니다), 요약에는
+        # 있는데 아무도 못 들은 말이 회의록에 남습니다.
+        with transaction.atomic():
+            event, created = OutboxEvent.objects.get_or_create(
+                team_id=meeting.project.team_id, idempotency_key=key,
+                defaults=dict(
+                    kind=OutboxEvent.Kind.MESSAGE,
+                    channel_id=meeting.discord_channel_id or "",
+                    payload={"body": body,
+                             "speaker": getattr(me, "name", ""),
+                             "is_agent": True,
+                             "meeting_id": str(meeting.id)},
+                    run_id=ctx.run_id,
+                ),
+            )
+            if created:
+                _record_utterance(meeting, me, body)
+
         if not created:
             return SkillResult(ok=True, message="이미 발언했습니다.",
                                data={"outbox_id": str(event.id), "duplicate": True})

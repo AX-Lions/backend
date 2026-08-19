@@ -6,6 +6,8 @@
 - **발언은 나가되 사람 발언과 섞이지 않는가** (`is_agent`)
 - **산출물이 확정되지 않는가** (`PENDING_APPROVAL` · `DRAFT`)
 """
+from unittest.mock import patch
+
 from django.test import TestCase
 from django.utils import timezone
 
@@ -16,7 +18,7 @@ from apps.agent.services.skills import (ProposeScheduleSkill, ProposeTaskSkill,
                                         SpeakInMeetingSkill)
 from apps.calendars.models import CalendarEvent, EventStatus
 from apps.chat.models import ChatMessage, ChatRoom, RoomType
-from apps.meetings.models import Meeting
+from apps.meetings.models import Meeting, Utterance
 from apps.orgs.models import Project, Team
 from apps.tasks.models import Task, TaskStatus
 
@@ -118,6 +120,52 @@ class SpeakInMeetingTest(Base):
     def test_missing_meeting(self):
         r = self.skill.run({"body": "x"}, self.ctx(meeting_id=None))
         self.assertEqual(r.error_code, "validation")
+
+    # ── 회의록에도 남는가 (이슈 #84)
+
+    def test_leaves_an_utterance(self):
+        """
+        회의 요약(`build_summary`)과 다음 회의의 논쟁점 예측은 `Utterance` 만
+        읽습니다. 여기 안 남으면 자리를 비운 사람을 대신해 한 말이 요약에서
+        통째로 빠집니다.
+        """
+        self.skill.run({"body": "목요일로 당겨 주세요"}, self.ctx())
+        u = Utterance.objects.get()
+        self.assertEqual(u.meeting, self.meeting)
+        self.assertEqual(u.body, "목요일로 당겨 주세요")
+        self.assertTrue(u.is_agent)
+
+    def test_utterance_points_at_the_owner(self):
+        """누구를 대신한 말인지가 사라지면 돌아온 사람이 자기 몫을 못 찾습니다."""
+        self.skill.run({"body": "x"}, self.ctx())
+        u = Utterance.objects.get()
+        self.assertEqual(u.participant, self.me)
+        self.assertEqual(u.participant_name, "서재민의 Bordo")
+
+    def test_utterance_has_spoken_at(self):
+        """비어 있으면 정렬(`spoken_at`)에서 회의 맨 앞으로 올라갑니다."""
+        self.skill.run({"body": "x"}, self.ctx())
+        self.assertIsNotNone(Utterance.objects.get().spoken_at)
+
+    def test_same_run_records_once(self):
+        """발송함이 한 번이면 회의록도 한 번이어야 합니다."""
+        self.skill.run({"body": "처음"}, self.ctx())
+        self.skill.run({"body": "다시"}, self.ctx())
+        self.assertEqual(Utterance.objects.count(), 1)
+
+    def test_agent_utterance_does_not_wake_an_agent(self):
+        """
+        `targeting.candidates()` 는 발언자 본인만 후보에서 뺍니다. 대리인 발언을
+        그대로 흘리면 다른 불참자의 대리인이 받아 답하고, 그 답을 또 받습니다.
+        """
+        from apps.agent.tasks import run_agent_for_utterance
+
+        self.skill.run({"body": "x"}, self.ctx())
+        u = Utterance.objects.get()
+
+        with patch("apps.agent.services.targeting.pick") as pick:
+            run_agent_for_utterance(str(u.id))
+        pick.assert_not_called()
 
 
 class ProposeTaskTest(Base):

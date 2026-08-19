@@ -48,6 +48,17 @@ def run_agent_for_utterance(utterance_id: str) -> None:
         logger.warning("발언을 찾을 수 없습니다: %s", utterance_id)
         return
 
+    # 대리인 발언으로는 대리인을 깨우지 않습니다.
+    #
+    # `targeting.candidates()` 는 **발언자 본인만** 후보에서 뺍니다. 대리인 발언을
+    # 그대로 흘리면 A 의 대리인이 한 말을 B 의 대리인이 받아 답하고, 그 답을 다시
+    # A 의 대리인이 받습니다 — 둘 사이에 끝이 없습니다.
+    #
+    # 지금은 이 함수를 부르는 곳이 봇 수신(`apps/discord/views.py`) 하나라 여기에
+    # 걸릴 일이 없지만, 회의록 재처리 같은 것이 붙는 순간 열리는 문입니다.
+    if utterance.is_agent:
+        return
+
     try:
         target = targeting.pick(utterance)
     except Exception:                                          # noqa: BLE001
