@@ -279,12 +279,12 @@ class Command(BaseCommand):
         self._seed_payment_meeting(projects[2], users, now)
 
         # 지금까지 하나도 안 채워져 있던 화면들.
-        self._seed_tasks(team, projects, users, meeting, now)
+        self._seed_tasks(projects, users, meeting, now)
         self._seed_calendar(projects, users, meeting, now)
         self._seed_agent_chat(users, meeting, now)
         self._seed_debate(upcoming["디자인 리뷰"], users, owner, now)
-        self._seed_briefing_cards(meeting, agendas, users, owner, now)
-        self._seed_chat_rooms(team, users, owner, now)
+        self._seed_briefing_cards(meeting, agendas, owner, now)
+        self._seed_chat_rooms(team, users, owner)
 
         self.stdout.write(self.style.SUCCESS(
             f"\n시드 완료\n"
@@ -932,7 +932,7 @@ class Command(BaseCommand):
 
     # ═══════════════════════════════════════════ 지금까지 하나도 없던 화면들
 
-    def _seed_tasks(self, team, projects, users, meeting, now):
+    def _seed_tasks(self, projects, users, meeting, now):
         """태스크 화면. AI 후보(PENDING_APPROVAL)를 반드시 섞는다 — 승인
         대기 큐가 비어 있으면 설계 1원칙(사람 최종 승인)을 화면에서 보여줄
         방법이 없다."""
@@ -1125,7 +1125,7 @@ class Command(BaseCommand):
             rationale="일정 수정 자동 승인 설정이 꺼져 있어 대리인이 스스로 정하지 않습니다.",
             evidence=[], created_by_agent=True)
 
-    def _seed_briefing_cards(self, meeting, agendas, users, owner, now):
+    def _seed_briefing_cards(self, meeting, agendas, owner, now):
         """돌아온 사람이 보는 확인이 필요해요·나에게 요청한 내용 카드.
         AiBriefing(narrative)은 이미 있었지만 이 카드들은 하나도 없었다."""
         from apps.meetings.models import BriefingConfirmation, BriefingRequest
@@ -1154,7 +1154,7 @@ class Command(BaseCommand):
             note="8/18 마감이면 QA 기간이 3일뿐인데 괜찮을까요?",
             due_at=now + timedelta(days=2), task=task, occurred_at=meeting.ended_at)
 
-    def _seed_chat_rooms(self, team, users, owner, now):
+    def _seed_chat_rooms(self, team, users, owner):
         """팀 전체방·나의 AI 대리인방·1:1방·대리인에게 직접 묻는 방. 지금까지
         프로젝트방 하나만 있었다."""
         from apps.chat.models import ChatMessage, ChatRoom, RoomMember, RoomType
