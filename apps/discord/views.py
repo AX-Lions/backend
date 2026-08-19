@@ -505,17 +505,31 @@ def meeting_end(request):
     # 빈 thread_id 로 조회하면 웹에서 만든 회의(discord_channel_id="")가 잡혀
     # 엉뚱한 팀의 회의가 강제 종료됩니다.
     thread_id = _require(request.data.get("thread_id"), "thread_id")
-    meeting = Meeting.objects.filter(discord_channel_id=thread_id).first()
-    if meeting is None:
-        raise BordoError("MEETING_NOT_FOUND", "해당 스레드의 회의를 찾을 수 없습니다.")
 
-    if meeting.status == MeetingStatus.ENDED:
-        return Response({"meeting_id": str(meeting.id), "duplicate": True})
+    # select_for_update로 상태 확인·전환을 잠급니다. 같은 스레드에 대해
+    # /meeting-end가 거의 동시에 두 번 오면(더블클릭, 봇 여러 인스턴스 등)
+    # 잠금 없이는 둘 다 status != ENDED를 보고 둘 다 아래 브리핑 생성까지
+    # 진행해 요약이 두 번 만들어집니다. 뒤에 오는 요청은 앞 요청의 트랜잭션이
+    # 끝날 때까지 여기서 기다렸다가, 이미 ENDED로 바뀐 걸 보고 duplicate로
+    # 빠집니다. skip_locked를 안 쓰는 이유가 이것입니다 — outbox_events처럼
+    # 건너뛰면 안 되고, 기다렸다가 최신 상태를 봐야 합니다.
+    #
+    # 잠금은 상태 전환까지만 잡습니다. 브리핑 생성은 LLM을 타 오래 걸릴 수
+    # 있는데, 그 시간 내내 행을 잠가 두면 뒤에 오는 요청이 쓸데없이 오래
+    # 기다립니다.
+    with transaction.atomic():
+        meeting = (Meeting.objects.select_for_update()
+                  .filter(discord_channel_id=thread_id).first())
+        if meeting is None:
+            raise BordoError("MEETING_NOT_FOUND", "해당 스레드의 회의를 찾을 수 없습니다.")
 
-    ended_at = parse_dt(request.data.get("ended_at"), "ended_at") or timezone.now()
-    meeting.status = MeetingStatus.ENDED
-    meeting.ended_at = ended_at
-    meeting.save(update_fields=["status", "ended_at", "updated_at"])
+        if meeting.status == MeetingStatus.ENDED:
+            return Response({"meeting_id": str(meeting.id), "duplicate": True})
+
+        ended_at = parse_dt(request.data.get("ended_at"), "ended_at") or timezone.now()
+        meeting.status = MeetingStatus.ENDED
+        meeting.ended_at = ended_at
+        meeting.save(update_fields=["status", "ended_at", "updated_at"])
 
     # 플로우 진하기를 다시 계산합니다.
     #
