@@ -123,6 +123,13 @@ class SendMessageSkill(SkillBase):
                            data={"room_id": str(room.id), "message_id": str(msg.id)})
 
 
+def _agent_name(owner) -> str:
+    """`{이름}의 Bordo`. 주인이 없으면 서비스 이름으로 둡니다."""
+    from .. import flow
+
+    return flow.agent_display_name(owner) if owner else "Bordo"
+
+
 def _record_utterance(meeting, owner, body: str):
     """
     대리인 발언을 회의록에 남깁니다.
@@ -142,12 +149,10 @@ def _record_utterance(meeting, owner, body: str):
     """
     from apps.meetings.models import Utterance
 
-    from .. import flow
-
     return Utterance.objects.create(
         meeting=meeting,
         participant=owner,
-        participant_name=(flow.agent_display_name(owner) if owner else "Bordo")[:100],
+        participant_name=_agent_name(owner)[:100],
         body=body,
         # 비워 두면 안 됩니다. `Utterance.Meta.ordering` 이 `spoken_at` 이라
         # NULL 인 줄이 회의록 맨 앞으로 올라가, 대리인이 회의가 시작하기도 전에
@@ -204,8 +209,13 @@ class SpeakInMeetingSkill(SkillBase):
                 defaults=dict(
                     kind=OutboxEvent.Kind.MESSAGE,
                     channel_id=meeting.discord_channel_id or "",
+                    # 봇이 `🤖 **{speaker}**: ` 로 붙입니다. 본인 이름을 넣으면
+                    # 자리에 없는 사람이 직접 말한 것처럼 보이고, 불참자가 둘
+                    # 이상이면 누구를 대신한 말인지도 구별되지 않습니다.
+                    # 호칭은 `agent_display_name()` 한 군데서만 만듭니다 —
+                    # 플로우 노드·채팅방 제목·회의록과 같은 표기입니다.
                     payload={"body": body,
-                             "speaker": getattr(me, "name", ""),
+                             "speaker": _agent_name(me),
                              "is_agent": True,
                              "meeting_id": str(meeting.id)},
                     run_id=ctx.run_id,

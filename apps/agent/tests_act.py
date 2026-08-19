@@ -105,6 +105,15 @@ class SpeakInMeetingTest(Base):
         self.assertEqual(e.payload["body"], "진행 중입니다")
         self.assertTrue(e.payload["is_agent"])
 
+    def test_speaker_is_the_agents_name(self):
+        """
+        봇이 `🤖 **{speaker}**: ` 로 붙입니다. 본인 이름이면 자리에 없는 사람이
+        직접 말한 것처럼 보이고, 불참자가 둘 이상이면 구별도 안 됩니다.
+        """
+        self.skill.run({"body": "x"}, self.ctx())
+        self.assertEqual(OutboxEvent.objects.get().payload["speaker"],
+                         "서재민의 Bordo")
+
     def test_channel_is_carried(self):
         self.skill.run({"body": "x"}, self.ctx())
         self.assertEqual(OutboxEvent.objects.get().channel_id, "ch-1")
