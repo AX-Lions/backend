@@ -283,6 +283,11 @@ class MeetingCog(commands.Cog):
                 await interaction.followup.send("이미 종료된 회의입니다.", ephemeral=True)
                 return
 
+            # Backend가 이미 종료를 확정했다 — 이 아래 Discord 게시가 실패해도
+            # 되살릴 이유가 없는(이미 끝난) 회의다. 게시 전에 먼저 정리해서,
+            # 임베드 전송 실패 같은 이후 예외가 캐시 정리 자체를 건너뛰지 않게 한다.
+            self.active_meeting_threads.pop(thread_id, None)
+
             agenda = self._agenda_from_thread(interaction.channel)
 
             summary = result.get("summary")
@@ -309,9 +314,5 @@ class MeetingCog(commands.Cog):
             await interaction.channel.send("🔴 **회의가 종료되었습니다.**")
 
             await interaction.followup.send("회의를 종료했습니다.")
-
-            # 성공했으니 로컬 캐시도 정리한다(있었다면) — delegate.py의 폴백 스캔이
-            # 끝난 회의를 계속 들고 있지 않도록. 판단 자체는 이 값에 의존하지 않았다.
-            self.active_meeting_threads.pop(thread_id, None)
         finally:
             self._ending_threads.discard(thread_id)
