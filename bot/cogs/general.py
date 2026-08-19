@@ -8,9 +8,10 @@ log = logging.getLogger("bordo")
 
 
 class GeneralCog(commands.Cog):
-    def __init__(self, bot, backend):
+    def __init__(self, bot, backend, gate):
         self.bot = bot
         self.backend = backend
+        self.gate = gate
 
         self.seen_message_ids: set[str] = set()
 
@@ -22,10 +23,14 @@ class GeneralCog(commands.Cog):
         if message.guild is None:
             return  # DM은 대상 밖 (guild_id 필요한 idempotency_key 구성 불가)
 
+        # 연결 안 된 서버의 채널인지 확인 후 아니면 return (권한 없는 채널은 무시).
+        # 개인(발신자) 게이트는 안 건다 — 미연결 참석자의 발언까지 막으면
+        # 회의록 원문이 비고, "원본을 지우지 않는다" 원칙과 충돌한다.
+        if not await self.gate.guild_linked(message.guild.id):
+            return
+
         # 멘션이 와도 봇이 직접 답하지 않는다. 그대로 Backend로 넘기면
         # 대리인(ReAct·POLICY·유보)이 대상 판정까지 한다 — 봇은 판단하지 않는다.
-
-        # TODO: 연결된 팀의 채널인지 확인 후 아니면 return (권한 없는 채널은 무시)
 
         idempotency_key = f"{message.guild.id}:{message.channel.id}:{message.id}"
 
