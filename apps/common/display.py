@@ -134,3 +134,17 @@ def country_of(tz_name: str) -> str:
     if hit:
         return hit
     return name.rsplit("/", 1)[-1].replace("_", " ")
+
+
+def avatar_of(url) -> str | None:
+    """
+    사진이 없으면 `null` 입니다.
+
+    모델은 빈 문자열을 기본값으로 두는데, 그대로 내보내면 어떤 자리는 `null` 이고
+    어떤 자리는 `""` 라 화면이 "사진 없음" 을 두 가지로 판정해야 합니다. 실제로
+    두 모양이 함께 나가고 있었습니다.
+
+    `null` 로 통일합니다. 빈 문자열은 "값이 있는데 비어 있다" 로도 읽혀서,
+    기본 얼굴을 그릴지 말지를 화면이 매번 다시 정하게 만듭니다.
+    """
+    return (url or "").strip() or None

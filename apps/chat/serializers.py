@@ -6,6 +6,8 @@
 """
 from rest_framework import serializers
 
+from apps.common.display import avatar_of
+
 from .models import ChatAttachment, ChatMessage, ChatRoom, DailyChatSummary
 
 
@@ -36,7 +38,8 @@ class MessageSerializer(serializers.ModelSerializer):
         return {
             "id": str(obj.sender_id) if obj.sender_id else None,
             "name": obj.sender_name,
-            "avatar_url": (self.context.get("avatars") or {}).get(obj.sender_id),
+            "avatar_url": avatar_of((self.context.get("avatars") or {})
+                                    .get(obj.sender_id)),
             "is_agent": obj.is_agent,
         }
 
