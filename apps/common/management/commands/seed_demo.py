@@ -363,6 +363,7 @@ class Command(BaseCommand):
         self._seed_briefing_cards(meeting, agendas, users, owner, now)
         self._seed_chat_rooms(team, users, owner, now)
         self._seed_away_handled(projects, users, owner, now)
+        self._seed_message_variety(projects, users, owner, meeting, now)
         self._seed_chat_read_state(projects, users, owner, now)
         self._touch_rooms()
 
@@ -1473,6 +1474,104 @@ class Command(BaseCommand):
         reply(project_room, "네, 오늘 반영했습니다.",
               now - timedelta(minutes=58), away=False)
 
+    def _seed_message_variety(self, projects, users, owner, meeting, now):
+        """
+        메시지 상태 다양성 (#137 4번). 지금까지 시드가 만드는 메시지는
+        전부 "사람이 방금 보낸 평범한 한 줄"이었다 — 삭제·수정·첨부·유보
+        연결·긴 글·줄바꿈·이모지 같은 갈래가 화면에서 한 번도 안 그려졌다.
+        """
+        from apps.agent.models import PendingQuestion
+        from apps.chat.models import ChatAttachment, ChatMessage, ChatRoom, RoomType
+        from apps.chat.services import direct_key
+
+        main = projects[0]
+        team_room = ChatRoom.objects.get(type=RoomType.TEAM)
+        project_room = ChatRoom.objects.get(type=RoomType.PROJECT, project=main)
+        direct_room = ChatRoom.objects.get(
+            type=RoomType.DIRECT, dedupe_key=direct_key(owner.id, users["최비성"].id))
+
+        def make(room, sender_name, body, sent_at, **extra):
+            msg = ChatMessage.objects.create(
+                room=room, sender=users[sender_name], sender_name=sender_name,
+                body=body, **extra)
+            ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+            return msg
+
+        # 지운 메시지 — 자리는 남기고 내용만 비운다. 모델 docstring이 그렇게
+        # 설계한 이유를 이미 적어 뒀다("남은 사람이 무슨 얘기였는지").
+        deleted = make(team_room, "강다은", "이 팀 아이디로 다 같이 로그인해도 되나요?",
+                       now - timedelta(days=4))
+        deleted.body, deleted.deleted_at = "", now - timedelta(days=3, hours=23)
+        deleted.save(update_fields=["body", "deleted_at"])
+
+        # 고친 메시지.
+        edited = make(team_room, "최비성", "회의는 15시로 옮겼습니다.",
+                     now - timedelta(hours=6))
+        edited.edited_at = now - timedelta(hours=5, minutes=50)
+        edited.save(update_fields=["edited_at"])
+
+        # 첨부 1개.
+        with_file = make(project_room, "임수연", "디자인 가이드 문서 공유드립니다.",
+                         now - timedelta(hours=7))
+        ChatAttachment.objects.create(
+            room=project_room, uploader=users["임수연"], message=with_file,
+            status=ChatAttachment.Status.ATTACHED, kind=ChatAttachment.Kind.FILE,
+            name="디자인_가이드.pdf", size_bytes=482_000, mime_type="application/pdf",
+            url="/static/demo/디자인_가이드.pdf")
+
+        # 이미지 첨부.
+        with_image = make(project_room, "임수연", "시안 스크린샷입니다.",
+                          now - timedelta(hours=6, minutes=55))
+        ChatAttachment.objects.create(
+            room=project_room, uploader=users["임수연"], message=with_image,
+            status=ChatAttachment.Status.ATTACHED, kind=ChatAttachment.Kind.IMAGE,
+            name="시안.png", size_bytes=1_240_000, mime_type="image/png",
+            url="/static/demo/시안.png")
+
+        # 첨부 2개 이상.
+        with_two = make(project_room, "최비성", "API 명세서 최신본과 변경 이력입니다.",
+                        now - timedelta(hours=6, minutes=40))
+        ChatAttachment.objects.create(
+            room=project_room, uploader=users["최비성"], message=with_two,
+            status=ChatAttachment.Status.ATTACHED, kind=ChatAttachment.Kind.FILE,
+            name="API_명세서_v2.pdf", size_bytes=310_000, mime_type="application/pdf",
+            url="/static/demo/API_명세서_v2.pdf")
+        ChatAttachment.objects.create(
+            room=project_room, uploader=users["최비성"], message=with_two,
+            status=ChatAttachment.Status.ATTACHED, kind=ChatAttachment.Kind.FILE,
+            name="변경이력.xlsx", size_bytes=52_000,
+            mime_type="application/vnd.ms-excel", url="/static/demo/변경이력.xlsx")
+
+        # 아주 긴 메시지 — 말풍선 최대폭·줄바꿈 확인용.
+        make(direct_room, "최비성",
+            "결제 API 응답 구조가 이번에 꽤 크게 바뀌어서 정리해서 남깁니다. " * 16,
+            now - timedelta(hours=3))
+
+        # 줄바꿈이 든 메시지 — 회의 결과 정리처럼 목록형 본문.
+        make(team_room, "유수인",
+            "오늘 회의 정리입니다.\n"
+            "1. 디자인 시안은 8/18까지 확정\n"
+            "2. 개발 일정은 1주 연장(승인 대기)\n"
+            "3. 다음 회의는 API 명세 재검토",
+            now - timedelta(hours=1, minutes=30))
+
+        # 이모지만 있는 한 줄.
+        make(team_room, "서재민", "🎉👍", now - timedelta(minutes=40))
+
+        # 유보 답변에 연결된 메시지 — pending_question이 브리핑 카드를 닫는
+        # 근거다. 이미 하나(handle()에서 만든 미답변 것) 있는데, 그건 아직
+        # 채팅으로 안 이어졌다. 여기서는 **답변까지 끝난** 버전을 만든다.
+        pq = PendingQuestion.objects.create(
+            meeting=meeting, asker=users["강다은"], asker_name="강다은",
+            target_user=owner, title="참여자 프로필 제작 담당자",
+            body="참여자 프로필 카드는 결국 누가 맡기로 했나요?",
+            chat_room_id=team_room.id)
+        answer = make(team_room, "유수인", "제가 맡기로 했습니다 — 이번 주 안에 올릴게요.",
+                     now - timedelta(minutes=35), pending_question=pq)
+        pq.answered_at = answer.sent_at
+        pq.answer_body = answer.body
+        pq.save(update_fields=["answered_at", "answer_body"])
+
     def _seed_chat_read_state(self, projects, users, owner, now):
         """
         미읽음 다양성 (#137 6번). `RoomMember.last_read_at` 을 아무도 안
@@ -1485,6 +1584,10 @@ class Command(BaseCommand):
         - academic 프로젝트 방은 메시지를 더 채워 두 자리(10건 이상)
           미읽음 방을 만든다 — 배지 폭이 한 자리일 때만 맞춰져 있으면
           여기서 깨진다.
+        - `읽음 N`(read_count)은 저장 필드가 아니라 "나 말고 다른 멤버가
+          이 메시지 이후로 읽었는가"로 매번 계산된다(`_read_counts()`).
+          main 프로젝트 방에서 유수인만 읽음 처리하면 다른 사람 기준으로는
+          전부 0건이라, 최비성도 같이 읽음 처리해서 1건 이상이 보이게 한다.
         """
         from apps.chat.models import ChatMessage, ChatRoom, RoomMember, RoomType
 
@@ -1492,6 +1595,8 @@ class Command(BaseCommand):
 
         main_room = ChatRoom.objects.get(type=RoomType.PROJECT, project=main)
         RoomMember.objects.filter(room=main_room, user=owner).update(last_read_at=now)
+        RoomMember.objects.filter(room=main_room, user=users["최비성"]).update(
+            last_read_at=now)
 
         academic_room = ChatRoom.objects.get(type=RoomType.PROJECT, project=academic)
         fillers = ["강다은", "임수연", "최비성", "서재민", "강다은", "임수연", "최비성", "서재민"]
