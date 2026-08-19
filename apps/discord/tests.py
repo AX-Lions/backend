@@ -444,11 +444,19 @@ class EmptyValueTest(Base):
         self.assertEqual(self.web_meeting.status, MeetingStatus.ACTIVE)
 
     def test_messages_cannot_leak_into_a_web_meeting(self):
-        """빈 thread_id 로 웹 회의 스레드에 발언이 새어 들어갔습니다."""
+        """
+        빈 thread_id 로 웹 회의 스레드에 발언이 새어 들어갔습니다.
+
+        막는 방식은 400 에서 **202 로 바뀌었습니다.** 봇이 스레드가 아닌 채널의
+        메시지에도 `thread_id: null` 을 보내기 때문에, 400 으로 세우면 평소 잡담
+        한 줄마다 오류가 쌓입니다. 새어 들어가지 않는다는 것이 지켜야 할 것이고
+        상태 코드는 그 수단입니다.
+        """
         r = self.post("/discord/messages",
                       {"thread_id": "", "content": "새어 들어간 발언",
                        "author_discord_id": "dc-mate"})
-        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.status_code, 202)
+        self.assertEqual(r.data["skipped"], "not_a_thread")
         self.assertEqual(Utterance.objects.filter(meeting=self.web_meeting).count(), 0)
 
     def test_meeting_start_skips_blank_participants(self):

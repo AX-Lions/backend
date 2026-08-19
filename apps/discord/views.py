@@ -579,8 +579,19 @@ def discord_messages(request):
     from apps.agent.tasks import run_agent_for_utterance
     from apps.meetings.models import Meeting, MeetingStatus, Utterance
 
-    # 위와 같은 이유입니다. 빈 값이면 웹 회의 스레드로 발언이 새어 들어갑니다.
-    thread_id = _require(request.data.get("thread_id"), "thread_id")
+    # 스레드가 아닌 채널의 메시지는 조용히 흘려보냅니다.
+    #
+    # 봇은 길드의 모든 메시지를 넘기는데, 스레드가 아니면 `thread_id` 가 `null`
+    # 입니다(`bot/cogs/general.py`). 여기서 400 을 내면 **평소 잡담 한 줄마다**
+    # 오류가 쌓여, 정작 봐야 할 오류가 그 안에 묻힙니다. 회의 밖 발언을 버리는
+    # 것은 아래 `no_active_meeting` 과 같은 판단이라 응답도 같은 모양으로 냅니다.
+    #
+    # 조회 전에 빠져나가야 합니다 — 빈 값으로 조회하면 웹에서 만든 회의
+    # (`discord_channel_id=""`)가 잡혀 발언이 남의 회의로 새어 들어갑니다.
+    thread_id = str(request.data.get("thread_id") or "").strip()
+    if not thread_id:
+        return Response({"skipped": "not_a_thread"}, status=202)
+
     body = (request.data.get("content") or request.data.get("body") or "").strip()
     if not body:
         return Response({"skipped": "empty"}, status=202)
