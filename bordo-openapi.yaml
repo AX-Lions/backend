@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Bordo API
-  version: 0.0.6
+  version: 0.0.7
   summary: AI 협업 대리인 서비스 — 와이어프레임 실물 대조판
   description: |2
 
@@ -6032,15 +6032,106 @@ paths:
               - '123456789012345678'
               intents_ok: true
               resumed: false
+  /internal/v1/meetings/scheduled:
+    get:
+      tags:
+      - 13. Internal API (Discord Bot)
+      summary: 아직 스레드가 안 붙은 예정 회의
+      description: |-
+        `/meeting-start` 의 **자동완성**이 씁니다.
+
+        이 경로가 생기기 전에는 봇이 멘션으로 참가자를 받아 회의를 즉석에서 만들었습니다.
+        실제 흐름은 **웹이 원본이고 Discord 는 회의 공간을 제공**하는 것이라, 웹에서 만들어 둔 회의에 스레드만 붙이는 쪽이 맞습니다 (이슈 #89).
+
+        | | |
+        |---|---|
+        | 대상 | `guild_id` 로 찾은 팀의 프로젝트 회의 중 `DRAFT`·`SCHEDULED`·`CONFIRMED` 이고 `discord_channel_id` 가 빈 것 |
+        | 구간 | 지금 −1시간 ~ +6시간. 지난달 회의까지 뜨면 자동완성에서 고를 수가 없습니다 |
+        | 정렬 | **지금 시각과의 거리순.** 오름차순으로 두면 한참 전에 잡아 둔 회의가 목록 맨 앞을 차지합니다 |
+
+        `CONFIRMED` 를 빼면 안 됩니다 — 캘린더에서 일정을 확정하면 회의가 그 상태로 올라가는데, 그게 가장 흔한 경로입니다.
+        한 팀에 프로젝트가 여럿이면 섞여 나오므로 `project_name` 을 함께 내려줍니다(자동완성 라벨용).
+      operationId: internalScheduledMeetings
+      responses:
+        '200':
+          description: 조회됨
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        meeting_id: {type: string}
+                        project_id: {type: string}
+                        project_name: {type: string}
+                        title: {type: string}
+                        status: {type: string}
+                        scheduled_at: {type: string, format: date-time}
+                        participants:
+                          type: array
+                          items:
+                            $ref: '#/components/schemas/InternalParticipant'
+              example:
+                count: 1
+                results:
+                - meeting_id: meeting_3
+                  project_id: prj_b
+                  project_name: 멋사 중앙해커톤
+                  title: 글로벌 회의 일정 및 개발 방향 논의
+                  status: CONFIRMED
+                  scheduled_at: '2026-08-19T14:00:00+09:00'
+                  participants:
+                  - discord_user_id: '111'
+                    user_id: usr_backend_01
+                    user_name: 서재민
+                    delegated: true
+                    attendance: DELEGATED
+        '400':
+          description: '`guild_id` 없음'
+        '401':
+          $ref: '#/components/responses/E401'
+        '404':
+          description: 이 Discord 서버에 연결된 팀 없음 (`TEAM_NOT_FOUND`)
+      security:
+      - serviceToken: []
+      parameters:
+      - name: guild_id
+        in: query
+        required: true
+        schema:
+          type: string
+        example: '123456789012345678'
   /internal/v1/meetings/start:
     post:
       tags:
       - 13. Internal API (Discord Bot)
       summary: 회의 시작
       description: |-
-        `/meeting-start` 처리. 음성 채널 참석자와 텍스트 채널 좌표를 전달한다.
+        `/meeting-start` 처리 — **웹에서 만들어 둔 회의에 스레드를 붙인다.**
 
-        Backend 는 `meeting_id` 와 **대리 참석자 정보**를 돌려주고, Bot 은 이를 메모리에 보관해 이후 메시지에 `meeting_id` 를 붙인다.
+        `meeting_id` 를 보내면 그 회의를 쓴다. 참석자는 웹에서 회의를 만들 때 프로젝트 참여자 전원이 이미 등록돼 있으므로 **새로 만들지 않는다** —
+        봇이 보낸 멘션으로 덮으면 초대받은 사람이 목록에서 사라진다. 대리 참석 여부(`MeetingParticipant.delegated`)도 그대로 쓴다.
+
+        | 상황 | 결과 |
+        |---|---|
+        | 같은 `thread_id` 로 재시도 | `200` + `duplicate: true` (재시도 안전) |
+        | `meeting_id` 가 `DRAFT`·`SCHEDULED`·`CONFIRMED` | `200` — 스레드를 붙이고 `ACTIVE` 로 |
+        | `meeting_id` 가 그 외 상태 | `409 MEETING_ALREADY_STARTED` |
+        | `meeting_id` 를 못 찾음 · 남의 팀 회의 | `404 MEETING_NOT_FOUND` — **절대 즉석 생성으로 빠지지 않는다** |
+        | `meeting_id` 없음 | 옛 방식대로 즉석 생성 (`201`) |
+
+        > **`meeting_id` 를 못 찾았을 때 즉석 생성으로 빠지지 않는 것이 핵심이다.** 예전에는 `meeting_id` 를 아예 읽지 않아,
+        > 봇이 보내도 무시하고 아무 프로젝트에 제목 `Discord 회의` 짜리 참석자 0명 회의를 만들었다. 봇의 버그와 정상 동작이
+        > 구별되지 않는다 (이슈 #89).
+        >
+        > 즉석 생성은 **옛 봇을 위한 폴백**이다. 봇이 새 방식으로 배포되기 전에 지우면 그 사이 회의 시작이 통째로 막히므로,
+        > 배포가 끝나면 지운다.
       operationId: internalMeetingStart
       responses:
         '201':
@@ -12311,6 +12402,37 @@ components:
       - COMPLETED
       - REJECTED
       description: '**AI가 만든 태스크는 예외 없이 `PENDING_APPROVAL` 로 시작한다.** 사람이 승인해야 `TODO` 가 된다.'
+    Attendance:
+      type: string
+      enum:
+      - PENDING
+      - PRESENT
+      - ABSENT
+      - DELEGATED
+      description: |-
+        참석 상태. `DELEGATED` 는 **대리인이 대신 참석**하는 것이고 `ABSENT` 는 아무도 안 온 것이다.
+        웹과 봇이 같은 값을 쓴다 — 갈리면 홈 카드 뱃지가 어디서 눌렀느냐에 따라 달라진다.
+    InternalParticipant:
+      type: object
+      description: 봇이 스레드 안내와 대리 참석 표시에 쓰는 참석자 한 줄.
+      properties:
+        discord_user_id:
+          type: string
+          nullable: true
+          description: 계정을 아직 안 이은 사람은 `null` 이다.
+        user_id:
+          type: string
+        user_name:
+          type: string
+        delegated:
+          type: boolean
+          description: 대리 참석을 켰는가. Discord 로컬 상태를 두지 말고 이 값을 쓴다.
+        attendance:
+          $ref: '#/components/schemas/Attendance'
+      required:
+      - user_id
+      - user_name
+      - delegated
     MeetingPrepHeader:
       type: object
       description: 「회의 대리 참석 준비」 헤더. **문자열은 서버가 완성해 내려준다** — 브라우저 시간대로 찍으면 시간대가 다른 팀원이 같은 회의를 다른 시각으로 본다.

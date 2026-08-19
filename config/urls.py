@@ -194,6 +194,8 @@ urlpatterns = [
     path(f"{INTERNAL}/delegate/on", discord_internal.delegate_on),
     path(f"{INTERNAL}/delegate/off", discord_internal.delegate_off),
     path(f"{INTERNAL}/deputy/ask", discord_internal.deputy_ask),
+    # 웹에서 만들어 둔 예정 회의 — /meeting-start 자동완성이 씁니다 (이슈 #89)
+    path(f"{INTERNAL}/meetings/scheduled", discord_internal.meetings_scheduled),
     path(f"{INTERNAL}/meetings/start", discord_internal.meeting_start),
     path(f"{INTERNAL}/meetings/end", discord_internal.meeting_end),
     # 봇이 재시작해도 대리 참석자를 되물을 수 있게 (인메모리 set 을 대신합니다)
