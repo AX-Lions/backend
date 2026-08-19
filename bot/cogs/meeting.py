@@ -11,11 +11,117 @@ from services.backend import get_error
 log = logging.getLogger("bordo")
 
 
+
+#: 회의 시작 팝업을 열어 두는 시간.
+#:
+#: 회의는 이미 시작됐습니다. 오래 기다리면 그동안 오간 말을 대리인이 못 듣고,
+#: 짧으면 자리에 있는 사람이 누를 틈이 없습니다. 답이 없다는 것은 대개 자리에
+#: 없다는 뜻이라 **기본값을 대리 참석 쪽으로** 두고 시간을 짧게 잡습니다.
+ATTENDANCE_TIMEOUT = 10.0
+
+
+class AttendanceView(discord.ui.View):
+    """
+    `직접 참석` / `Bordo 에게 맡기기` 를 묻는 팝업.
+
+    ## 왜 서버가 아니라 봇이 타이머를 드는가
+
+    서버가 들면 봇이 죽어 있을 때 **아무에게도 안 물어보고 대리 처리**됩니다.
+    묻지도 않고 대리인을 세우는 것이 이 서비스에서 제일 나쁜 실패입니다.
+
+    ## 왜 스레드 안 메시지인가
+
+    DM 으로 보내면 DM 을 막아 둔 사람에게 영영 안 닿고, 회의 스레드에는
+    아무 흔적이 없어 다른 사람이 왜 저 사람만 빠졌는지 모릅니다.
+    """
+
+    def __init__(self, cog, thread_id: int, pending: dict[str, str]):
+        super().__init__(timeout=ATTENDANCE_TIMEOUT)
+        self.cog = cog
+        self.thread_id = thread_id
+        #: discord_user_id → 대리인 호칭. 답한 사람은 여기서 빠집니다.
+        self.pending = dict(pending)
+        self.message: discord.Message | None = None
+
+    async def _answer(self, interaction: discord.Interaction, *, delegated: bool):
+        uid = str(interaction.user.id)
+        if uid not in self.pending:
+            await interaction.response.send_message(
+                "이 회의에서 참석 여부를 물은 대상이 아닙니다.", ephemeral=True)
+            return
+
+        result = await self.cog.backend.post(
+            "/internal/v1/meetings/absence",
+            json={"thread_id": str(self.thread_id), "discord_user_id": uid,
+                  "delegated": delegated},
+        )
+        if result is None or get_error(result):
+            # 못 눌렀다고 알려 줘야 합니다. 조용히 넘어가면 본인은 눌렀다고
+            # 생각하는데 타임아웃이 대리 참석으로 넘겨 버립니다.
+            await interaction.response.send_message(
+                "지금은 저장하지 못했습니다. 다시 눌러 주세요.", ephemeral=True)
+            return
+
+        agent = self.pending.pop(uid, "")
+        await interaction.response.send_message(
+            "직접 참석으로 표시했습니다." if not delegated
+            else f"{agent or 'Bordo'} 가 대신 참석합니다.", ephemeral=True)
+        await self.cog.announce_to_thread(
+            self.thread_id,
+            f"🙋 <@{uid}> 님이 직접 참석합니다." if not delegated
+            else f"🤖 <@{uid}> 님 대신 **{agent or 'Bordo'}** 가 참석합니다.")
+
+        if not self.pending:
+            self.stop()
+            await self._close("모두 답했습니다.")
+
+    @discord.ui.button(label="직접 참석합니다", style=discord.ButtonStyle.secondary)
+    async def attend(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._answer(interaction, delegated=False)
+
+    @discord.ui.button(label="Bordo 에게 맡기기", style=discord.ButtonStyle.primary)
+    async def delegate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._answer(interaction, delegated=True)
+
+    async def on_timeout(self):
+        # 답이 없는 사람은 대리 참석으로 넘깁니다. 자리에 없어서 못 누른 것이
+        # 대부분인데, 여기서 아무것도 안 하면 그 사람 몫은 회의에서 통째로
+        # 빠지고 돌아와서 볼 브리핑도 안 생깁니다(브리핑은 대리 참석자에게만).
+        handed = []
+        for uid, agent in list(self.pending.items()):
+            result = await self.cog.backend.post(
+                "/internal/v1/meetings/absence",
+                json={"thread_id": str(self.thread_id), "discord_user_id": uid,
+                      "delegated": True},
+            )
+            if result is None or get_error(result):
+                log.warning("자동 대리 전환 실패 thread=%s user=%s", self.thread_id, uid)
+                continue
+            handed.append((uid, agent))
+
+        await self._close("시간이 지나 자동으로 넘겼습니다.")
+        if handed:
+            names = ", ".join(f"<@{u}> 님 대신 **{a or 'Bordo'}**" for u, a in handed)
+            await self.cog.announce_to_thread(
+                self.thread_id, f"🤖 답이 없어 {names} 가 참석합니다.")
+
+    async def _close(self, note: str):
+        if self.message is None:
+            return
+        for child in self.children:
+            child.disabled = True
+        try:
+            await self.message.edit(content=f"참석 확인이 끝났습니다 — {note}", view=self)
+        except discord.HTTPException as exc:
+            log.warning("참석 팝업 정리 실패 thread=%s: %s", self.thread_id, exc)
+
+
 class MeetingCog(commands.Cog):
 
-    def __init__(self, bot, backend):
+    def __init__(self, bot, backend, gate):
         self.bot = bot
         self.backend = backend
+        self.gate = gate
 
         # [기존] _active_meeting_threads
         self.active_meeting_threads: dict[int, dict] = {}
@@ -25,6 +131,12 @@ class MeetingCog(commands.Cog):
         # 짧게 캐시해 같은 명령 입력 중에는 재사용한다.
         self._scheduled_cache: dict[int, tuple[float, list]] = {}
         self._SCHEDULED_CACHE_TTL = 5.0  # 초
+
+        # meeting_end가 지금 처리 중인 thread_id. 재시작 생존은 필요 없다 —
+        # 오직 같은 프로세스 안에서 /meeting-end가 거의 동시에 두 번 불렸을 때만
+        # 막으면 된다. Backend의 meeting_end가 select_for_update 없이 읽고
+        # 쓰므로, 이게 없으면 요약이 두 번 게시될 수 있다.
+        self._ending_threads: set[int] = set()
     # --------------------------------------------------
     # 공통 함수
     # --------------------------------------------------
@@ -44,6 +156,16 @@ class MeetingCog(commands.Cog):
         except ValueError:
             return iso_str
         return dt.strftime("%m/%d %H:%M")
+
+    @staticmethod
+    def _agenda_from_thread(channel) -> str:
+        """meeting-start가 스레드 이름을 '[회의] {날짜} | {제목}'로 짓는다.
+        meeting-end는 로컬 메모리 없이 동작하므로, 요약 임베드 제목에 쓸
+        안건을 여기서 복구한다."""
+        name = getattr(channel, "name", "") or ""
+        if " | " in name:
+            return name.split(" | ", 1)[1]
+        return name or "회의"
 
     async def announce_to_thread(self, thread_id: int, text: str) -> None:
         """[TEMP]
@@ -108,7 +230,13 @@ class MeetingCog(commands.Cog):
     @app_commands.autocomplete(meeting_id=_meeting_id_autocomplete)
     @app_commands.guild_only()
     async def meeting_start(self, interaction: discord.Interaction, meeting_id: str):
+        # defer가 먼저다 — 게이트의 backend.get()이 캐시 미스일 때 몇 초씩
+        # 걸릴 수 있는데, Discord는 상호작용을 3초 안에 확인 응답 안 하면
+        # 토큰을 무효화한다.
         await interaction.response.defer()
+
+        if not await self.gate.require_guild(interaction):
+            return
 
         # 제목은 Backend가 갖고 있는 예정된 회의에서 나온다 — 이 시점엔 아직 모르니
         # 임시 이름으로 스레드부터 만들고, 응답을 받은 뒤 실제 제목으로 바꾼다.
@@ -180,7 +308,46 @@ class MeetingCog(commands.Cog):
 
         await thread.send(announcement)
 
+        await self._ask_attendance(thread)
+
         await interaction.followup.send(f"회의 스레드를 만들었습니다: {thread.mention}")
+
+    async def _ask_attendance(self, thread) -> None:
+        """
+        아직 참석 여부를 안 정한 사람에게 묻습니다.
+
+        **누가 대상인지는 서버가 정합니다.** 봇이 나름의 규칙으로 고르면
+        "대리인이 답할 사람" 이 서버와 갈려, 대신 참석한다고 알렸는데 정작
+        대리인은 안 깨어납니다. `asked=false` 가 그 목록입니다.
+
+        물어볼 사람이 없으면 아무 메시지도 안 냅니다 — 웹에서 미리 불참을
+        등록해 둔 회의에 빈 팝업이 뜨면 이미 정한 것을 다시 묻는 것처럼 보입니다.
+        """
+        result = await self.backend.get(
+            "/internal/v1/meetings/participants",
+            params={"thread_id": str(thread.id)},
+        )
+        if not isinstance(result, dict) or get_error(result):
+            # 못 물어본 것뿐입니다. 회의 자체는 이미 열렸으니 막지 않습니다.
+            log.warning("참석 대상 조회 실패 thread=%s", thread.id)
+            return
+
+        pending = {
+            p["discord_user_id"]: p.get("agent_name") or ""
+            for p in result.get("results", [])
+            if p.get("discord_user_id") and not p.get("asked")
+        }
+        if not pending:
+            return
+
+        view = AttendanceView(self, thread.id, pending)
+        mentions = " ".join(f"<@{uid}>" for uid in pending)
+        view.message = await thread.send(
+            f"{mentions}\n"
+            f"회의가 시작됐습니다. 직접 참석하시나요?\n"
+            f"**{int(ATTENDANCE_TIMEOUT)}초 안에 답이 없으면 Bordo 가 대신 참석합니다.**",
+            view=view,
+        )
 
     # --------------------------------------------------
     # /meeting-end
@@ -198,83 +365,105 @@ class MeetingCog(commands.Cog):
 
         thread_id = interaction.channel_id
 
-        if thread_id not in self.active_meeting_threads:
+        # Backend의 meeting_end는 select_for_update 없이 상태를 읽고 쓴다.
+        # /meeting-end가 같은 스레드에서 거의 동시에 두 번 불리면 둘 다
+        # status != ENDED를 보고 둘 다 종료 처리해 요약이 두 번 게시될 수
+        # 있다 — 같은 프로세스 안에서만이라도 겹치지 않게 막는다. 재시작 생존은
+        # 필요 없다(그 사이엔 처리 중인 호출이 없으니).
+        if thread_id in self._ending_threads:
             await interaction.followup.send(
-                "이 스레드에서 진행 중인 회의가 없습니다. "
-                "회의 스레드 안에서 실행해주세요."
+                "이미 종료를 처리하는 중입니다. 잠시 기다려주세요.", ephemeral=True
             )
             return
 
-        meeting = self.active_meeting_threads.pop(thread_id)
+        self._ending_threads.add(thread_id)
+        try:
+            # active_meeting_threads(봇 메모리)를 사전 체크로 쓰지 않는다. 봇이
+            # 재시작하면 이 dict는 비는데, Backend는 discord_channel_id로 회의를
+            # 정확히 알고 있다 — 로컬 기억이 없어도 일단 물어본다.
+            async with interaction.channel.typing():
+                result = await self.backend.post("/internal/v1/meetings/end",
+                    json={
+                        "guild_id": str(interaction.guild_id),
+                        "thread_id": str(thread_id),
+                        "ended_by": str(interaction.user.id),
+                        "ended_at": self._now_iso(),
+                    }
+                )
 
-        # 봇은 원본을 만들지 않는다. 대화는 이미 on_message에서 발언마다
-        # Backend로 전달돼 있고, 요약도 Backend가 그 발언들로 만든다.
-        async with interaction.channel.typing():
-            result = await self.backend.post("/internal/v1/meetings/end",
-                json={
-                    "guild_id": str(interaction.guild_id),
-                    "thread_id": str(thread_id),
-                    "ended_by": str(interaction.user.id),
-                    "ended_at": self._now_iso(),
-                }
-            )
-
-        if result is None:
-            # 네트워크 오류 등 일시적 실패 — 되돌리면 재시도가 성공할 여지가 있다.
-            self.active_meeting_threads[thread_id] = meeting
-            await interaction.followup.send(
-                "회의 종료에 실패했습니다. 잠시 후 다시 시도해주세요.", ephemeral=True
-            )
-            return
-
-        error = get_error(result)
-        if error:
-            if error.get("code") == "MEETING_NOT_FOUND":
-                # thread_id는 Discord 채널 id라 항상 값이 있어 검증 오류로는 안 걸리고,
-                # 이 코드만큼은 재시도해도 절대 성공하지 않는 영구적 오류다. 되돌리면
-                # 이 회의는 영영 못 끝내므로, Backend가 없어도 봇은 계속 동작해야 한다는
-                # 원칙(CLAUDE.md)대로 Discord 쪽은 정리하고 동기화 실패만 알린다.
-                await interaction.channel.send("🔴 **회의가 종료되었습니다.**")
+            if result is None:
                 await interaction.followup.send(
-                    f"회의는 종료했지만 Backend와 동기화하지 못했습니다: "
-                    f"{error.get('message', '')}", ephemeral=True
+                    "회의 종료에 실패했습니다. 잠시 후 다시 시도해주세요.", ephemeral=True
                 )
                 return
 
-            # 그 외(예: 서비스 토큰 오류처럼 @internal 데코레이터가 뷰 실행 전에
-            # 먼저 던지는 4xx)는 원인만 고치면 재시도로 풀린다. None과 동일하게
-            # 되돌려서 다시 시도할 수 있게 한다.
-            self.active_meeting_threads[thread_id] = meeting
-            await interaction.followup.send(
-                error.get("message", "회의 종료에 실패했습니다."), ephemeral=True
-            )
-            return
+            error = get_error(result)
+            if error:
+                if error.get("code") == "MEETING_NOT_FOUND":
+                    # 사전 체크는 없앴지만, 로컬에 있었는지는 여전히 신호로 쓴다 —
+                    # 두 경우를 구분해야 한다.
+                    had_local_state = self.active_meeting_threads.pop(thread_id, None) is not None
+                    if had_local_state:
+                        # 로컬은 회의가 있다고 알고 있었는데 Backend가 모른다 — 진짜
+                        # 동기화 문제다. Discord 쪽은 이미 진행 중이라고 안내해 둔
+                        # 상태이니 정리하고 알린다.
+                        await interaction.channel.send("🔴 **회의가 종료되었습니다.**")
+                        await interaction.followup.send(
+                            f"회의는 종료했지만 Backend와 동기화하지 못했습니다: "
+                            f"{error.get('message', '')}", ephemeral=True
+                        )
+                        return
 
-        if result.get("duplicate"):
-            await interaction.followup.send("이미 종료된 회의입니다.", ephemeral=True)
-            return
+                    # 로컬도 몰랐고 Backend도 모른다 — 진짜로 이 스레드에 회의가 없다.
+                    await interaction.followup.send(
+                        "이 스레드에서 진행 중인 회의가 없습니다. "
+                        "회의 스레드 안에서 실행해주세요.", ephemeral=True
+                    )
+                    return
 
-        summary = result.get("summary")
-        if summary:
-            embed = discord.Embed(
-                title=f"📝 회의 요약 · {meeting['agenda']}",
-                description=summary.get("one_line", ""),
-                color=discord.Color.green(),
-            )
-            if summary.get("discovered_issues"):
-                embed.add_field(name="발견된 이슈",
-                                value="\n".join(f"- {i}" for i in summary["discovered_issues"]),
-                                inline=False)
-            if summary.get("changes"):
-                embed.add_field(name="변동 사항",
-                                value="\n".join(f"- {c}" for c in summary["changes"]),
-                                inline=False)
-            if summary.get("next_plans"):
-                embed.add_field(name="다음 계획",
-                                value="\n".join(f"- {p}" for p in summary["next_plans"]),
-                                inline=False)
-            await interaction.channel.send(embed=embed)
+                await interaction.followup.send(
+                    error.get("message", "회의 종료에 실패했습니다."), ephemeral=True
+                )
+                return
 
-        await interaction.channel.send("🔴 **회의가 종료되었습니다.**")
+            if result.get("duplicate"):
+                # 이미 끝난 회의다 — active_meeting_threads에 남아있었다면
+                # 여기서도 정리한다. 안 지우면 delegate.py의 폴백 스캔이 이미
+                # 끝난 회의를 계속 활성 회의로 착각한다.
+                self.active_meeting_threads.pop(thread_id, None)
+                await interaction.followup.send("이미 종료된 회의입니다.", ephemeral=True)
+                return
 
-        await interaction.followup.send("회의를 종료했습니다.")
+            # Backend가 이미 종료를 확정했다 — 이 아래 Discord 게시가 실패해도
+            # 되살릴 이유가 없는(이미 끝난) 회의다. 게시 전에 먼저 정리해서,
+            # 임베드 전송 실패 같은 이후 예외가 캐시 정리 자체를 건너뛰지 않게 한다.
+            self.active_meeting_threads.pop(thread_id, None)
+
+            agenda = self._agenda_from_thread(interaction.channel)
+
+            summary = result.get("summary")
+            if summary:
+                embed = discord.Embed(
+                    title=f"📝 회의 요약 · {agenda}",
+                    description=summary.get("one_line", ""),
+                    color=discord.Color.green(),
+                )
+                if summary.get("discovered_issues"):
+                    embed.add_field(name="발견된 이슈",
+                                    value="\n".join(f"- {i}" for i in summary["discovered_issues"]),
+                                    inline=False)
+                if summary.get("changes"):
+                    embed.add_field(name="변동 사항",
+                                    value="\n".join(f"- {c}" for c in summary["changes"]),
+                                    inline=False)
+                if summary.get("next_plans"):
+                    embed.add_field(name="다음 계획",
+                                    value="\n".join(f"- {p}" for p in summary["next_plans"]),
+                                    inline=False)
+                await interaction.channel.send(embed=embed)
+
+            await interaction.channel.send("🔴 **회의가 종료되었습니다.**")
+
+            await interaction.followup.send("회의를 종료했습니다.")
+        finally:
+            self._ending_threads.discard(thread_id)

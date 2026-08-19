@@ -260,13 +260,27 @@ class Agenda(UUIDModel, TimeStamped):
 
 
 class Utterance(UUIDModel):
-    """`회의 맥락` / `전달 맥락` 의 한 줄."""
+    """
+    `회의 맥락` / `전달 맥락` 의 한 줄.
+
+    **대리인이 한 발언도 여기 남습니다.** 회의 요약(`briefing.build_summary`)과
+    다음 회의의 논쟁점 예측(`contention`)이 이 표만 읽기 때문에, 대리인 발언이
+    빠지면 자리를 비운 사람을 대신해 한 말이 요약에서 통째로 사라집니다.
+    """
     meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE, related_name="utterances")
     participant = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
                                     null=True, blank=True)
     participant_name = models.CharField(max_length=100)    # 비정규화
     body = models.TextField()
     spoken_at = models.DateTimeField(null=True, blank=True)
+    #: 대리인이 주인을 대신해 한 발언입니다. `participant` 는 **주인**이고
+    #: `participant_name` 은 `{이름}의 Bordo` 입니다 — 누구를 대신했는지와
+    #: 누가 말했는지가 둘 다 필요합니다.
+    #:
+    #: 이 칸이 켜진 발언으로는 **대리인을 깨우지 않습니다**(`agent/tasks.py`).
+    #: 깨우면 A 의 대리인이 답한 것을 B 의 대리인이 다시 받아 서로 끝없이
+    #: 말하게 됩니다 — 대상 판정은 발언자 본인만 후보에서 빼기 때문입니다.
+    is_agent = models.BooleanField(default=False)
 
     class Meta:
         db_table = "utterance"

@@ -5,7 +5,6 @@
 
 심사 시연과 프론트 개발용입니다. 홈 화면과 플로우 화면이 실제로 채워집니다.
 """
-import random
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand
@@ -104,14 +103,40 @@ class Command(BaseCommand):
         main = projects[0]
 
         # ── 오늘 일정 3건 (Discord 에서 열립니다)
+        """
+        오늘 일정은 **시드 주인의 시간대**로 잡습니다.
+
+        `now` 는 UTC 입니다(`TIME_ZONE = "UTC"`). 그대로 `hour=9` 를 찍으면
+        UTC 9시가 되는데, 홈의 「오늘 일정」은 **보는 사람의 시간대**로 하루를
+        자릅니다. 한국에서 열면 그 셋이 전부 어제나 내일로 밀려 **오늘 일정이
+        비어 있습니다.**
+
+        시연에서 제일 먼저 보는 칸이고, 「회의에 참여하지 않아요」 로 들어가는
+        준비 화면의 유일한 입구이기도 합니다.
+        """
+        import zoneinfo
+
+        owner_tz = zoneinfo.ZoneInfo(owner.timezone or "Asia/Seoul")
+        local_now = now.astimezone(owner_tz)
+
+        upcoming = {}
         for hour, title in [(9, "정기 팀 회의"), (13, "디자인 리뷰"), (17, "개발팀 Sync")]:
-            at = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-            if at < now:
+            at = local_now.replace(hour=hour, minute=0, second=0, microsecond=0)
+            if at < local_now:
                 at += timedelta(days=1)
             m, created = Meeting.objects.get_or_create(
                 project=main, title=title, scheduled_at=at,
+                # `discord_channel_id` 를 **비워 둡니다.**
+                #
+                # 스레드는 `/meeting-start` 가 붙입니다. 시드가 미리 채워 두면
+                # 자동완성이 「아직 스레드가 안 붙은 회의」 만 내려주므로
+                # (`#96`) **시드 직후 그 목록이 비어 봇 시연 첫 단계가
+                # 막힙니다.**
+                #
+                # 셋이 같은 값이던 것도 문제였습니다 — 이 값으로 회의를 찾는
+                # 곳이 아무거나 잡습니다.
                 defaults={"project_name": main.name, "created_by": owner,
-                          "duration_min": 60, "discord_channel_id": "556677889900",
+                          "duration_min": 60,
                           "status": MeetingStatus.CONFIRMED})
             if created:
                 MeetingSummary.objects.get_or_create(meeting=m)
@@ -119,6 +144,7 @@ class Command(BaseCommand):
                     MeetingParticipant.objects.get_or_create(
                         meeting=m, user=users[pname],
                         defaults={"user_name": pname})
+            upcoming[title] = m
 
         # ── 끝난 회의 하나 — 플로우와 브리핑이 붙습니다
         ended_at = now - timedelta(hours=3)
@@ -155,14 +181,7 @@ class Command(BaseCommand):
             main_opinions=[{"speaker": "임수연", "text": "시안이 늦어지면 개발이 통째로 밀립니다"},
                            {"speaker": "서재민", "text": "일정 1주 연장이면 감당 가능합니다"}])
 
-        for pname, body in [
-            ("최비성", "지금 구조로는 팀별 시간대 계산이 매번 어긋납니다."),
-            ("임수연", "시안이 늦어지면 개발이 통째로 밀려요."),
-            ("서재민", "일정 1주 연장이면 감당 가능합니다."),
-        ]:
-            Utterance.objects.create(meeting=meeting, participant=users[pname],
-                                     participant_name=pname, body=body,
-                                     spoken_at=ended_at - timedelta(minutes=random.randint(5, 50)))
+        self._seed_meeting_transcript(meeting, users, owner)
 
         agendas = []
         for i, (title, content, direction) in enumerate([
@@ -272,13 +291,35 @@ class Command(BaseCommand):
 
         work_edges = self._seed_work_flow(main, users, now)
 
+        # 작업 플로우 화면을 시연에서 제일 많이 보여줄 예정이라, 나머지 두
+        # 프로젝트도 비워두지 않는다. main 만큼 촘촘하지는 않지만(다섯 카테고리
+        # 전부는 채운다) — 시연 중 프로젝트를 바꿔도 빈 화면이 나오지 않게 하는
+        # 것이 목적이라 main보다 옅게 채워도 된다.
+        academic_edges = self._seed_academic_festival_flow(projects[1], users, now)
+        payment_edges = self._seed_payment_module_flow(projects[2], users, now)
+
+        # 연합학술제 · 결제 모듈에는 회의 자체가 아예 없었다 — 각자 끝난 회의를
+        # 하나씩 만든다(요약·발언·안건·플로우 포함, main보다는 옅게).
+        self._seed_academic_meeting(projects[1], users, now)
+        self._seed_payment_meeting(projects[2], users, now)
+
+        # 지금까지 하나도 안 채워져 있던 화면들.
+        self._seed_tasks(team, projects, users, meeting, now)
+        self._seed_calendar(projects, users, meeting, now)
+        self._seed_agent_chat(users, meeting, now)
+        self._seed_debate(upcoming["디자인 리뷰"], users, owner, now)
+        self._seed_briefing_cards(meeting, agendas, users, owner, now)
+        self._seed_chat_rooms(team, users, owner, now)
+        self._touch_rooms()
+
         self.stdout.write(self.style.SUCCESS(
             f"\n시드 완료\n"
             f"  로그인   : susu@bordo.dev / {PASSWORD}\n"
             f"  팀       : {team.name} ({team.id})\n"
             f"  프로젝트 : {main.name} ({main.id})\n"
             f"  회의     : {meeting.title} ({meeting.id})\n"
-            f"  작업 엣지 : {work_edges}\n"))
+            f"  작업 엣지 : {work_edges} (글로벌 회의 도구) · "
+            f"{academic_edges} (연합학술제) · {payment_edges} (결제 모듈)\n"))
 
     # ═══════════════════════════════════════════ 작업 플로우
 
@@ -504,3 +545,785 @@ class Command(BaseCommand):
             emit(days, ask)
 
         return drawn
+
+    # ═══════════════════════════════════════════ 연합학술제 · 결제 모듈
+
+    def _seed_academic_festival_flow(self, project, users, now):
+        """
+        "연합학술제" 프로젝트의 작업 플로우.
+
+        `_seed_work_flow` 만큼 촘촘하지는 않다 — 시연에서 이 프로젝트를 메인으로
+        쓰지는 않고, **프로젝트를 바꿔도 빈 화면이 나오지 않게** 하는 것이
+        목적이라 다섯 카테고리(작업·수정·공유·피드백·AI 조회)만 전부 채운다.
+        """
+        from apps.agent.models import AgentLookup
+        from apps.agent.services.lookup import draw_edge
+        from apps.chat.models import ChatMessage
+        from apps.chat.services import ensure_project_room
+        from apps.documents.models import Document
+        from apps.meetings.models import FlowCategory, FlowEdge, FlowSource
+        from apps.states.models import WorkItem, WorkStatus
+
+        drawn = 0
+
+        def emit(days_ago, make):
+            nonlocal drawn
+            scope = FlowEdge.objects.filter(project=project, category=FlowCategory.WORK)
+            before = set(scope.values_list("id", flat=True))
+            obj = make()
+            drawn += scope.exclude(id__in=before).update(
+                occurred_at=now - timedelta(days=days_ago))
+            return obj
+
+        def work(owner, title, status, progress):
+            return lambda: WorkItem.objects.create(
+                project=project, owner=owner, title=title,
+                status=status, progress=progress)
+
+        def move(item, status, progress):
+            def go():
+                item.status, item.progress = status, progress
+                item.save()
+                return item
+            return go
+
+        # ── 작업 · 수정 (다섯 명 전원 — 노드를 눌렀을 때 빈 사람이 없게)
+        changed = [
+            (emit(11, work(users["유수인"], "학술제 포스터 디자인",
+                          WorkStatus.IN_PROGRESS, 50)), WorkStatus.DONE, 100),
+            (emit(9, work(users["최비성"], "참가 신청 API 구현",
+                         WorkStatus.IN_PROGRESS, 60)), WorkStatus.DONE, 100),
+        ]
+        emit(8, work(users["임수연"], "세션 시간표 페이지 제작", WorkStatus.TODO, 0))
+        emit(6, work(users["서재민"], "부스 배치도 작업", WorkStatus.IN_PROGRESS, 35))
+        emit(5, work(users["강다은"], "후원사 안내 메시지 작성", WorkStatus.TODO, 0))
+        emit(4, work(users["유수인"], "발표자 프로필 카드 디자인", WorkStatus.TODO, 0))
+        emit(3, work(users["최비성"], "참가자 명단 엑셀 연동", WorkStatus.IN_PROGRESS, 20))
+
+        for days, (item, status, progress) in zip((4, 2), changed):
+            emit(days, move(item, status, progress))
+
+        # ── 공유
+        emit(6, lambda: Document.objects.create(
+            project=project, owner=users["서재민"], title="연합학술제 운영 계획서",
+            category="planning", summary="부스·세션·후원사 운영 전체 일정",
+            delivery_context=[
+                {"participant_name": "서재민",
+                 "utterance": "운영 계획서 초안 올렸습니다. 일정표 확인 부탁드려요.",
+                 "url": "https://www.notion.so/bordo/festival-plan"},
+                {"participant_name": "임수연",
+                 "utterance": "세션 시간표에 맞춰 페이지 구성 반영하겠습니다."}]))
+
+        # ── 피드백 (프로젝트마다 방이 따로다 — ensure_project_room이 이 project 것을 새로 만든다)
+        room = ensure_project_room(project)
+
+        def say(sender_name, body):
+            return lambda: ChatMessage.objects.create(
+                room=room, sender=users[sender_name], sender_name=sender_name,
+                body=body, is_important=True)
+
+        emit(5, say("임수연", "세션 시간표에 발표자 사진이 안 뜹니다. 이미지 경로 확인해주세요."))
+        emit(3, say("최비성", "참가 신청 폼에 소속 학교 필드를 추가했습니다."))
+        emit(2, say("강다은", "후원사 로고 배치가 겹쳐 보입니다."))
+
+        # ── AI 조회 (하나는 유보 — answer를 비워 둔다)
+        for days, asker, target, topic, reason, question, answer, source in [
+            (3, "유수인", "최비성", "참가 신청 마감일",
+             "포스터에 마감일을 넣기 전에 확정된 날짜가 필요했습니다.",
+             "참가 신청 마감이 언제로 확정됐습니까?",
+             "9월 5일로 확정됐고, API에도 반영했습니다.",
+             FlowSource.GITHUB),
+            (1, "강다은", "임수연", "세션 시간표 최종본",
+             "후원사 안내 문구에 세션 일정을 넣기 전에 최종본인지 확인이 필요했습니다.",
+             "세션 시간표가 최종본입니까?",
+             "",
+             FlowSource.NOTION),
+        ]:
+            def ask(a=asker, t=target, tp=topic, r=reason, q=question,
+                    ans=answer, s=source, d=days):
+                return draw_edge(AgentLookup.objects.create(
+                    project=project, asker=users[a], target=users[t],
+                    topic=tp, reason=r, question=q, answer=ans,
+                    source=s, occurred_at=now - timedelta(days=d)))
+
+            emit(days, ask)
+
+        return drawn
+
+    def _seed_payment_module_flow(self, project, users, now):
+        """"결제 모듈" 프로젝트의 작업 플로우. `_seed_academic_festival_flow`와
+        같은 이유로, main만큼은 아니지만 다섯 카테고리를 전부 채운다."""
+        from apps.agent.models import AgentLookup
+        from apps.agent.services.lookup import draw_edge
+        from apps.chat.models import ChatMessage
+        from apps.chat.services import ensure_project_room
+        from apps.documents.models import Document
+        from apps.meetings.models import FlowCategory, FlowEdge, FlowSource
+        from apps.states.models import WorkItem, WorkStatus
+
+        drawn = 0
+
+        def emit(days_ago, make):
+            nonlocal drawn
+            scope = FlowEdge.objects.filter(project=project, category=FlowCategory.WORK)
+            before = set(scope.values_list("id", flat=True))
+            obj = make()
+            drawn += scope.exclude(id__in=before).update(
+                occurred_at=now - timedelta(days=days_ago))
+            return obj
+
+        def work(owner, title, status, progress):
+            return lambda: WorkItem.objects.create(
+                project=project, owner=owner, title=title,
+                status=status, progress=progress)
+
+        def move(item, status, progress):
+            def go():
+                item.status, item.progress = status, progress
+                item.save()
+                return item
+            return go
+
+        # ── 작업 · 수정
+        changed = [
+            (emit(10, work(users["최비성"], "결제 API 연동",
+                          WorkStatus.IN_PROGRESS, 55)), WorkStatus.DONE, 100),
+            (emit(8, work(users["서재민"], "정산 로직 구현",
+                         WorkStatus.IN_PROGRESS, 40)), WorkStatus.IN_PROGRESS, 70),
+        ]
+        emit(7, work(users["유수인"], "결제 화면 UI 제작", WorkStatus.TODO, 0))
+        emit(6, work(users["임수연"], "환불 플로우 디자인", WorkStatus.TODO, 0))
+        emit(5, work(users["강다은"], "결제 실패 알림 문구 작성", WorkStatus.IN_PROGRESS, 30))
+        emit(4, work(users["최비성"], "PG사 연동 테스트", WorkStatus.TODO, 0))
+        emit(2, work(users["서재민"], "결제 로그 모니터링 구축", WorkStatus.IN_PROGRESS, 15))
+
+        for days, (item, status, progress) in zip((3, 1), changed):
+            emit(days, move(item, status, progress))
+
+        # ── 공유
+        emit(5, lambda: Document.objects.create(
+            project=project, owner=users["최비성"], title="결제 모듈 API 명세",
+            category="backend", summary="결제·환불·정산 엔드포인트 계약",
+            delivery_context=[
+                {"participant_name": "최비성",
+                 "utterance": "결제 API 명세 정리했습니다. 응답에 결제수단 코드가 추가됐어요.",
+                 "url": "https://github.com/AX-Lions/backend/blob/develop/bordo-openapi.yaml"},
+                {"participant_name": "서재민",
+                 "utterance": "정산 배치도 이 명세 기준으로 맞추겠습니다."}]))
+
+        # ── 피드백
+        room = ensure_project_room(project)
+
+        def say(sender_name, body):
+            return lambda: ChatMessage.objects.create(
+                room=room, sender=users[sender_name], sender_name=sender_name,
+                body=body, is_important=True)
+
+        emit(4, say("임수연", "환불 버튼 위치가 결제 버튼과 너무 가깝습니다."))
+        emit(3, say("강다은", "결제 실패 메시지가 너무 딱딱합니다. 톤 조정 부탁드려요."))
+        emit(2, say("서재민", "정산 배치가 자정마다 도는데 시간대 확인이 필요합니다."))
+
+        # ── AI 조회 (하나는 유보)
+        for days, asker, target, topic, reason, question, answer, source in [
+            (3, "유수인", "최비성", "결제 API 응답 형태",
+             "결제 화면 UI를 그리기 전에 응답 필드가 확정됐는지 알아야 했습니다.",
+             "결제 API 응답 형태가 확정됐습니까?",
+             "확정입니다. 응답에 결제수단 코드가 추가됐어요.",
+             FlowSource.GITHUB),
+            (1, "임수연", "서재민", "정산 반영 소요 시간",
+             "환불 플로우 디자인 전에 정산까지 걸리는 시간을 확인해야 했습니다.",
+             "환불 처리 후 정산 반영까지 얼마나 걸립니까?",
+             "",
+             FlowSource.GITHUB),
+        ]:
+            def ask(a=asker, t=target, tp=topic, r=reason, q=question,
+                    ans=answer, s=source, d=days):
+                return draw_edge(AgentLookup.objects.create(
+                    project=project, asker=users[a], target=users[t],
+                    topic=tp, reason=r, question=q, answer=ans,
+                    source=s, occurred_at=now - timedelta(days=d)))
+
+            emit(days, ask)
+
+        return drawn
+
+    def _seed_academic_meeting(self, project, users, now):
+        """연합학술제의 끝난 회의 하나. main의 회의만큼 촘촘하지는 않지만
+        요약·발언·안건·플로우를 전부 갖춘다. 이번엔 강다은을 대리 참석자로
+        둬서, 대리 참석이 유수인 말고 다른 사람에게도 똑같이 동작하는 걸
+        보여준다."""
+        ended_at = now - timedelta(hours=5)
+        started_at = ended_at - timedelta(minutes=45)
+        meeting = Meeting.objects.create(
+            project=project, project_name=project.name,
+            title="연합학술제 부스·세션 운영 점검",
+            status=MeetingStatus.ENDED, scheduled_at=started_at,
+            duration_min=45, discord_channel_id="556677889901",
+            created_by=users["유수인"], started_at=started_at, ended_at=ended_at)
+
+        for pname in users:
+            delegated = pname == "강다은"
+            MeetingParticipant.objects.create(
+                meeting=meeting, user=users[pname], user_name=pname,
+                attendance=Attendance.DELEGATED if delegated else Attendance.PRESENT,
+                delegated=delegated,
+                delegate_prompt=("후원사 로고 배치 같은 계약서에 이미 정해진 내용은 "
+                                 "바로 답하고, 그 외 새로운 결정은 유보할 것") if delegated else "")
+
+        MeetingSummary.objects.create(
+            meeting=meeting,
+            discovered_issues=["부스 간 통로 폭이 좁아 혼잡이 예상된다",
+                               "후원사 로고 노출 순서에 대한 이견이 있다"],
+            changes=["통로 폭 1.5m로 확대", "후원사 로고는 등급순으로 배치"],
+            next_plans=["최종 배치도는 9/1까지 공유", "포스터 인쇄는 9/3 진행"],
+            one_line="부스 통로를 넓히고 후원사 로고는 등급순으로 배치하기로 했어요.",
+            main_opinions=[{"speaker": "최비성", "text": "통로가 좁으면 안전 문제로 이어질 수 있습니다"},
+                          {"speaker": "강다은의 Bordo", "text": "후원사 등급 기준은 이미 계약서에 명시돼 있습니다"}])
+
+        # `participant` 는 주인이지만 **말한 것은 대리인**입니다. `is_agent` 가
+        # 없으면 회의록에서 둘을 가를 수 없어, 대리인이 대신 한 말이 본인이 직접
+        # 한 말로 읽힙니다 — 돌아온 사람이 「나는 그런 말 한 적 없는데」 를
+        # 수습하게 되는 자리입니다 (`#114` 로 생긴 칸).
+        def say(minute, pname, body, agent=False):
+            Utterance.objects.create(
+                meeting=meeting, participant=users[pname],
+                participant_name=f"{pname}의 Bordo" if agent else pname,
+                is_agent=agent,
+                body=body, spoken_at=started_at + timedelta(minutes=minute))
+
+        say(0, "유수인", "학술제 준비 점검 회의 시작할게요. 부스 배치랑 후원사 로고 건 보겠습니다.")
+        say(2, "최비성", "부스 배치도 초안 봤는데 통로가 너무 좁아요. 사람 몰리면 위험할 것 같습니다.")
+        say(4, "임수연", "저도 그 부분 걱정했어요. 통로 폭을 좀 늘리는 게 좋을 것 같아요.")
+        say(6, "최비성", "1.5m 정도면 여유 있을 것 같은데 어떠세요?")
+        say(7, "유수인", "좋습니다, 1.5m로 조정해서 다시 그려주세요.")
+        say(9, "임수연", "그럼 후원사 로고 얘기로 넘어갈게요. 배치 순서를 어떻게 할지 정해야 해요.")
+        say(10, "강다은", "후원사 등급 기준은 이미 계약서에 명시돼 있어서, 그 순서대로 배치하면 됩니다.",
+            agent=True)
+        say(11, "최비성", "그럼 등급순으로 정리해서 배치도에 반영할게요.")
+        say(13, "유수인", "최종 배치도는 9월 1일까지 공유해주세요.")
+        say(14, "임수연", "포스터 인쇄는 언제 넘어가나요?")
+        say(15, "최비성", "포스터는 9월 3일에 인쇄 넣을 예정입니다.")
+        say(17, "유수인", "정리하면 통로 넓히고, 로고는 등급순, 배치도는 9/1까지네요. 오늘은 여기까지 할게요.")
+
+        agendas = [
+            Agenda.objects.create(
+                meeting=meeting, title="부스 배치 통로 폭", sort_order=1,
+                content="통로 폭을 1.5m로 확대해 혼잡을 줄인다.",
+                direction_label="최비성 → 임수연", status=Agenda.Status.DISCUSSED,
+                owner=users["최비성"]),
+            Agenda.objects.create(
+                meeting=meeting, title="후원사 로고 배치", sort_order=2,
+                content="계약서상 등급 기준대로 로고를 배치한다.",
+                direction_label="강다은의 Bordo → 최비성", status=Agenda.Status.DISCUSSED,
+                owner=users["강다은"], created_by_agent=True),
+        ]
+
+        def node(u, agent=False):
+            return {"id": f"{u.id}:agent" if agent else str(u.id),
+                    "kind": "AGENT" if agent else "USER", "user_id": str(u.id),
+                    "name": f"{u.name}의 Bordo" if agent else u.name,
+                    "avatar_url": u.avatar_url or None}
+
+        MT = FlowCategory.MEETING
+        edges = [
+            (FlowContentType.OPINION, "의견", node(users["최비성"]), [node(users["임수연"])],
+             agendas[0], Surface.DISCORD, 40),
+            (FlowContentType.REQUEST, "요청사항", node(users["최비성"]), [node(users["임수연"])],
+             agendas[0], Surface.DISCORD, 39),
+            (FlowContentType.CHANGE, "변동사항", node(users["임수연"]), [node(users["최비성"])],
+             agendas[0], Surface.SERVICE, 38),
+            (FlowContentType.REQUEST, "요청사항", node(users["임수연"]),
+             [node(users["강다은"], agent=True)], agendas[1], Surface.DISCORD, 35),
+            (FlowContentType.CONCLUSION, "결론", node(users["강다은"], agent=True),
+             [node(users["최비성"])], agendas[1], Surface.DISCORD, 34),
+            (FlowContentType.SCHEDULE, "일정", node(users["유수인"]),
+             [node(users["최비성"]), node(users["임수연"])], None, Surface.SERVICE, 28),
+        ]
+        for ctype, label, src, dsts, agenda, surface, mins_ago in edges:
+            e = FlowEdge.objects.create(
+                meeting=meeting, project=project, category=MT, content_type=ctype,
+                surface=surface, from_node=src, to_nodes=dsts, label=label,
+                direction_label=f"{src['name']} → {', '.join(d['name'] for d in dsts)}",
+                participant_ids=[src["user_id"]] + [d["user_id"] for d in dsts],
+                agenda=agenda, occurred_at=ended_at - timedelta(minutes=mins_ago))
+            e.opacity = e.compute_opacity()
+            e.save(update_fields=["opacity"])
+
+    def _seed_payment_meeting(self, project, users, now):
+        """결제 모듈의 끝난 회의 하나. 이번엔 서재민을 대리 참석자로 둔다."""
+        ended_at = now - timedelta(hours=4)
+        started_at = ended_at - timedelta(minutes=40)
+        meeting = Meeting.objects.create(
+            project=project, project_name=project.name,
+            title="결제 모듈 정산 정책 논의",
+            status=MeetingStatus.ENDED, scheduled_at=started_at,
+            duration_min=40, discord_channel_id="556677889902",
+            created_by=users["유수인"], started_at=started_at, ended_at=ended_at)
+
+        for pname in users:
+            delegated = pname == "서재민"
+            MeetingParticipant.objects.create(
+                meeting=meeting, user=users[pname], user_name=pname,
+                attendance=Attendance.DELEGATED if delegated else Attendance.PRESENT,
+                delegated=delegated,
+                delegate_prompt=("정산 주기 관련 결정은 최비성 확인을 받고, "
+                                 "그 외는 회의 의견만 정리해 전달할 것") if delegated else "")
+
+        MeetingSummary.objects.create(
+            meeting=meeting,
+            discovered_issues=["정산 배치가 자정 기준이라 시간대 오차가 생긴다",
+                               "환불 안내 문구가 화면마다 다르게 나간다"],
+            changes=["정산 기준 시각을 한국 시간 자정으로 통일", "환불 안내 문구를 한 곳에서 관리"],
+            next_plans=["정산 배치 스크립트 수정은 다음 주까지", "환불 문구는 임수연이 정리해서 공유"],
+            one_line="정산 기준 시각을 통일하고 환불 문구를 한 곳에서 관리하기로 했어요.",
+            main_opinions=[{"speaker": "최비성", "text": "정산 시각이 흔들리면 신뢰도가 떨어집니다"},
+                          {"speaker": "임수연", "text": "환불 문구가 화면마다 달라서 사용자가 헷갈려해요"}])
+
+        # `participant` 는 주인이지만 **말한 것은 대리인**입니다. `is_agent` 가
+        # 없으면 회의록에서 둘을 가를 수 없어, 대리인이 대신 한 말이 본인이 직접
+        # 한 말로 읽힙니다 — 돌아온 사람이 「나는 그런 말 한 적 없는데」 를
+        # 수습하게 되는 자리입니다 (`#114` 로 생긴 칸).
+        def say(minute, pname, body, agent=False):
+            Utterance.objects.create(
+                meeting=meeting, participant=users[pname],
+                participant_name=f"{pname}의 Bordo" if agent else pname,
+                is_agent=agent,
+                body=body, spoken_at=started_at + timedelta(minutes=minute))
+
+        say(0, "최비성", "결제 모듈 정산·환불 정책 점검할게요.")
+        say(2, "최비성", "정산 배치가 자정마다 도는데, 서버 시간대 기준이라 "
+                       "실제 한국 시간이랑 몇 분씩 어긋나요.")
+        say(4, "서재민", "정산 주기 관련해서는 최비성님 확인을 받아야 하는 부분이라, "
+                       "우선 의견만 정리해서 전달드릴게요.", agent=True)
+        say(5, "최비성", "네, 한국 시간 자정 기준으로 통일하는 게 맞을 것 같아요.")
+        say(6, "서재민", "알겠습니다, 그 의견 그대로 전달드리겠습니다.", agent=True)
+        say(8, "임수연", "환불 쪽도 봐야 하는데, 화면마다 환불 안내 문구가 달라서 사용자들이 헷갈려해요.")
+        say(10, "최비성", "저희도 그 얘기 나왔었는데, 한 곳에서 관리하는 걸로 정리하죠.")
+        say(11, "임수연", "제가 문구 정리해서 공유드릴게요.")
+        say(13, "최비성", "감사합니다. 정산 배치 스크립트는 제가 다음 주까지 수정할게요.")
+        say(15, "유수인", "정리하면 정산 시각은 자정 통일, 환불 문구는 임수연님이 정리, "
+                        "스크립트는 다음 주까지네요.")
+        say(16, "최비성", "네 맞습니다.")
+        say(17, "서재민", "확인 후에 정산 시각 관련해서는 다시 말씀드리겠습니다.", agent=True)
+
+        agendas = [
+            Agenda.objects.create(
+                meeting=meeting, title="정산 기준 시각 통일", sort_order=1,
+                content="정산 배치 기준 시각을 한국 시간 자정으로 맞춘다.",
+                direction_label="최비성 → 서재민의 Bordo", status=Agenda.Status.DISCUSSED,
+                owner=users["서재민"], created_by_agent=True),
+            Agenda.objects.create(
+                meeting=meeting, title="환불 안내 문구 통일", sort_order=2,
+                content="환불 문구를 한 곳에서 관리하도록 정리한다.",
+                direction_label="임수연 → 최비성", status=Agenda.Status.DISCUSSED,
+                owner=users["임수연"]),
+        ]
+
+        def node(u, agent=False):
+            return {"id": f"{u.id}:agent" if agent else str(u.id),
+                    "kind": "AGENT" if agent else "USER", "user_id": str(u.id),
+                    "name": f"{u.name}의 Bordo" if agent else u.name,
+                    "avatar_url": u.avatar_url or None}
+
+        MT = FlowCategory.MEETING
+        edges = [
+            (FlowContentType.REQUEST, "요청사항", node(users["최비성"]),
+             [node(users["서재민"], agent=True)], agendas[0], Surface.DISCORD, 36),
+            (FlowContentType.CHANGE, "변동사항", node(users["서재민"], agent=True),
+             [node(users["최비성"])], agendas[0], Surface.DISCORD, 34),
+            (FlowContentType.OPINION, "의견", node(users["임수연"]), [node(users["최비성"])],
+             agendas[1], Surface.SERVICE, 32),
+            (FlowContentType.OPINION, "의견", node(users["임수연"]), [node(users["최비성"])],
+             agendas[1], Surface.SERVICE, 30),
+            (FlowContentType.CONCLUSION, "결론", node(users["최비성"]), [node(users["임수연"])],
+             agendas[1], Surface.DISCORD, 27),
+            (FlowContentType.SCHEDULE, "일정", node(users["유수인"]),
+             [node(users["최비성"]), node(users["서재민"])], None, Surface.SERVICE, 23),
+        ]
+        for ctype, label, src, dsts, agenda, surface, mins_ago in edges:
+            e = FlowEdge.objects.create(
+                meeting=meeting, project=project, category=MT, content_type=ctype,
+                surface=surface, from_node=src, to_nodes=dsts, label=label,
+                direction_label=f"{src['name']} → {', '.join(d['name'] for d in dsts)}",
+                participant_ids=[src["user_id"]] + [d["user_id"] for d in dsts],
+                agenda=agenda, occurred_at=ended_at - timedelta(minutes=mins_ago))
+            e.opacity = e.compute_opacity()
+            e.save(update_fields=["opacity"])
+
+    def _seed_meeting_transcript(self, meeting, users, owner):
+        """끝난 회의의 발언 전체. 세 안건(일정 조율 · 디자인 시안 마감 ·
+        개발 일정 연장) 순서를 그대로 따라가게 짜서, MeetingSummary의
+        discovered_issues·changes·next_plans와 AiBriefing의 used_answers·
+        deferred_answers가 실제 대화에서 나온 것처럼 보이게 한다.
+
+        유수인은 이 회의에 DELEGATED로 등록돼 있으므로, 일정 관련 발언은
+        본인이 아니라 "유수인의 Bordo"가 한다 — delegate_prompt("일정 관련
+        결정은 내 확인을 받도록 할 것")대로 최종 확정은 유보하고 회의에서
+        나온 의견만 전달한다. AiBriefing의 deferred_answers와 어긋나면 안 되니,
+        여기서 대리인이 개발 일정을 확정해 버리면 안 된다.
+        """
+        started = meeting.started_at
+
+        # `participant` 는 주인이지만 **말한 것은 대리인**입니다. `is_agent` 가
+        # 없으면 회의록에서 둘을 가를 수 없어, 대리인이 대신 한 말이 본인이 직접
+        # 한 말로 읽힙니다 — 돌아온 사람이 「나는 그런 말 한 적 없는데」 를
+        # 수습하게 되는 자리입니다 (`#114` 로 생긴 칸).
+        def say(minute, pname, body, agent=False):
+            name = f"{pname}의 Bordo" if agent else pname
+            Utterance.objects.create(
+                meeting=meeting, participant=users[pname], participant_name=name,
+                is_agent=agent,
+                body=body, spoken_at=started + timedelta(minutes=minute))
+
+        # ── 안건 1: 회의 일정 조율
+        say(0, "최비성", "다들 모이셨네요. 오늘 안건 세 개 보고 시작할게요 — "
+                        "회의 일정 조율, 디자인 시안 마감, 개발 일정입니다.")
+        say(2, "최비성", "지금 구조로는 팀별 시간대 계산이 매번 어긋납니다.")
+        say(4, "임수연", "맞아요, 저도 회의 알림이 제 시간대 기준으로 안 와서 몇 번 놓쳤어요.")
+        say(6, "서재민", "슬롯 계산을 서버에서 하나로 통일하면 될 것 같은데, "
+                        "프론트마다 다르게 보정하고 있는 게 문제예요.")
+        say(8, "최비성", "그럼 서버가 계산한 시각을 그대로 쓰는 걸로 정리할게요.")
+        say(9, "임수연", "네, 그러면 저희 쪽 보정 로직은 걷어내겠습니다.")
+        say(10, "최비성", "좋습니다. 슬롯 재조정은 제가 다음 주까지 새 시간표로 공유드릴게요.")
+
+        # ── 안건 2: 디자인 시안 마감
+        say(15, "임수연", "다음 안건이요 — 디자인 시안이 늦어지면 개발이 통째로 밀려요.")
+        say(17, "최비성", "저희도 마감이 계속 밀리는 게 제일 걱정이에요. 이번엔 확실히 날짜를 정하죠.")
+        say(19, "임수연", "8월 18일까지 확정할게요. 그 전에 중간 리뷰도 한 번 잡겠습니다.")
+        say(21, "강다은", "확정되면 Discord 공지도 같이 올릴게요. 날짜만 알려주세요.")
+        say(22, "임수연", "네, 8/18 확정되는 대로 공유드릴게요.")
+        say(24, "최비성", "그럼 디자인 시안은 8월 18일 마감으로 정리하겠습니다.")
+
+        # ── 안건 3: 개발 일정 연장 (대리인이 대신 참석)
+        say(35, "임수연", "마지막 안건인데요 — 디자인이 늦어진 만큼 개발 일정도 "
+                         "1주 정도 미뤄야 할 것 같아요. 유수인님 대리인께 여쭤봐도 될까요?")
+        say(36, "유수인", "네, 전달받았습니다. 일정 변경은 제가 유수인님께 확인을 받아야 "
+                         "하는 항목이라, 오늘은 회의에서 나온 의견만 정리해 전달드릴게요.",
+            agent=True)
+        say(37, "서재민", "일정 1주 연장이면 감당 가능합니다.")
+        say(38, "최비성", "저도 동의합니다. 1주면 무리 없어요.")
+        say(40, "유수인", "그럼 회의에서는 1주 연장으로 의견이 모였다고 정리하겠습니다. "
+                         "다만 최종 확정은 유수인님 확인 후에 다시 말씀드리겠습니다.",
+            agent=True)
+        say(45, "서재민", "확인해주시면 저희는 그 기준으로 마일스톤 다시 잡겠습니다.")
+        say(50, "최비성", "오늘 정리하면 — 슬롯 재조정, 시안 8/18 마감, 개발 일정 1주 연장(확인 대기)입니다. "
+                        "다음 회의에서는 API 명세 리뷰 이어갈게요.")
+        say(52, "임수연", "네 좋습니다, 오늘 여기까지 할게요.")
+        say(53, "유수인", "감사합니다. 확인되는 대로 바로 회신드리겠습니다.", agent=True)
+
+    # ═══════════════════════════════════════════ 지금까지 하나도 없던 화면들
+
+    def _seed_tasks(self, team, projects, users, meeting, now):
+        """태스크 화면. AI 후보(PENDING_APPROVAL)를 반드시 섞는다 — 승인
+        대기 큐가 비어 있으면 설계 1원칙(사람 최종 승인)을 화면에서 보여줄
+        방법이 없다."""
+        from apps.tasks.models import Task, TaskEvent, TaskStatus
+
+        main, academic, payment = projects
+        owner = users["유수인"]
+
+        Task.objects.create(
+            project=main, title="결제 API 응답 스키마 정리",
+            description="결제수단 코드 추가 반영해 필드 목록 다시 정리",
+            status=TaskStatus.TODO, priority="P1",
+            assignee=users["최비성"], created_by=users["최비성"],
+            due_at=now + timedelta(days=3))
+        Task.objects.create(
+            project=main, title="우측 패널 반응형 QA",
+            status=TaskStatus.IN_PROGRESS, priority="P2",
+            assignee=users["임수연"], created_by=users["임수연"])
+        Task.objects.create(
+            project=payment, title="PG사 연동 테스트 자동화",
+            status=TaskStatus.BLOCKED, priority="P2",
+            assignee=users["최비성"], created_by=users["서재민"])
+
+        done = Task.objects.create(
+            project=main, title="로그인 재발급 로직 구현",
+            status=TaskStatus.COMPLETED, priority="P1",
+            assignee=users["서재민"], created_by=users["서재민"],
+            completed_at=now - timedelta(days=1),
+            completion_note="토큰 재발급까지 붙였고 만료 시간은 30분으로 맞췄습니다.")
+        TaskEvent.objects.create(
+            task=done, actor=users["서재민"], action="complete",
+            from_status=TaskStatus.IN_PROGRESS, to_status=TaskStatus.COMPLETED,
+            detail={"note": "재발급 로직 구현 완료"})
+
+        rejected = Task.objects.create(
+            project=payment, title="결제 모듈 우선순위를 학술제보다 앞으로",
+            status=TaskStatus.REJECTED, priority="P0",
+            assignee=users["최비성"], created_by=users["서재민"],
+            rejected_reason="이번 스프린트는 학술제 마감이 먼저입니다. 다음 스프린트에 다시 올려주세요.")
+        TaskEvent.objects.create(
+            task=rejected, actor=owner, action="reject",
+            from_status=TaskStatus.PENDING_APPROVAL, to_status=TaskStatus.REJECTED,
+            detail={"reason": rejected.rejected_reason})
+
+        # AI가 회의 결정을 보고 만든 후보 — 사람이 승인하기 전까지는 TODO가
+        # 안 된다는 걸 보여주는 자리다.
+        Task.objects.create(
+            project=main, title="디자인 시안 8/18 마감 공지 등록",
+            description="회의에서 합의된 마감일을 캘린더에 반영",
+            status=TaskStatus.PENDING_APPROVAL, priority="P1",
+            assignee=users["임수연"], created_by=owner,
+            created_by_agent=True, source_meeting=meeting)
+        Task.objects.create(
+            project=main, title="개발 일정 1주 연장 반영",
+            description="회의 결정에 따라 마일스톤 일정을 1주 미룹니다.",
+            status=TaskStatus.PENDING_APPROVAL, priority="P2",
+            assignee=users["최비성"], created_by=owner,
+            created_by_agent=True, source_meeting=meeting)
+
+    def _seed_calendar(self, projects, users, meeting, now):
+        """일정 화면. 회의에 딸린 일정 하나, 딸리지 않은 일정 몇 개(마감·집중
+        시간)를 섞는다 — related_meeting은 선택 필드라 회의 없이도 일정이
+        존재할 수 있다는 걸 보여준다."""
+        from apps.calendars.models import (CalendarEvent, EventKind, EventParticipant,
+                                           EventStatus, Reminder)
+
+        main, academic, payment = projects
+
+        deadline = CalendarEvent.objects.create(
+            project=main, title="디자인 시안 마감", kind=EventKind.DEADLINE,
+            status=EventStatus.CONFIRMED,
+            start_at=now.replace(hour=18, minute=0, second=0, microsecond=0) + timedelta(days=1),
+            confirmed_by=users["유수인"], confirmed_at=now - timedelta(hours=2))
+        for pname in ("유수인", "임수연"):
+            EventParticipant.objects.get_or_create(event=deadline, user=users[pname])
+        Reminder.objects.get_or_create(
+            event=deadline, notification_type=Reminder.Type.T_MINUS_1D,
+            defaults={"scheduled_at": deadline.start_at - timedelta(days=1)})
+
+        kickoff = CalendarEvent.objects.create(
+            project=payment, title="결제 모듈 킥오프 회의", kind=EventKind.MEETING,
+            status=EventStatus.SCHEDULED, start_at=now + timedelta(days=2, hours=1),
+            end_at=now + timedelta(days=2, hours=2))
+        for pname in ("최비성", "서재민", "유수인"):
+            EventParticipant.objects.get_or_create(event=kickoff, user=users[pname])
+
+        booth = CalendarEvent.objects.create(
+            project=academic, title="부스 신청 마감", kind=EventKind.DEADLINE,
+            status=EventStatus.SCHEDULED, start_at=now + timedelta(days=5, hours=9))
+        EventParticipant.objects.get_or_create(event=booth, user=users["강다은"])
+        Reminder.objects.get_or_create(
+            event=booth, notification_type=Reminder.Type.T_MINUS_1D,
+            defaults={"scheduled_at": booth.start_at - timedelta(days=1)})
+
+        focus = CalendarEvent.objects.create(
+            project=main, title="집중 작업 시간", kind=EventKind.BLOCK,
+            status=EventStatus.CONFIRMED,
+            start_at=now.replace(hour=14, minute=0, second=0, microsecond=0),
+            end_at=now.replace(hour=16, minute=0, second=0, microsecond=0))
+        EventParticipant.objects.get_or_create(event=focus, user=users["최비성"])
+
+        # 끝난 회의에 딸린 일정 — related_meeting이 실제로 채워진 사례.
+        linked = CalendarEvent.objects.create(
+            project=main, title=meeting.title, kind=EventKind.MEETING,
+            status=EventStatus.CONFIRMED, start_at=meeting.started_at,
+            end_at=meeting.ended_at, related_meeting=meeting, discord_notified=True)
+        for u in users.values():
+            EventParticipant.objects.get_or_create(event=linked, user=u)
+
+    def _seed_agent_chat(self, users, meeting, now):
+        """나의 AI 대리인 개인 대화. AgentConversation·AgentMessage가
+        지금까지 하나도 없어서 이 화면을 열면 완전히 빈 채로 보였다."""
+        from apps.agent.models import AgentConversation, AgentMessage, AgentRun
+
+        owner = users["유수인"]
+
+        run = AgentRun.objects.create(
+            user=owner, meeting=meeting, status=AgentRun.Status.COMPLETED,
+            settings_snapshot=owner.agent_settings.as_snapshot(),
+            steps=[{"step": "search", "detail": "회의 요약·안건에서 관련 내용 검색"},
+                  {"step": "answer", "detail": "저장된 지시(delegate_prompt) 기준으로 응답 작성"}],
+            evidence=[{"kind": "meeting_summary", "meeting_id": str(meeting.id),
+                      "excerpt": "디자인 작업을 우선 진행한 후 개발팀에 전달하기로 결정했어요."}],
+            result="디자인 시안은 8월 18일까지 확정하기로 했습니다.")
+
+        conv = AgentConversation.objects.create(
+            user=owner, title="이번 주 회의 정리해줘",
+            last_message_preview="디자인 시안은 8월 18일까지 확정하기로 했습니다.")
+        AgentMessage.objects.create(
+            conversation=conv, role=AgentMessage.Role.USER,
+            body="이번 주 회의에서 뭐가 정해졌는지 정리해줘.",
+            sent_at=now - timedelta(hours=2, minutes=10))
+        AgentMessage.objects.create(
+            conversation=conv, role=AgentMessage.Role.AGENT, run=run,
+            body=("디자인 시안은 8월 18일까지 확정하기로 했고, 개발 일정은 1주 연장하기로 "
+                 "했습니다. 다음 회의에서는 API 명세를 다시 봅니다."),
+            sent_at=now - timedelta(hours=2, minutes=9))
+        AgentMessage.objects.create(
+            conversation=conv, role=AgentMessage.Role.USER,
+            body="개발 일정 연장은 내가 승인한 거야?",
+            sent_at=now - timedelta(hours=2))
+        AgentMessage.objects.create(
+            conversation=conv, role=AgentMessage.Role.AGENT,
+            body=("아직입니다. 일정 수정 자동 승인 설정이 꺼져 있어서 "
+                 "제가 결정하지 않고 확인을 요청해 뒀습니다."),
+            sent_at=now - timedelta(hours=1, minutes=59))
+
+        conv2 = AgentConversation.objects.create(
+            user=users["최비성"], title="결제 API 진행 상황 요약",
+            last_message_preview="결제수단 코드 추가까지 반영했습니다.")
+        AgentMessage.objects.create(
+            conversation=conv2, role=AgentMessage.Role.USER,
+            body="결제 API 지금 어디까지 됐는지 요약해줘.", sent_at=now - timedelta(days=1))
+        AgentMessage.objects.create(
+            conversation=conv2, role=AgentMessage.Role.AGENT,
+            body="결제수단 코드 추가까지 반영했고, PG사 연동 테스트가 남아있습니다.",
+            sent_at=now - timedelta(days=1) + timedelta(minutes=1))
+
+    def _seed_debate(self, meeting, users, owner, now):
+        """회의 전 준비 — 논쟁점을 미리 예측해 두고, 대리 참석 예정인 사람의
+        입장을 미리 받아 둔다. 지금까지 하나도 없어서 준비 화면이 항상 비어
+        있었다. 논쟁점 하나는 일부러 입장을 안 받아 둔다 — 유보가 화면에
+        어떻게 나오는지 봐야 한다."""
+        from apps.meetings.models import (Attendance, DebatePoint, DebateStance,
+                                          MeetingParticipant)
+
+        """
+        **입장을 적어 둔 사람의 대리 참석을 켭니다.**
+
+        `targeting.candidates()` 가 `delegated=True` 인 사람만 후보로 삼습니다.
+        꺼진 채로 두면 회의에서 그 사람에게 물어도 대리인이 깨어나지 않고,
+        **적어 둔 입장이 한 번도 안 쓰입니다.**
+
+        준비 화면을 채워 놓고 회의에서 안 쓰이는 그림이 되는데, 그게 이
+        서비스에서 제일 보여 주면 안 되는 장면입니다.
+        """
+        MeetingParticipant.objects.filter(meeting=meeting, user=owner).update(
+            delegated=True, attendance=Attendance.DELEGATED)
+
+        p1 = DebatePoint.objects.create(
+            meeting=meeting, source_key="design-deadline", order=1,
+            title="디자인 시안을 이번 주에 확정할까요?",
+            options=[{"key": "a", "title": "이번 주 확정", "description": "8/18까지 확정하고 개발 착수"},
+                    {"key": "b", "title": "다음 주로 연기", "description": "QA 기간을 더 확보"}],
+            rationale="지난 회의에서 8/18 마감 얘기가 나왔지만 최종 확정은 아직 안 됐습니다.",
+            evidence=[{"kind": "utterance", "title": "임수연 발언",
+                      "body": "시안이 늦어지면 개발이 통째로 밀려요.",
+                      "at": (now - timedelta(hours=5)).isoformat(), "who": "임수연"}],
+            created_by_agent=True)
+        DebateStance.objects.create(
+            point=p1, user=owner, option_key="a",
+            body="이번 주 확정하겠습니다. 일정이 밀리면 개발 착수가 늦어집니다.")
+
+        DebatePoint.objects.create(
+            meeting=meeting, source_key="dev-schedule-extend", order=2,
+            title="개발 일정을 1주 연장할까요?",
+            options=[{"key": "a", "title": "1주 연장", "description": "디자인 지연을 반영"},
+                    {"key": "b", "title": "기존 일정 유지", "description": "다른 작업을 줄여서 맞춤"}],
+            rationale="일정 수정 자동 승인 설정이 꺼져 있어 대리인이 스스로 정하지 않습니다.",
+            evidence=[], created_by_agent=True)
+
+    def _seed_briefing_cards(self, meeting, agendas, users, owner, now):
+        """돌아온 사람이 보는 확인이 필요해요·나에게 요청한 내용 카드.
+        AiBriefing(narrative)은 이미 있었지만 이 카드들은 하나도 없었다."""
+        from apps.meetings.models import BriefingConfirmation, BriefingRequest
+        from apps.tasks.models import Task, TaskStatus
+
+        BriefingConfirmation.objects.create(
+            meeting=meeting, user=owner, source_key="schedule-slot",
+            title="회의 일정 조율 결과",
+            body="시간대가 겹쳐 슬롯을 다시 잡기로 했습니다. 최비성님이 새 슬롯을 공유할 예정입니다.",
+            agenda=agendas[0], occurred_at=meeting.ended_at)
+        BriefingConfirmation.objects.create(
+            meeting=meeting, user=owner, source_key="design-deadline",
+            title="디자인 시안 마감일 확정",
+            body="8월 18일까지 확정하기로 했습니다.",
+            agenda=agendas[1], occurred_at=meeting.ended_at,
+            confirmed_at=now - timedelta(hours=2))
+
+        task = Task.objects.create(
+            project=meeting.project, title="QA 기간 재검토",
+            status=TaskStatus.PENDING_APPROVAL, priority="P2",
+            assignee=owner, created_by=owner,
+            created_by_agent=True, source_meeting=meeting)
+        BriefingRequest.objects.create(
+            meeting=meeting, user=owner, source_key="qa-period",
+            title="QA 기간 관련 확인 요청", requester_name="서재민",
+            note="8/18 마감이면 QA 기간이 3일뿐인데 괜찮을까요?",
+            due_at=now + timedelta(days=2), task=task, occurred_at=meeting.ended_at)
+
+    def _touch_rooms(self):
+        """
+        방마다 `last_message_at` 을 **마지막 메시지 시각**으로 채웁니다.
+
+        안 채우면 사이드바가 정렬도 미리보기도 못 합니다. 채우려고 만든 방이
+        맨 아래에 깔리는데, 시연에서 제일 먼저 열어야 하는 방들입니다.
+
+        방을 만드는 곳이 여럿이라(`_seed_chat_rooms` · 작업 플로우 · 피드백)
+        **끝에서 한 번에 돕니다.** 만드는 자리마다 부르게 두면 새 방이 생길
+        때마다 한 줄을 빠뜨릴 자리가 늘어납니다.
+
+        지금 시각이 아니라 마지막 메시지 시각을 씁니다 — 지금으로 두면 방 일곱이
+        전부 같은 시각이 되어 사이드바 정렬이 무의미해집니다.
+        """
+        from apps.chat.models import ChatMessage, ChatRoom
+        from apps.chat.services import touch
+
+        for room in ChatRoom.objects.all():
+            last = (ChatMessage.objects.filter(room=room, deleted_at__isnull=True)
+                    .order_by("-sent_at").first())
+            if last:
+                touch(room, last.sent_at)
+
+    def _seed_chat_rooms(self, team, users, owner, now):
+        """팀 전체방·나의 AI 대리인방·1:1방·대리인에게 직접 묻는 방. 지금까지
+        프로젝트방 하나만 있었다."""
+        from apps.chat.models import ChatMessage, ChatRoom, RoomMember, RoomType
+        from apps.chat.services import (direct_key, ensure_ai_room, ensure_team_room,
+                                peer_agent_key)
+
+        team_room = ensure_team_room(team)
+        for pname, body in [
+            ("강다은", "다음 주 학술제 부스 배치도 공유드립니다."),
+            ("유수인", "이번 주 금요일 전체 회고 시간 잡을게요."),
+        ]:
+            ChatMessage.objects.create(room=team_room, sender=users[pname],
+                                       sender_name=pname, body=body)
+
+        ai_room = ensure_ai_room(owner)
+        ChatMessage.objects.create(room=ai_room, sender=owner, sender_name=owner.name,
+                                   body="오늘 일정 알려줘.")
+        # `sender` 는 주인이지만 **말한 것은 대리인**입니다.
+        #
+        # 없으면 화면이 본인이 보낸 메시지로 그립니다. 「자리를 비운 사이
+        # 대리인이 대신 답했다」 가 이 서비스가 보여 줘야 하는 장면인데,
+        # 시연 데이터에서 그것이 사라집니다.
+        #
+        # `SendMessageSkill` 도 `is_agent=True` 로 만듭니다 — 시드가 실제 경로와
+        # 다른 모양을 만들면 화면이 시드에서만 다르게 보입니다.
+        ChatMessage.objects.create(
+            room=ai_room, sender=owner, sender_name=f"{owner.name}의 Bordo",
+            is_agent=True,
+            body="오늘 9시 정기 팀 회의, 13시 디자인 리뷰, 17시 개발팀 Sync가 있습니다.")
+
+        # 1:1 방 — 유수인 · 최비성. direct_key가 정렬해서 만드니 누가 먼저
+        # 걸어도 같은 방이 된다.
+        d_key = direct_key(owner.id, users["최비성"].id)
+        direct_room, _ = ChatRoom.objects.get_or_create(
+            type=RoomType.DIRECT, dedupe_key=d_key, defaults={"created_by": owner})
+        for u in (owner, users["최비성"]):
+            RoomMember.objects.get_or_create(room=direct_room, user=u)
+        ChatMessage.objects.create(room=direct_room, sender=users["최비성"],
+                                   sender_name="최비성", body="결제 API 명세 확인해주실 수 있나요?")
+        ChatMessage.objects.create(room=direct_room, sender=owner,
+                                   sender_name=owner.name, body="네, 오늘 중으로 볼게요.")
+
+        # 대리인에게 직접 묻는 방 — 서재민이 유수인의 대리인에게. 방향이 있는
+        # 키라 peer_agent_key(요청자, 대상)로 만든다.
+        p_key = peer_agent_key(users["서재민"].id, owner.id)
+        peer_room, _ = ChatRoom.objects.get_or_create(
+            type=RoomType.PEER_AGENT, dedupe_key=p_key,
+            defaults={"created_by": users["서재민"], "agent_owner": owner})
+        for u in (users["서재민"], owner):
+            RoomMember.objects.get_or_create(room=peer_room, user=u)
+        ChatMessage.objects.create(
+            room=peer_room, sender=users["서재민"], sender_name="서재민",
+            body="유수인님 대신 여쭤봅니다 — 디자인 시안 오늘 확정되나요?")
+        ChatMessage.objects.create(
+            room=peer_room, sender=owner, sender_name=f"{owner.name}의 Bordo",
+            is_agent=True,
+            body="네, 오늘 중 확정 예정이라고 전달받았습니다.")
+
+

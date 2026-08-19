@@ -1,6 +1,7 @@
 """팀 · 프로젝트 · 즐겨찾기."""
 import secrets
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.db.models import F
@@ -52,6 +53,7 @@ def teams(request):
         team = Team.objects.create(
             name=name,
             description=request.data.get("description", "") or "",
+            timezone=_team_timezone(request.data.get("timezone")),
             created_by=request.user,
             category_keys=request.data.get("categories") or [],
             member_count=1,
@@ -98,6 +100,48 @@ def team_members(request, team_id):
     return Response(listing([TeamMemberSerializer(m).data for m in rows]))
 
 
+def _team_timezone(value) -> str:
+    """
+    팀 기준 시간대. 없는 지역 이름은 400 입니다.
+
+    조용히 기본값으로 바꾸면 사용자는 골랐다고 생각하는데 서버에는 다른 값이
+    들어갑니다. 빈 값은 "안 고름" 이라 그대로 둡니다 — 되돌릴 길을 막지 않습니다.
+    """
+    name = str(value or "").strip()
+    if not name:
+        return ""
+    try:
+        ZoneInfo(name)
+    except Exception:                                          # noqa: BLE001
+        raise BordoError("VALIDATION_ERROR", "알 수 없는 시간대입니다.",
+                         details={"timezone": name})
+    return name
+
+
+def _invite_ttl(data) -> timedelta:
+    """
+    초대 코드 유효기간.
+
+    화면은 `expires_in_hours` 를 보내는데 서버가 `valid_days` 만 읽어, 72시간으로
+    만든 코드가 조용히 7일짜리가 됐습니다. 400 도 안 나서 만든 사람은 사흘 뒤
+    닫힐 줄 알고 공유합니다.
+
+    시간 쪽을 먼저 봅니다 — 더 정밀한 단위가 이깁니다.
+    """
+    hours = data.get("expires_in_hours")
+    if hours is not None:
+        try:
+            hours = int(hours)
+        except (TypeError, ValueError):
+            raise BordoError("VALIDATION_ERROR", "expires_in_hours 는 정수입니다.",
+                             details={"expires_in_hours": hours})
+        if hours <= 0:
+            raise BordoError("VALIDATION_ERROR", "유효기간은 0보다 커야 합니다.",
+                             details={"expires_in_hours": hours})
+        return timedelta(hours=hours)
+    return timedelta(days=int(data.get("valid_days", 7)))
+
+
 @api_view(["POST"])
 def invite_codes(request, team_id):
     team_membership(request.user, team_id, roles=ADMINS)
@@ -106,9 +150,56 @@ def invite_codes(request, team_id):
         code=code, team_id=team_id,
         default_role=request.data.get("default_role", TeamRole.MEMBER),
         max_uses=int(request.data.get("max_uses", 10)),
-        expires_at=timezone.now() + timedelta(days=int(request.data.get("valid_days", 7))),
+        expires_at=timezone.now() + _invite_ttl(request.data),
     )
     return Response(InviteCodeSerializer(inv).data, status=201)
+
+
+def _join_team_wide_projects(team_id, user) -> list:
+    """
+    새로 들어온 사람을 **팀 전원이 들어 있는 프로젝트**에만 넣습니다.
+
+    ## 왜 필요한가
+
+    `join_team` 이 `TeamMember` 만 만들어서, 초대 코드로 들어온 사람은 팀에는
+    있는데 홈이 비어 있었습니다. 팀에서 돌아가는 프로젝트가 화면에 하나도
+    안 뜹니다. 반면 프로젝트를 만들 때는 `member_ids` 를 안 주면 팀 전원을
+    넣습니다 — 두 동작이 어긋나 있었습니다.
+
+    ## 왜 전부가 아니라 이것만
+
+    팀의 모든 프로젝트에 넣으면 **일부만 골라 만든 프로젝트에 일부러 빼 둔
+    사람이 들어갑니다.** 권한을 넓히는 쪽으로 잘못되면 되돌려도 이미 본 것은
+    못 지웁니다.
+
+    "이 프로젝트의 범위가 곧 팀 전체" 인 것만 따라갑니다. 프로젝트를 만들 때의
+    기본값(`member_ids` 없으면 팀 전원)과 뜻이 같습니다.
+
+    기준 시점은 **이 사람이 들어오기 직전의 팀원**입니다. 방금 만든 본인의
+    `TeamMember` 까지 세면 어느 프로젝트도 전원을 담고 있지 않게 됩니다.
+    """
+    existing = set(TeamMember.objects.filter(team_id=team_id)
+                   .exclude(user=user).values_list("user_id", flat=True))
+    if not existing:
+        # 첫 팀원입니다. 비교할 기준이 없어 아무 데도 안 넣습니다.
+        return []
+
+    projects = list(Project.objects.filter(team_id=team_id))
+    if not projects:
+        return []
+
+    members = {}
+    for pid, uid in (ProjectMember.objects
+                     .filter(project_id__in=[p.id for p in projects])
+                     .values_list("project_id", "user_id")):
+        members.setdefault(pid, set()).add(uid)
+
+    joined = []
+    for project in projects:
+        if existing <= members.get(project.id, set()):
+            ProjectMember.objects.get_or_create(project=project, user=user)
+            joined.append({"id": str(project.id), "name": project.name})
+    return joined
 
 
 @api_view(["POST"])
@@ -128,9 +219,15 @@ def join_team(request):
                                   team_role=inv.default_role)
         InviteCode.objects.filter(pk=inv.pk).update(used_count=F("used_count") + 1)
         Team.objects.filter(pk=inv.team_id).update(member_count=F("member_count") + 1)
+        joined = _join_team_wide_projects(inv.team_id, request.user)
+
     return Response({"team_id": str(inv.team_id), "team_name": inv.team.name,
                      "joined": True, "team_role": inv.default_role,
-                     "joined_at": timezone.now()})
+                     "joined_at": timezone.now(),
+                     # 화면이 "프로젝트 N 개에 함께 들어갔습니다" 를 그릴 수
+                     # 있게 이름을 같이 줍니다. 개수만 주면 어디에 들어갔는지
+                     # 확인하려고 목록을 한 번 더 불러야 합니다.
+                     "joined_projects": joined})
 
 
 # ─────────────────────────────────────────── 프로젝트

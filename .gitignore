@@ -6,3 +6,4 @@ db.sqlite3
 venv/
 staticfiles/
 .DS_Store
+media/

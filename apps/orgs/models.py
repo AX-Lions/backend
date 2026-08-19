@@ -26,6 +26,14 @@ class Team(UUIDModel, TimeStamped, SoftDeletable):
     # 문서 수 같은 집계가 필요해지면 Category 테이블로 분리하십시오.
     category_keys = models.JSONField(default=list, blank=True)
 
+    #: 팀의 기준 시간대. 사람마다 하루를 자르는 기준이 다른 것이 이 서비스의
+    #: 전제라, 팀을 만들 때 고른 값을 버리지 않고 남깁니다.
+    #:
+    #: **사람의 시간대를 대신하지 않습니다.** 화면에 찍히는 시각은 여전히
+    #: `User.timezone` 으로 환산합니다 — 팀 기준으로 찍으면 다른 지역에 있는
+    #: 팀원이 자기 새벽에 열리는 회의를 남의 오후로 봅니다.
+    timezone = models.CharField(max_length=64, blank=True, default="")
+
     member_count = models.PositiveIntegerField(default=0)   # 카운터
 
     class Meta:

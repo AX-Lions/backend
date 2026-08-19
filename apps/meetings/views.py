@@ -61,10 +61,39 @@ def meetings(request, project_id):
                 .prefetch_related("participants")[:50])
         return Response(listing(MeetingSerializer(rows, many=True).data))
 
+    from apps.orgs.models import ProjectMember
+
     title = (request.data.get("title") or "").strip()
-    scheduled_at = request.data.get("scheduled_at")
-    if not title or not scheduled_at:
-        raise BordoError("VALIDATION_ERROR", "title 과 scheduled_at 은 필수입니다.")
+    if not title:
+        raise BordoError("VALIDATION_ERROR", "title 은 필수입니다.")
+    # 들어오는 자리에서 파싱합니다. 그대로 `create()` 에 넣으면 DB 에는 들어가지만
+    # 메모리 인스턴스는 문자열이라 바로 직렬화할 때 터집니다 — 잘못된 값이
+    # 400 이 아니라 500 으로 나갔습니다.
+    scheduled_at = parse_dt(request.data.get("scheduled_at"), "scheduled_at",
+                            required=True)
+
+    # 참석자를 고를 수 있습니다.
+    #
+    # 화면(`NewMeetingDialog`)에 참석자 피커가 있는데 서버가 이 키를 안 읽어,
+    # 골라도 프로젝트 전원이 들어갔습니다. 옆에 나란히 있는 일정 만들기
+    # (`POST /projects/{id}/calendar/events`)는 이미 받고 있어, 똑같이 생긴
+    # 다이얼로그 둘이 다르게 동작했습니다.
+    participant_ids = request.data.get("participant_ids") or []
+    if participant_ids:
+        valid = set(map(str, ProjectMember.objects
+                        .filter(project=project, user_id__in=participant_ids)
+                        .values_list("user_id", flat=True)))
+        outsiders = [str(u) for u in participant_ids if str(u) not in valid]
+        if outsiders:
+            raise BordoError("PROJECT_ACCESS_DENIED",
+                             "프로젝트 참여자만 회의에 넣을 수 있습니다.",
+                             details={"not_in_project": outsiders})
+    else:
+        # 안 보내면 지금까지처럼 전원입니다. 빈 배열을 "아무도 아님" 으로 읽으면
+        # 이 키를 모르는 클라이언트가 참석자 없는 회의를 만듭니다.
+        valid = set(map(str, ProjectMember.objects.filter(project=project)
+                        .values_list("user_id", flat=True)))
+
     with transaction.atomic():
         meeting = Meeting.objects.create(
             project=project, project_name=project.name, title=title,
@@ -73,14 +102,12 @@ def meetings(request, project_id):
             discord_channel_id=request.data.get("discord_channel_id", "") or "",
             created_by=request.user,
         )
-        from apps.orgs.models import ProjectMember
-        members = (ProjectMember.objects.filter(project=project)
+        members = (ProjectMember.objects.filter(project=project, user_id__in=valid)
                    .select_related("user"))
         MeetingParticipant.objects.bulk_create([
             MeetingParticipant(meeting=meeting, user=m.user, user_name=m.user.name)
             for m in members])
         MeetingSummary.objects.create(meeting=meeting)
-    meeting.refresh_from_db()
     return Response(MeetingSerializer(meeting).data, status=201)
 
 
@@ -486,25 +513,46 @@ def indexes(request, meeting_id):
     (`project_flow` 참고 — 작업 플로우의 스코프는 기간입니다). 회의로 좁히면
     조건에 맞는 행이 하나도 없어 이 목록은 언제나 빈 배열이었습니다.
     회의 id 는 어느 프로젝트인지를 알아내는 데만 씁니다.
+
+    ## 판과 **같은 필터**를 지납니다
+
+    전에는 인덱스가 필터를 안 태워서, 내용 필터를 걸면 목록에는 남아 있는데
+    그 항목이 가리키는 화살표가 판에 없었습니다. 누르면 강조될 것이 없어
+    화면은 "눌렀는데 아무 일이 없다" 가 됩니다.
+
+    ## 걷어내는 것은 **필터가 걸렸을 때만**
+
+    필터가 걸렸는데 관련 화살표가 하나도 없는 항목은 뺍니다. 남겨 두고 빈
+    배열을 주면 누를 수는 있는데 아무 일도 안 일어나는 줄이 남습니다.
+
+    필터가 없는 기본 상태에서는 안건을 그대로 다 보여줍니다. 안건과 화살표를
+    잇는 자동 매칭이 아직 없어서, 여기서도 걷어내면 회의 모드 인덱스가 늘
+    빈 목록이 됩니다 — 이슈 #77 로 한 번 고친 상태로 되돌아갑니다. 안건은
+    화살표가 안 붙어 있어도 그 자체로 회의의 목차입니다.
     """
     meeting = meeting_access(request.user, meeting_id)
-    cat = _resolve_category(request.query_params.get("category"))
+    params = request.query_params
+    filtered = any(params.get(k) for k in
+                   ("content_types", "surfaces", "sources", "participant_ids",
+                    "since_minutes"))
 
-    if cat == FlowCategory.MEETING:
+    if _resolve_category(params.get("category")) == FlowCategory.MEETING:
+        _, edges = _filtered_edges({"meeting": meeting}, params)
         edge_map = {}
-        for e in FlowEdge.objects.filter(meeting=meeting, category=cat):
+        for e in edges:
             if e.agenda_id:
                 edge_map.setdefault(e.agenda_id, []).append(e.id)
         rows = Agenda.objects.filter(meeting=meeting)
         return Response(listing([{
             "id": str(a.id), "label": a.title, "kind": "AGENDA",
             "related_edge_ids": [str(i) for i in edge_map.get(a.id, [])],
-        } for a in rows]))
+        } for a in rows if not filtered or a.id in edge_map]))
 
-    from_at, to_at = _work_period(request.query_params)
+    from_at, to_at = _work_period(params)
+    cat, edges = _filtered_edges({"project_id": meeting.project_id}, params,
+                                 period=(from_at, to_at))
     edge_map = {}
-    for e in FlowEdge.objects.filter(project_id=meeting.project_id, category=cat,
-                                     occurred_at__range=(from_at, to_at)):
+    for e in edges:
         if e.work_document_id:
             edge_map.setdefault(e.work_document_id, []).append(e.id)
 
@@ -516,7 +564,7 @@ def indexes(request, meeting_id):
         Q(visibility=Visibility.TEAM) | Q(owner=request.user))
     return Response(listing([{
         "id": str(d.id), "label": d.title, "kind": "DOCUMENT",
-        "related_edge_ids": [str(i) for i in edge_map.get(d.id, [])],
+        "related_edge_ids": [str(i) for i in edge_map[d.id]],
     } for d in docs]))
 
 

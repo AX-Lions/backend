@@ -32,6 +32,42 @@ def _my_project_ids(user):
     return list(joined)
 
 
+def _discord_guild_id(user) -> str:
+    """
+    사이드바 `Discord 바로가기` 가 열 서버.
+
+    홈은 팀을 가로지르는 화면이라 "지금 보고 있는 팀" 을 서버가 모릅니다
+    (프론트가 `localStorage` 로 들고 있습니다). 그래서 **최근에 연 프로젝트의
+    팀**을 먼저 봅니다 — 방금까지 그 팀 일을 하고 있었으니 Discord 도 그쪽일
+    가능성이 높습니다. 없으면 먼저 들어간 팀 순으로 내려갑니다.
+
+    연결된 팀이 없으면 빈 문자열입니다. 호출부가 이 값으로 `connected` 를
+    가르므로, 여기서 아무 값이나 돌려주면 연결 안 된 팀에서도 버튼이 켜져
+    Discord 의 없는 서버로 보냅니다.
+    """
+    from apps.discord.models import GuildLink
+
+    team_ids = list(TeamMember.objects.filter(user=user)
+                    .order_by("created_at").values_list("team_id", flat=True))
+    if not team_ids:
+        return ""
+
+    links = dict(GuildLink.objects.filter(team_id__in=team_ids)
+                 .values_list("team_id", "guild_id"))
+    if not links:
+        return ""
+
+    recent = (RecentProject.objects.filter(user=user)
+              .select_related("project").order_by("-opened_at").first())
+    if recent and links.get(recent.project.team_id):
+        return links[recent.project.team_id]
+
+    for tid in team_ids:
+        if links.get(tid):
+            return links[tid]
+    return ""
+
+
 def _shortcuts(user):
     """
     사이드바 하단 `바로가기버튼모음`.
@@ -45,7 +81,7 @@ def _shortcuts(user):
     from apps.chat.services import ensure_ai_room
 
     room = ensure_ai_room(user)
-    guild_id = ""       # A 담당(Discord 연동)이 붙으면 팀 연결에서 읽어옵니다.
+    guild_id = _discord_guild_id(user)
     return {
         "agent_room_id": str(room.id),
         "discord": ({"guild_id": guild_id, "connected": True,
@@ -240,3 +276,120 @@ def meeting_favorite(request, meeting_id):
     Favorite.objects.filter(user=request.user, target_type=Favorite.Target.MEETING,
                             target_id=meeting_id).delete()
     return Response({"meeting_id": str(meeting_id), "is_favorite": False})
+
+
+# ─────────────────────────────────────────── 내 요청함
+
+def _inbox_date_label(day, today) -> str:
+    """
+    `오늘 · 8월 19일` · `어제 · 8월 18일` · `8월 17일`.
+
+    **서버가 만듭니다.** 클라이언트가 만들면 브라우저 시간대로 `오늘` 을 판정해,
+    시간대가 다른 팀원끼리 같은 회의를 서로 다른 날짜 묶음에서 봅니다. 접힘
+    상태의 열쇠(`date_key`)와 라벨이 갈리면 접었던 날짜가 다시 펴집니다.
+
+    `display.date_label` 을 안 쓰는 이유는 인자가 `datetime` 이라서입니다 —
+    여기서 다루는 것은 이미 사용자 시간대로 잘라 낸 **날짜**입니다.
+    """
+    stamp = f"{day.month}월 {day.day}일"
+    delta = (today - day).days
+    if delta == 0:
+        return f"오늘 · {stamp}"
+    if delta == 1:
+        return f"어제 · {stamp}"
+    return stamp
+
+
+@api_view(["GET"])
+def inbox(request):
+    """
+    내 요청함 — 회의마다 흩어져 있는 `답변 필요` · `확인 필요` · `승인 필요` 를
+    날짜별로 모읍니다.
+
+    ## 왜 서버가 모으는가
+
+    클라이언트가 모으려면 회의 목록을 받아 회의마다 브리핑을 한 번씩 불러야
+    합니다. 회의가 스무 개면 왕복이 스물한 번이고, 그중 하나가 실패하면 그
+    회의 몫만 조용히 빠진 목록이 됩니다.
+
+    ## 브리핑 조회로 읽음 처리되면 안 됩니다
+
+    `GET /meetings/{id}/ai-briefing` 은 기본이 읽음 처리입니다. 요청함이 그것을
+    회의마다 부르면 **목록을 한 번 띄운 것만으로** 홈의 `Bordo 브리핑 보러가기`
+    가 사라집니다. 그래서 브리핑을 부르지 않고 원본 표를 직접 셉니다.
+
+    ## 셋이 모두 0 인 회의는 빼는가
+
+    뺍니다. 요청함은 "처리할 것이 남은 것" 을 보는 화면이라, 다 끝난 회의가
+    목록에 남으면 무엇을 해야 하는지가 흐려집니다.
+    """
+    from collections import defaultdict
+
+    from apps.agent.models import PendingQuestion
+    from apps.meetings.models import BriefingConfirmation
+    from apps.tasks.models import Task, TaskStatus
+
+    user = request.user
+    project_ids = _my_project_ids(user)
+    if not project_ids:
+        return Response({"groups": []})
+
+    answers = defaultdict(int)
+    for mid in (PendingQuestion.objects
+                .filter(target_user=user, answered_at__isnull=True,
+                        meeting__project_id__in=project_ids)
+                .values_list("meeting_id", flat=True)):
+        answers[mid] += 1
+
+    confirms = defaultdict(int)
+    for mid in (BriefingConfirmation.objects
+                .filter(user=user, confirmed_at__isnull=True,
+                        meeting__project_id__in=project_ids)
+                .values_list("meeting_id", flat=True)):
+        confirms[mid] += 1
+
+    # 승인 대기 태스크는 id 까지 들고 옵니다. 화면이 팝업에서 하나씩 처리한 뒤
+    # 남은 개수를 다시 세려면 무엇이 남았는지를 알아야 합니다.
+    approvals = defaultdict(list)
+    for mid, tid in (Task.objects
+                     .filter(assignee=user, status=TaskStatus.PENDING_APPROVAL,
+                             source_meeting__isnull=False,
+                             project_id__in=project_ids)
+                     .values_list("source_meeting_id", "id")):
+        approvals[mid].append(str(tid))
+
+    meeting_ids = set(answers) | set(confirms) | set(approvals)
+    if not meeting_ids:
+        return Response({"groups": []})
+
+    rows = (Meeting.objects.filter(id__in=meeting_ids)
+            .select_related("project").order_by("-scheduled_at"))
+
+    tz = user_tz(user)
+    today = timezone.localtime(timezone=tz).date()
+    groups = defaultdict(list)
+    for m in rows:
+        # 끝난 회의는 끝난 날에 답니다. 예정 시각으로 묶으면 자정을 넘겨 끝난
+        # 회의가 전날 묶음에 들어가, 어제 칸을 펼쳐야 오늘 할 일이 나옵니다.
+        when = m.ended_at or m.scheduled_at
+        day = timezone.localtime(when, tz).date()
+        need_a, need_c = answers.get(m.id, 0), confirms.get(m.id, 0)
+        task_ids = approvals.get(m.id, [])
+        groups[day].append({
+            "id": str(m.id),
+            "meeting_id": str(m.id),
+            "title": m.title,
+            "project_label": f"{m.project.team_name} · {m.project.name}",
+            "urgent": bool(need_a + need_c + len(task_ids)),
+            "needs_answer": need_a,
+            "needs_confirm": need_c,
+            "needs_approval": len(task_ids),
+            "pending_approval_task_ids": task_ids,
+        })
+
+    return Response({"groups": [
+        {"date_key": day.isoformat(),
+         "date_label": _inbox_date_label(day, today),
+         "items": items}
+        for day, items in sorted(groups.items(), reverse=True)
+    ]})

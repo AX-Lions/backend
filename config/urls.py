@@ -38,6 +38,7 @@ urlpatterns = [
     # ── 00. 홈
     path(f"{API}/home", home.home),
     path(f"{API}/me/briefing-dismiss", home.briefing_dismiss),
+    path(f"{API}/me/inbox", home.inbox),
     path(f"{API}/meetings/<uuid:meeting_id>/favorite", home.meeting_favorite),
 
     # ── 01. 인증
@@ -50,6 +51,7 @@ urlpatterns = [
     # ── 02. 사용자
     path(f"{API}/users/me", accounts.me),
     path(f"{API}/users/me/preferences", accounts.preferences),
+    path(f"{API}/me/presence", accounts.presence),
 
     # ── 03. 팀
     path(f"{API}/teams", orgs.teams),
@@ -164,11 +166,14 @@ urlpatterns = [
 
     # ── 16. 채팅
     path(f"{API}/chat/sidebar", chat.sidebar),
+    path(f"{API}/chat/away-handled", chat.away_handled),
     path(f"{API}/chat/important", chat.important),
     path(f"{API}/chat/candidates", chat.candidates),
     path(f"{API}/chat/rooms", chat.rooms),
+    path(f"{API}/chat/rooms/search", chat.room_search),
     path(f"{API}/chat/rooms/<uuid:room_id>", chat.room_detail),
     path(f"{API}/chat/rooms/<uuid:room_id>/members", chat.room_members),
+    path(f"{API}/chat/rooms/<uuid:room_id>/mute", chat.room_mute),
     path(f"{API}/chat/rooms/<uuid:room_id>/members/<uuid:user_id>",
          chat.room_member_detail),
     path(f"{API}/chat/rooms/<uuid:room_id>/messages", chat.messages),
@@ -182,6 +187,8 @@ urlpatterns = [
     path(f"{API}/chat/messages/<uuid:message_id>/important/confirm",
          chat.message_important_confirm),
     path(f"{API}/chat/attachments/<uuid:attachment_id>", chat.attachment_detail),
+    path(f"{API}/chat/attachments/<uuid:attachment_id>/download",
+         chat.attachment_download),
 
     # ── /internal/v1 — Discord Bot 전용 (Service Token)
     #

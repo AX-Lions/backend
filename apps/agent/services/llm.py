@@ -32,6 +32,17 @@ _RETRYABLE = ("429", "500", "502", "503", "504", "overloaded", "rate limit",
 _MAX_ATTEMPTS = 3
 _BACKOFF_BASE = 1.0     # 1초 → 2초
 
+#: 한 번의 호출을 기다리는 시간.
+#:
+#: SDK 기본값은 **600초**입니다. 여기에 위 재시도 3회가 곱해지면 한 번의
+#: 대리인 호출이 30분을 매답니다. 게다가 개발 기본값이
+#: `CELERY_TASK_ALWAYS_EAGER=1` 이라 이 대기가 **봇의 HTTP 요청 스레드 안에서**
+#: 일어납니다 — 회의 중 OpenAI 가 느려지면 봇이 통째로 멈춥니다.
+#:
+#: 회의는 사람이 말하는 속도로 흘러갑니다. 20초를 넘겨 온 답은 이미 늦어서
+#: 쓸 데가 없습니다. 늦게 오느니 빨리 실패하고 다음 발언을 받는 편이 낫습니다.
+_TIMEOUT_SEC = float(os.environ.get("OPENAI_TIMEOUT_SEC", "20"))
+
 
 @dataclass
 class ToolCall:
@@ -112,7 +123,11 @@ class LLMClient:
     def _ensure(self):
         if self._client is None:
             from openai import OpenAI          # 지연 import — 미설치 환경에서도 서버는 뜹니다
-            self._client = OpenAI(api_key=self._key)
+            # `max_retries=0` 인 이유 — 재시도는 이 파일이 이미 합니다
+            # (`_MAX_ATTEMPTS`). SDK 것을 켜 두면 3 × 2 = 6회가 되고
+            # 대기 시간도 그만큼 곱해집니다.
+            self._client = OpenAI(api_key=self._key,
+                                  timeout=_TIMEOUT_SEC, max_retries=0)
         return self._client
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None,

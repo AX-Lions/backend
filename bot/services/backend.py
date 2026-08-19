@@ -25,11 +25,19 @@ class BackendClient:
         if self._session is not None and not self._session.closed:
             await self._session.close()
 
-    async def request(self, method: str, path: str, **kwargs):
+    async def request(self, method: str, path: str, *, max_retries: int | None = None, **kwargs):
+        """
+        max_retries를 넘기면 이 호출 한 번만 self.max_retries 대신 그 값을
+        쓴다. LLM을 부르는 엔드포인트처럼 실패가 아니라 응답이 느려서
+        재시도되는 경우, 재시도는 성공 중인 요청을 그대로 다시 보내
+        같은 일을 중복 실행시킨다 — max_retries=0으로 이 호출만 재시도를
+        끌 수 있게 열어 둔다.
+        """
         url = f"{self.base_url}{path}"
         last_exc = None
+        retries = self.max_retries if max_retries is None else max_retries
 
-        for attempt in range(self.max_retries + 1):
+        for attempt in range(retries + 1):
             try:
                 session = await self._get_session()
                 async with session.request(method, url, **kwargs) as resp:
@@ -49,7 +57,7 @@ class BackendClient:
 
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 last_exc = exc
-                log.warning("Backend 호출 실패(%s/%s): %s %s", attempt + 1, self.max_retries + 1, path, exc)
+                log.warning("Backend 호출 실패(%s/%s): %s %s", attempt + 1, retries + 1, path, exc)
                 await asyncio.sleep(0.5 * (attempt + 1))
 
         log.error("Backend 호출 최종 실패: %s (%s)", path, last_exc)

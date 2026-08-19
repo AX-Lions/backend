@@ -419,7 +419,9 @@ class ArtifactTest(Base):
         ProposeTaskSkill().run({"title": "인덱스 추가"}, ctx)
 
         e = FlowEdge.objects.get(label="인덱스 추가")
-        self.assertEqual(e.content_type, FlowContentType.PLAN)
+        # 회의 모드 필터에 `계획` 칸이 없습니다. 후보가 하나 쌓이는 순간
+        # 화면에 없는 칸이 뜨던 것을 `결론` 으로 옮겼습니다 (이슈 #67).
+        self.assertEqual(e.content_type, FlowContentType.CONCLUSION)
         self.assertEqual(e.to_nodes[0]["kind"], "SERVER")
         # 서버 노드에는 사람이 없습니다 — participant_ids 에 들어가면 필터가 틀립니다.
         self.assertEqual(e.participant_ids, [str(self.absent.id)])
