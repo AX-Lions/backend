@@ -368,7 +368,7 @@ class Command(BaseCommand):
         """
         from apps.agent.models import AgentLookup
         from apps.agent.services.lookup import draw_edge
-        from apps.chat.models import ChatMessage
+        from apps.chat.models import ChatMessage, MessageImportance
         from apps.chat.services import ensure_project_room
         from apps.documents.models import Document
         from apps.meetings.models import FlowCategory, FlowEdge, FlowSource
@@ -510,12 +510,21 @@ class Command(BaseCommand):
                 return msg
             return make
 
-        emit(5, say("임수연", "우측 패널이 1280 이하에서 잘립니다. 너비를 다시 봐야 합니다.", 5))
+        first_feedback = emit(5, say(
+            "임수연", "우측 패널이 1280 이하에서 잘립니다. 너비를 다시 봐야 합니다.", 5))
         emit(2, say("최비성", "응답 구조를 바꿨습니다. 기존 필드는 한 주만 같이 내려갑니다.", 2))
         # 사람마다 피드백이 있어야 우측 패널의 `피드백` 칩이 0 이 아닙니다.
         emit(6, say("서재민", "로그인 실패 원인에 따라 오류 메시지를 구분하는 게 좋겠습니다.", 6))
         emit(4, say("서재민", "회의 상세 화면은 모바일에서 좌우 스크롤이 생깁니다. 기준폭을 낮춥시다.", 4))
         emit(3, say("강다은", "Discord 공지 문구에 회의 시각이 두 번 들어갑니다.", 3))
+
+        # 중요 메시지 확인 상태 (#137). 확인해도 is_important는 true로 남고
+        # 확인 기록만 MessageImportance로 따로 쌓인다 — 확인은 중요 표시를
+        # 내리는 것과 다르다. 이 방에 중요 메시지가 5건 더 있는데 그중
+        # 하나만 확인해도 방이 「중요 채팅」 목록에서 안 빠지는 규칙과,
+        # 확인 안 한 나머지는 그대로 남의 화면에도 남는 규칙을 같이 보여준다.
+        MessageImportance.objects.get_or_create(
+            message=first_feedback, user=users["유수인"])
 
         # 중요 표시는 화면에서 **나중에** 켭니다(`PATCH .../important`). 켜지는
         # 순간에도 그려지는지 시드가 함께 확인합니다.
