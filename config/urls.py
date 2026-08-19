@@ -186,6 +186,8 @@ urlpatterns = [
     path(f"{API}/chat/messages/<uuid:message_id>/important/confirm",
          chat.message_important_confirm),
     path(f"{API}/chat/attachments/<uuid:attachment_id>", chat.attachment_detail),
+    path(f"{API}/chat/attachments/<uuid:attachment_id>/download",
+         chat.attachment_download),
 
     # ── /internal/v1 — Discord Bot 전용 (Service Token)
     #
