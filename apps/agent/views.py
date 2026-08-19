@@ -31,6 +31,32 @@ def get_settings(user):
     return obj
 
 
+def _settings_body(obj, previous_version: int, changed: dict) -> dict:
+    """
+    PATCH 응답. **GET 과 같은 모양**입니다 (이슈 #73).
+
+    전에는 PATCH 만 `{settings, previous_version, changed}` 로 감쌌습니다.
+    화면이 그 응답을 그대로 상태에 담으면 설정 키가 전부 `undefined` 가 되어
+    **스위치 여섯 개가 한꺼번에 꺼진 것처럼 보였습니다.** 서버 값은 멀쩡한데
+    화면만 거짓말하는 상태라 눈으로는 못 찾고, 새로고침하면 GET 이라 정상으로
+    돌아와 재현 조건도 좁습니다.
+
+    ## 왜 GET 이 아니라 PATCH 를 옮겼는가
+
+    반대로 GET 을 감싸면 이미 붙어 있는 화면이 그 순간 깨집니다. 프론트가
+    `saved?.settings ?? saved` 로 두 모양을 다 받게 막아 뒀는데, 그 방어는
+    PATCH 쪽에만 걸려 있습니다.
+
+    `previous_version` 과 `changed` 는 버립니다 — 가 아니라 같은 레벨에
+    둡니다. 설정 이력 화면이 "무엇이 언제 바뀌었는지" 를 보여주는 재료라
+    없애면 그 화면을 못 만듭니다. 설정 키와 이름이 겹치지 않아 섞여도
+    구별됩니다.
+    """
+    return {**AgentSettingsSerializer(obj).data,
+            "previous_version": previous_version,
+            "changed": changed}
+
+
 @api_view(["GET", "PATCH"])
 def settings_view(request):
     obj = get_settings(request.user)
@@ -84,8 +110,7 @@ def settings_view(request):
             obj.tone = new
     if not changed:
         # 바뀐 게 없으면 버전을 올리지 않습니다. 판정 이력이 의미 없이 불어납니다.
-        return Response({"settings": AgentSettingsSerializer(obj).data,
-                         "previous_version": obj.active_version, "changed": {}})
+        return Response(_settings_body(obj, obj.active_version, {}))
 
     with transaction.atomic():
         previous = obj.active_version
@@ -93,8 +118,7 @@ def settings_view(request):
         obj.save()
         AgentSettingsVersion.objects.create(
             user=request.user, version=obj.active_version, snapshot=obj.as_snapshot())
-    return Response({"settings": AgentSettingsSerializer(obj).data,
-                     "previous_version": previous, "changed": changed})
+    return Response(_settings_body(obj, previous, changed))
 
 
 @api_view(["GET"])

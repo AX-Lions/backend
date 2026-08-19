@@ -20,7 +20,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 
 from apps.agent.services.flow import agent_display_name, agent_display_names
-from apps.common.display import user_tz
+from apps.common.display import country_of, user_tz
 from apps.common.events import publish
 from apps.common.pagination import cursor_page
 from apps.common.permissions import project_membership, team_membership
@@ -140,13 +140,26 @@ def room_context(user, rooms):
             "sent_at": last.sent_at,
         }
 
-    avatar_map = {}
+    avatar_map, member_map = {}, {}
     rows = (RoomMember.objects.filter(room_id__in=ids, left_at__isnull=True)
             .select_related("user").order_by("created_at"))
+    member_agent_names = agent_display_names({r.user_id for r in rows})
     for row in rows:
         avatar_map.setdefault(row.room_id, [])
         if row.user.avatar_url and len(avatar_map[row.room_id]) < 4:
             avatar_map[row.room_id].append(row.user.avatar_url)
+        # 방 머리 시계 줄의 재료. 한 번에 모아 두지 않으면 방 목록 하나에
+        # 참여자 수만큼 쿼리가 더 나갑니다.
+        member_map.setdefault(row.room_id, []).append({
+            "id": str(row.user_id),
+            "name": row.user.name,
+            "avatar_url": row.user.avatar_url or "",
+            "timezone": row.user.timezone,
+            "country": country_of(row.user.timezone),
+            "presence": row.user.presence,
+            "agent_name": member_agent_names.get(row.user_id, ""),
+            "is_me": row.user_id == user.id,
+        })
 
     # 대리인 방 이름은 **저장된 title 이 아니라 주인의 지금 호칭**입니다.
     #
@@ -158,6 +171,10 @@ def room_context(user, rooms):
 
     return {"unread_map": unread_map, "important_map": important_map,
             "last_map": last_map, "avatar_map": avatar_map,
+            "member_map": member_map,
+            # 알림을 껐는지는 **보는 사람 기준**입니다. 한 사람이 껐다고 남의
+            # 목록에서도 꺼지면 안 됩니다.
+            "muted_map": {rid: bool(m.muted_at) for rid, m in memberships.items()},
             "agent_name_map": agent_display_names(owner_ids)}
 
 
@@ -468,10 +485,41 @@ def room_detail(request, room_id):
     return Response({"room_id": str(room.id), "action": "LEFT", "at": now})
 
 
-@api_view(["POST"])
+@api_view(["GET", "POST"])
 def room_members(request, room_id):
-    """대화상대 추가. 단체방만 됩니다."""
+    """
+    방 참여자 목록(GET) · 대화상대 추가(POST).
+
+    ## 읽는 자리가 없어서 넣는 자리도 못 썼습니다
+
+    사람을 넣는 주소와 내보내는 주소는 있는데 **누가 있는지 읽을 수가
+    없었습니다.** 명단 없이 내보내기 화면을 만들 방법이 없어, 그 두 주소가
+    화면에서 한 번도 안 불렸습니다.
+
+    나간 사람은 뺍니다. 기록은 `left_at` 으로 남기지만 여기는 **지금 방에 있는
+    사람**을 묻는 자리라, 섞으면 내보내기 목록에 이미 나간 사람이 뜹니다.
+
+    방 목록의 `members[]` 와 같은 모양입니다. 한 방만 다시 물을 때 화면이
+    다른 모양을 받으면 같은 줄을 두 번 만들어야 합니다.
+    """
     room, _ = room_access(request.user, room_id)
+
+    if request.method == "GET":
+        rows = (RoomMember.objects.filter(room=room, left_at__isnull=True)
+                .select_related("user").order_by("created_at"))
+        names = agent_display_names([r.user_id for r in rows])
+        return Response(listing([{
+            "id": str(r.user_id),
+            "name": r.user.name,
+            "avatar_url": r.user.avatar_url or None,
+            "timezone": r.user.timezone,
+            "country": country_of(r.user.timezone),
+            "presence": r.user.presence,
+            "agent_name": names.get(r.user_id, ""),
+            "is_me": r.user_id == request.user.id,
+            "joined_at": r.created_at,
+        } for r in rows]))
+
     if room.type not in GROUP_TYPES:
         raise BordoError("CHAT_ROOM_TYPE_NOT_ALLOWED",
                          "1:1 방에 사람을 더하면 기존 대화가 제3자에게 열립니다. "
@@ -993,3 +1041,72 @@ def search(request, room_id):
         "message": MessageSerializer(m, context=ctx).data,
         "date": m.sent_at.astimezone(tz).date().isoformat(),
     } for m in rows]))
+
+
+@api_view(["GET"])
+def away_handled(request):
+    """
+    자리를 비운 사이 **내 대리인이 대신 받은 대화.**
+
+    좌측 목록의 `중요 채팅` 자리를 이것으로 바꿉니다. 그쪽은 내가 미리 별을
+    찍어 둔 것만 모이는데, 자리를 비우기 전에 무엇이 중요해질지 알 수 있으면
+    애초에 자리를 안 비웁니다. 돌아와서 먼저 봐야 하는 것은 없는 동안 오간
+    말입니다.
+
+    **방 기준으로 묶어 개수까지 셉니다.** 화면이 방마다 메시지를 받아 세게
+    두면 목록 하나 그리려고 방 수만큼 요청이 나갑니다.
+
+    `is_agent` 로만 거르지 않습니다 — 옆에서 시켜서 한 말도 대리인이 보낸
+    것이라, 그것까지 섞이면 무엇을 확인해야 하는지가 흐려집니다.
+    """
+    user = request.user
+    rows = (ChatMessage.objects
+            .filter(sender=user, is_agent=True, answered_while_away=True,
+                    deleted_at__isnull=True,
+                    room__memberships__user=user,
+                    room__memberships__left_at__isnull=True)
+            .select_related("room").order_by("-sent_at"))
+
+    grouped = {}
+    for m in rows:
+        slot = grouped.setdefault(m.room_id, {"room": m.room, "count": 0, "last": m})
+        slot["count"] += 1
+
+    ctx = room_context(user, [g["room"] for g in grouped.values()])
+    results = []
+    for slot in sorted(grouped.values(), key=lambda g: g["last"].sent_at, reverse=True):
+        room, last = slot["room"], slot["last"]
+        body = RoomSummarySerializer(room, context=ctx).data
+        results.append({
+            "room_id": str(room.id),
+            "title": body["title"],
+            "path_label": body.get("path_label") or "",
+            "handled_count": slot["count"],
+            "last_reply": {"id": str(last.id),
+                           "preview": last.body[:80] or "(첨부)",
+                           "sent_at": last.sent_at},
+        })
+    return Response(listing(results))
+
+
+@api_view(["PATCH"])
+def room_mute(request, room_id):
+    """
+    이 방 알림 끄기·켜기.
+
+    **방 나가기와 다릅니다.** 나가면 목록에서 사라지고 새 메시지도 안 보이는데,
+    알림만 끄는 것은 대화는 계속 보되 소리로 부르지 말라는 뜻입니다.
+
+    미읽음 수는 그대로 셉니다. 안 세면 "알림을 껐다" 와 "다 읽었다" 가 화면에서
+    구별되지 않습니다.
+    """
+    room, member = room_access(request.user, room_id)
+    want = request.data.get("muted")
+    if want is None:
+        raise BordoError("VALIDATION_ERROR", "muted 는 필수입니다.")
+
+    now = timezone.now()
+    member.muted_at = now if want else None
+    member.save(update_fields=["muted_at", "updated_at"])
+    return Response({"room_id": str(room.id), "muted": bool(member.muted_at),
+                     "muted_at": member.muted_at})

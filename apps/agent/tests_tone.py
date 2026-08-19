@@ -106,7 +106,7 @@ class SettingsApiTest(Base):
                                 {"tone": "FRIENDLY"}, content_type="application/json")
 
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json()["settings"]["tone"], "FRIENDLY")
+        self.assertEqual(res.json()["tone"], "FRIENDLY")
         obj = AgentSettings.objects.get(user=self.me)
         self.assertEqual(obj.tone, "FRIENDLY")
         self.assertEqual(obj.active_version, before + 1)

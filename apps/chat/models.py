@@ -101,6 +101,13 @@ class RoomMember(TimeStamped):
     #: 나중에 초대된 사람은 이 시각 이후 메시지만 봅니다.
     visible_from = models.DateTimeField(null=True, blank=True)
     left_at = models.DateTimeField(null=True, blank=True)
+    #: 이 방 알림을 껐는가.
+    #:
+    #: **방을 나가는 것과 다릅니다.** 나가면 목록에서 사라지고 새 메시지도
+    #: 안 보이는데, 알림만 끄는 것은 대화는 계속 보되 소리로 부르지 말라는
+    #: 뜻입니다. 미읽음 수는 그대로 셉니다 — 안 세면 껐다는 것과 다 읽었다는
+    #: 것이 화면에서 구별되지 않습니다.
+    muted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "chat_room_member"
@@ -163,6 +170,12 @@ class ChatMessage(UUIDModel):
                                null=True, related_name="chat_messages")
     sender_name = models.CharField(max_length=100)         # 비정규화
     is_agent = models.BooleanField(default=False, help_text="대리인이 보낸 메시지")
+    #: 주인이 자리를 비운 사이 대리인이 대신 받은 말.
+    #:
+    #: `is_agent` 만으로는 못 가릅니다 — 옆에서 시켜서 한 말도 대리인이 보낸
+    #: 것이라, 돌아와서 「없는 동안 오간 대화」를 볼 때 그것까지 섞이면
+    #: 무엇을 확인해야 하는지가 흐려집니다.
+    answered_while_away = models.BooleanField(default=False)
     body = models.TextField(blank=True, default="")
 
     is_important = models.BooleanField(default=False)

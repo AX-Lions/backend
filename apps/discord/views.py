@@ -90,7 +90,7 @@ def _team_of(guild_id: str):
     link = GuildLink.objects.filter(guild_id=guild_id).select_related("team").first()
     if link is None:
         raise BordoError("TEAM_NOT_FOUND",
-                         "이 Discord 서버에 연결된 팀이 없습니다. /bordo-link-team 으로 먼저 연결하십시오.")
+                         "이 Discord 서버에 연결된 팀이 없습니다. /bordo-team-connect 로 먼저 연결하십시오.")
     return link.team
 
 
