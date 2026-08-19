@@ -11,6 +11,111 @@ from services.backend import get_error
 log = logging.getLogger("bordo")
 
 
+
+#: 회의 시작 팝업을 열어 두는 시간.
+#:
+#: 회의는 이미 시작됐습니다. 오래 기다리면 그동안 오간 말을 대리인이 못 듣고,
+#: 짧으면 자리에 있는 사람이 누를 틈이 없습니다. 답이 없다는 것은 대개 자리에
+#: 없다는 뜻이라 **기본값을 대리 참석 쪽으로** 두고 시간을 짧게 잡습니다.
+ATTENDANCE_TIMEOUT = 10.0
+
+
+class AttendanceView(discord.ui.View):
+    """
+    `직접 참석` / `Bordo 에게 맡기기` 를 묻는 팝업.
+
+    ## 왜 서버가 아니라 봇이 타이머를 드는가
+
+    서버가 들면 봇이 죽어 있을 때 **아무에게도 안 물어보고 대리 처리**됩니다.
+    묻지도 않고 대리인을 세우는 것이 이 서비스에서 제일 나쁜 실패입니다.
+
+    ## 왜 스레드 안 메시지인가
+
+    DM 으로 보내면 DM 을 막아 둔 사람에게 영영 안 닿고, 회의 스레드에는
+    아무 흔적이 없어 다른 사람이 왜 저 사람만 빠졌는지 모릅니다.
+    """
+
+    def __init__(self, cog, thread_id: int, pending: dict[str, str]):
+        super().__init__(timeout=ATTENDANCE_TIMEOUT)
+        self.cog = cog
+        self.thread_id = thread_id
+        #: discord_user_id → 대리인 호칭. 답한 사람은 여기서 빠집니다.
+        self.pending = dict(pending)
+        self.message: discord.Message | None = None
+
+    async def _answer(self, interaction: discord.Interaction, *, delegated: bool):
+        uid = str(interaction.user.id)
+        if uid not in self.pending:
+            await interaction.response.send_message(
+                "이 회의에서 참석 여부를 물은 대상이 아닙니다.", ephemeral=True)
+            return
+
+        result = await self.cog.backend.post(
+            "/internal/v1/meetings/absence",
+            json={"thread_id": str(self.thread_id), "discord_user_id": uid,
+                  "delegated": delegated},
+        )
+        if result is None or get_error(result):
+            # 못 눌렀다고 알려 줘야 합니다. 조용히 넘어가면 본인은 눌렀다고
+            # 생각하는데 타임아웃이 대리 참석으로 넘겨 버립니다.
+            await interaction.response.send_message(
+                "지금은 저장하지 못했습니다. 다시 눌러 주세요.", ephemeral=True)
+            return
+
+        agent = self.pending.pop(uid, "")
+        await interaction.response.send_message(
+            "직접 참석으로 표시했습니다." if not delegated
+            else f"{agent or 'Bordo'} 가 대신 참석합니다.", ephemeral=True)
+        await self.cog.announce_to_thread(
+            self.thread_id,
+            f"🙋 <@{uid}> 님이 직접 참석합니다." if not delegated
+            else f"🤖 <@{uid}> 님 대신 **{agent or 'Bordo'}** 가 참석합니다.")
+
+        if not self.pending:
+            self.stop()
+            await self._close("모두 답했습니다.")
+
+    @discord.ui.button(label="직접 참석합니다", style=discord.ButtonStyle.secondary)
+    async def attend(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._answer(interaction, delegated=False)
+
+    @discord.ui.button(label="Bordo 에게 맡기기", style=discord.ButtonStyle.primary)
+    async def delegate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._answer(interaction, delegated=True)
+
+    async def on_timeout(self):
+        # 답이 없는 사람은 대리 참석으로 넘깁니다. 자리에 없어서 못 누른 것이
+        # 대부분인데, 여기서 아무것도 안 하면 그 사람 몫은 회의에서 통째로
+        # 빠지고 돌아와서 볼 브리핑도 안 생깁니다(브리핑은 대리 참석자에게만).
+        handed = []
+        for uid, agent in list(self.pending.items()):
+            result = await self.cog.backend.post(
+                "/internal/v1/meetings/absence",
+                json={"thread_id": str(self.thread_id), "discord_user_id": uid,
+                      "delegated": True},
+            )
+            if result is None or get_error(result):
+                log.warning("자동 대리 전환 실패 thread=%s user=%s", self.thread_id, uid)
+                continue
+            handed.append((uid, agent))
+
+        await self._close("시간이 지나 자동으로 넘겼습니다.")
+        if handed:
+            names = ", ".join(f"<@{u}> 님 대신 **{a or 'Bordo'}**" for u, a in handed)
+            await self.cog.announce_to_thread(
+                self.thread_id, f"🤖 답이 없어 {names} 가 참석합니다.")
+
+    async def _close(self, note: str):
+        if self.message is None:
+            return
+        for child in self.children:
+            child.disabled = True
+        try:
+            await self.message.edit(content=f"참석 확인이 끝났습니다 — {note}", view=self)
+        except discord.HTTPException as exc:
+            log.warning("참석 팝업 정리 실패 thread=%s: %s", self.thread_id, exc)
+
+
 class MeetingCog(commands.Cog):
 
     def __init__(self, bot, backend, gate):
@@ -203,7 +308,46 @@ class MeetingCog(commands.Cog):
 
         await thread.send(announcement)
 
+        await self._ask_attendance(thread)
+
         await interaction.followup.send(f"회의 스레드를 만들었습니다: {thread.mention}")
+
+    async def _ask_attendance(self, thread) -> None:
+        """
+        아직 참석 여부를 안 정한 사람에게 묻습니다.
+
+        **누가 대상인지는 서버가 정합니다.** 봇이 나름의 규칙으로 고르면
+        "대리인이 답할 사람" 이 서버와 갈려, 대신 참석한다고 알렸는데 정작
+        대리인은 안 깨어납니다. `asked=false` 가 그 목록입니다.
+
+        물어볼 사람이 없으면 아무 메시지도 안 냅니다 — 웹에서 미리 불참을
+        등록해 둔 회의에 빈 팝업이 뜨면 이미 정한 것을 다시 묻는 것처럼 보입니다.
+        """
+        result = await self.backend.get(
+            "/internal/v1/meetings/participants",
+            params={"thread_id": str(thread.id)},
+        )
+        if not isinstance(result, dict) or get_error(result):
+            # 못 물어본 것뿐입니다. 회의 자체는 이미 열렸으니 막지 않습니다.
+            log.warning("참석 대상 조회 실패 thread=%s", thread.id)
+            return
+
+        pending = {
+            p["discord_user_id"]: p.get("agent_name") or ""
+            for p in result.get("results", [])
+            if p.get("discord_user_id") and not p.get("asked")
+        }
+        if not pending:
+            return
+
+        view = AttendanceView(self, thread.id, pending)
+        mentions = " ".join(f"<@{uid}>" for uid in pending)
+        view.message = await thread.send(
+            f"{mentions}\n"
+            f"회의가 시작됐습니다. 직접 참석하시나요?\n"
+            f"**{int(ATTENDANCE_TIMEOUT)}초 안에 답이 없으면 Bordo 가 대신 참석합니다.**",
+            view=view,
+        )
 
     # --------------------------------------------------
     # /meeting-end
