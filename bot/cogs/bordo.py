@@ -107,7 +107,7 @@ class BordoCog(commands.Cog):
         name="ask-bordo",
         description="특정 대리인에게 질문을 전달합니다."
     )
-    @app_commands.describe(target="질문할 대리인의 주인", question="질문 내용")
+    @app_commands.describe(target="질문할 대리인의 주인 멘션", question="질문 내용")
     async def ask_bordo(self, interaction: discord.Interaction, target: discord.Member, question: str):
         await interaction.response.defer()
 
