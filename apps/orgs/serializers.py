@@ -9,7 +9,9 @@ class TeamSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Team
-        fields = ("id", "name", "description", "created_by", "my_role",
+        # `timezone` 을 냅니다. 저장만 하고 안 돌려주면 화면이 방금 고른 값이
+        # 들어갔는지 확인할 방법이 없습니다.
+        fields = ("id", "name", "description", "timezone", "created_by", "my_role",
                   "categories", "member_count", "created_at")
         read_only_fields = ("id", "created_by", "member_count", "created_at")
 
