@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+#
+# Bordo Discord 봇 배포.
+#
+#   ./deploy/deploy.sh
+#
+# GitHub Actions 러너와 사람이 같은 스크립트를 씁니다. 배포 절차가 두 벌이면
+# "내 손으로는 되는데 CI 에서는 안 된다"가 생깁니다.
+#
+# 실패하면 즉시 멈추고 이전 버전이 그대로 돕니다. 중간까지 반영된 상태로 두지 않습니다.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+ROOT=$(pwd)
+
+log() { printf '\n\033[1m▸ %s\033[0m\n' "$*"; }
+
+[ -f .env ] || { echo "중단: .env 가 없습니다. .env.example 을 복사해 채우십시오."; exit 1; }
+
+# 봇이 뜨자마자 죽는 가장 흔한 이유입니다. 여기서 걸러야 systemd 재시작 5회를
+# 다 쓰고 나서야 원인을 찾는 일이 없습니다.
+for key in DISCORD_TOKEN BORDO_SERVICE_TOKEN; do
+  if ! grep -qE "^${key}=.+" .env; then
+    echo "중단: .env 의 ${key} 가 비어 있습니다."; exit 1
+  fi
+done
+
+# ── 1. 의존성 ────────────────────────────────────────────────
+log "의존성"
+# venv 안의 **스크립트**는 shebang 에 절대 경로를 박아 둡니다. 프로젝트 폴더를
+# 옮기면 그 경로가 사라져 systemd 가 203/EXEC 로 죽습니다 — 파일은 있는데
+# 인터프리터가 없어서라, 로그만 보면 원인이 헷갈립니다.
+#
+# 확인 대상이 `python` 이 아니라 `pip` 인 이유가 여기 있습니다.
+# `.venv/bin/python` 은 `python3` 로 가는 **상대 심볼릭 링크**라 폴더를 옮겨도
+# 그대로 삽니다. 실제로 옮겨 보면 이렇습니다.
+#
+#     .venv/bin/python  통과      ← 이걸 보면 문제를 못 잡습니다
+#     .venv/bin/pip     실패      ← shebang: #!/옛/경로/.venv/bin/python3
+#
+# 그래서 shebang 이 박힌 스크립트를 눌러야 합니다.
+if [ -d .venv ] && ! .venv/bin/pip --version >/dev/null 2>&1; then
+  echo "  venv 스크립트의 경로가 어긋납니다 — 다시 만듭니다"
+  rm -rf .venv
+fi
+[ -d .venv ] || python3 -m venv .venv
+
+# requirements.txt 가 바뀌지 않았으면 건너뜁니다. 라즈베리파이에서 매 배포마다
+# 의존성을 다시 받으면 배포가 몇 분씩 늘어집니다.
+HASH=$(sha256sum requirements.txt | cut -d' ' -f1)
+if [ "$(cat .venv/.req-hash 2>/dev/null || true)" != "$HASH" ]; then
+  .venv/bin/pip install -q --upgrade pip
+  .venv/bin/pip install -q -r requirements.txt
+  echo "$HASH" > .venv/.req-hash
+  echo "  설치 완료"
+else
+  echo "  변경 없음 — 건너뜀"
+fi
+
+# ── 2. 임포트 점검 ───────────────────────────────────────────
+# 봇을 띄우기 전에 코드가 실제로 임포트되는지 봅니다.
+#
+# compileall 로는 부족합니다 — 문법만 보고 import 를 실행하지 않아서,
+# requirements.txt 에 없는 패키지를 import 해도 그대로 통과합니다. 정작 봇은
+# 기동하자마자 ModuleNotFoundError 로 죽고, 그건 배포가 끝난 뒤에 압니다.
+#
+# main.py 를 임포트하면 봇 객체까지 만들어지지만 `bot.run()` 은
+# `if __name__ == "__main__"` 아래라 실행되지 않습니다. 의존성과 cogs·services
+# 임포트가 전부 이 한 줄에 걸립니다.
+log "임포트 점검"
+.venv/bin/python -c "import main" >/dev/null
+echo "  통과"
+
+# ── 3. 재시작 ────────────────────────────────────────────────
+log "봇 재시작"
+if ! systemctl is-enabled --quiet bordo-discord 2>/dev/null; then
+  echo "  유닛이 아직 등록되지 않았습니다. 아래를 한 번 실행하십시오."
+  echo "    sudo cp $ROOT/deploy/bordo-discord.service /etc/systemd/system/"
+  echo "    sudo install -m 0440 -o root -g root \\"
+  echo "         $ROOT/deploy/bordo-discord.sudoers /etc/sudoers.d/bordo-discord"
+  echo "    sudo systemctl daemon-reload"
+  echo "    sudo systemctl enable --now bordo-discord"
+  exit 0
+fi
+
+# reload 가 아니라 restart 입니다. 봇은 HUP 을 처리하지 않고, reload-or-restart 는
+# 유닛 파일이 바뀌어도 ExecStart 를 다시 읽지 않습니다 — 백엔드에서 이것 때문에
+# WSGI 가 계속 돌아 500 이 났습니다.
+SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+
+# restart 전에 reset-failed 를 먼저 부릅니다.
+#
+# 유닛에 StartLimitBurst=5 / StartLimitIntervalSec=300 이 걸려 있습니다. 나쁜
+# 배포가 5분에 5번 넘게 죽으면 유닛이 `failed (start-limit-hit)` 로 굳고,
+# **그 상태에서는 restart 가 아예 안 먹습니다.**
+#
+# 하필 그때가 롤백해야 할 때입니다. 롤백도 이 스크립트를 다시 부르므로,
+# reset-failed 가 없으면 롤백까지 같이 실패하고 사람이 서버에 들어가야 합니다.
+# 재시작 상한을 실제로 걸어 둔 것이 롤백을 막는 셈이 됩니다.
+#
+# 정상 상태에서 불러도 아무 일도 하지 않아 항상 부릅니다.
+sudo systemctl reset-failed bordo-discord 2>/dev/null || true
+sudo systemctl restart bordo-discord
+
+# ── 4. 실제로 Discord 에 붙었는지 ────────────────────────────
+#
+# is-active 만 보면 안 됩니다. 토큰이 틀려도 프로세스는 잠깐 살아 있어서
+# "실행 중" 으로 보이고, 몇 초 뒤 조용히 죽습니다.
+#
+# 봇은 on_ready 에서 "연결 완료" 를 stdout 으로 찍습니다. 그게 journald 에
+# 뜨는지를 봅니다 — 게이트웨이 핸드셰이크가 실제로 끝났다는 유일한 증거입니다.
+log "게이트웨이 연결 확인"
+for i in $(seq 1 20); do
+  if journalctl -u bordo-discord --since "$SINCE" --no-pager 2>/dev/null \
+     | grep -q "연결 완료"; then
+    echo "  연결됨"
+    exit 0
+  fi
+  if ! systemctl is-active --quiet bordo-discord; then
+    echo "중단: 봇이 죽었습니다."
+    journalctl -u bordo-discord --since "$SINCE" -n 40 --no-pager
+    exit 1
+  fi
+  sleep 3
+done
+
+echo "중단: 60초 안에 Discord 게이트웨이에 붙지 못했습니다."
+echo "토큰이 틀렸거나, MESSAGE_CONTENT Intent 가 꺼져 있거나, 네트워크가 막혔습니다."
+journalctl -u bordo-discord --since "$SINCE" -n 40 --no-pager
+exit 1
