@@ -34,6 +34,12 @@ PEOPLE = [
 ]
 PASSWORD = "Bordo!2026"
 
+#: 자리 상태·시간대를 기본값과 다르게 줄 사람 (#137 6번). presence=AWAY가
+#: 2명 이상 있어야 방 머리의 "{이름}의 Bordo 응답 중"이 한 방에서만 안 보이고,
+#: 시간대가 다른 사람이 1명 있어야 방 머리 시계가 그려진다.
+PRESENCE_OVERRIDES = {"강다은": "AWAY", "서재민": "AWAY"}
+TIMEZONE_OVERRIDES = {"최비성": "America/Los_Angeles"}
+
 
 class Command(BaseCommand):
     help = "데모용 팀·프로젝트·회의·플로우를 만듭니다."
@@ -84,6 +90,11 @@ class Command(BaseCommand):
             if u.avatar_url != avatar:
                 u.avatar_url = avatar
                 u.save(update_fields=["avatar_url"])
+            presence = PRESENCE_OVERRIDES.get(name, "ACTIVE")
+            tz = TIMEZONE_OVERRIDES.get(name, "Asia/Seoul")
+            if u.presence != presence or u.timezone != tz:
+                u.presence, u.timezone = presence, tz
+                u.save(update_fields=["presence", "timezone"])
             users[name] = u
             AgentSettings.objects.get_or_create(user=u)
 
@@ -328,6 +339,7 @@ class Command(BaseCommand):
         self._seed_debate(upcoming["디자인 리뷰"], users, owner, now)
         self._seed_briefing_cards(meeting, agendas, users, owner, now)
         self._seed_chat_rooms(team, users, owner, now)
+        self._seed_chat_read_state(projects, users, owner, now)
         self._touch_rooms()
 
         self.stdout.write(self.style.SUCCESS(
@@ -1320,6 +1332,37 @@ class Command(BaseCommand):
                     .order_by("-sent_at").first())
             if last:
                 touch(room, last.sent_at)
+
+    def _seed_chat_read_state(self, projects, users, owner, now):
+        """
+        미읽음 다양성 (#137 6번). `RoomMember.last_read_at` 을 아무도 안
+        올려서 지금까지 모든 방이 전건 미읽음이었다.
+
+        - 팀 단체방은 유수인 기준 그대로 안 읽은 채 둔다. 팀 합계가
+          하위 프로젝트 미읽음의 합과 **달라야** 하는데 — 클라이언트가
+          트리를 프로젝트까지만 더하면 팀 단체방 자체의 몫이 빠진다.
+        - main 프로젝트 방은 전부 읽음 처리해 0건 미읽음 방을 만든다.
+        - academic 프로젝트 방은 메시지를 더 채워 두 자리(10건 이상)
+          미읽음 방을 만든다 — 배지 폭이 한 자리일 때만 맞춰져 있으면
+          여기서 깨진다.
+        """
+        from apps.chat.models import ChatMessage, ChatRoom, RoomMember, RoomType
+
+        main, academic, payment = projects
+
+        main_room = ChatRoom.objects.get(type=RoomType.PROJECT, project=main)
+        RoomMember.objects.filter(room=main_room, user=owner).update(last_read_at=now)
+
+        academic_room = ChatRoom.objects.get(type=RoomType.PROJECT, project=academic)
+        fillers = ["강다은", "임수연", "최비성", "서재민", "강다은", "임수연", "최비성", "서재민"]
+        for i, sname in enumerate(fillers):
+            msg = ChatMessage.objects.create(
+                room=academic_room, sender=users[sname], sender_name=sname,
+                body=f"확인했습니다. 반영하겠습니다. ({i + 1})")
+            ChatMessage.objects.filter(pk=msg.pk).update(
+                sent_at=now - timedelta(hours=8 - i))
+        # academic_room의 last_read_at은 처음부터 null이라 따로 안 건드린다
+        # — 방금 늘린 메시지까지 전부 미읽음으로 잡혀야 두 자리가 된다.
 
     def _seed_chat_rooms(self, team, users, owner, now):
         """팀 전체방·나의 AI 대리인방·1:1방·대리인에게 직접 묻는 방. 지금까지
