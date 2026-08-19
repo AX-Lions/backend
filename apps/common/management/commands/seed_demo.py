@@ -110,11 +110,32 @@ class Command(BaseCommand):
         team.member_count = TeamMember.objects.filter(team=team).count()
         team.save(update_fields=["member_count"])
 
+        # `연합학술제`는 해커톤 팀이 하는 일이 아니다(#137 2번) — 사람은
+        # 겹치지만 심사·일정이 다른 곳에서 굴러가는데, 팀이 하나뿐이면
+        # 화면에서 한 팀이 두 가지를 하는 것으로 읽힌다. 처음부터 별도
+        # 팀 밑에 만든다 — `멋사 중앙해커톤` 밑에 만들었다가 나중에
+        # team만 옮기면, --reset 없이 다시 돌릴 때 get_or_create가 옛
+        # (team=멋사팀, name=연합학술제) 조합을 못 찾아 중복이 생긴다.
+        academic_team, _ = Team.objects.get_or_create(
+            name="연합학술제 준비팀",
+            defaults={"created_by": owner, "description": "타 학교 연합 학술제 운영",
+                      "category_keys": ["design", "backend"]})
+        for i, (_, name, _r, _a) in enumerate(PEOPLE):
+            TeamMember.objects.get_or_create(
+                team=academic_team, user=users[name],
+                defaults={"team_role": TeamRole.OWNER if i == 0 else TeamRole.MEMBER})
+        academic_team.member_count = TeamMember.objects.filter(team=academic_team).count()
+        academic_team.save(update_fields=["member_count"])
+
         projects = []
-        for name, progress in [("글로벌 회의 도구", 63), ("연합학술제", 41), ("결제 모듈", 12)]:
+        for team_obj, name, progress in [
+            (team, "글로벌 회의 도구", 63),
+            (academic_team, "연합학술제", 41),
+            (team, "결제 모듈", 12),
+        ]:
             p, _ = Project.objects.get_or_create(
-                team=team, name=name,
-                defaults={"team_name": team.name, "created_by": owner,
+                team=team_obj, name=name,
+                defaults={"team_name": team_obj.name, "created_by": owner,
                           "progress": progress})
             for _, pname, _r, _a in PEOPLE:
                 ProjectMember.objects.get_or_create(project=p, user=users[pname])
@@ -122,6 +143,8 @@ class Command(BaseCommand):
             p.progress = progress
             p.save(update_fields=["member_count", "progress"])
             projects.append(p)
+
+        self._seed_other_teams(users, owner)
 
         Favorite.objects.get_or_create(user=owner, target_type=Favorite.Target.PROJECT,
                                        target_id=projects[0].id)
@@ -351,6 +374,58 @@ class Command(BaseCommand):
             f"  회의     : {meeting.title} ({meeting.id})\n"
             f"  작업 엣지 : {work_edges} (글로벌 회의 도구) · "
             f"{academic_edges} (연합학술제) · {payment_edges} (결제 모듈)\n"))
+
+    # ═══════════════════════════════════════════ 팀·프로젝트 구조
+
+    def _seed_other_teams(self, users, owner):
+        """
+        팀·프로젝트 구조 다양성 (#137 2번). 기존 3개 프로젝트(main·academic·
+        payment)는 안 건드린다 — 다른 시드 메서드 전부가 그 셋을 전제로
+        짜여 있어서 손대면 범위가 걷잡을 수 없이 커진다. 여기서는 그
+        구조를 흔들지 않는 **새 팀·프로젝트만** 추가한다.
+        """
+        from apps.chat.models import ChatRoom
+
+        # 프로젝트가 하나도 없는 팀 — "이 팀에는 아직 프로젝트가 없습니다"를
+        # 그리는 자리. 화면 확인이 목적이라 일부러 프로젝트를 안 만든다.
+        empty_team, _ = Team.objects.get_or_create(
+            name="사이드 프로젝트 랩",
+            defaults={"created_by": owner, "description": "실험적인 사이드 프로젝트 모음",
+                      "category_keys": ["backend", "frontend"]})
+        for i, pname in enumerate(("유수인", "최비성")):
+            TeamMember.objects.get_or_create(
+                team=empty_team, user=users[pname],
+                defaults={"team_role": TeamRole.OWNER if i == 0 else TeamRole.MEMBER})
+        empty_team.member_count = TeamMember.objects.filter(team=empty_team).count()
+        empty_team.save(update_fields=["member_count"])
+
+        # 내가 속하지 않은 팀 · 프로젝트 — 사이드바에 안 나오는 게 맞는지
+        # 확인용. 유수인을 아예 안 넣는다. ChatRoom도 일부러 안 만들어서
+        # "방이 하나도 없는 프로젝트"를 겸한다.
+        outside_team, _ = Team.objects.get_or_create(
+            name="프론트엔드 스터디",
+            defaults={"created_by": users["임수연"], "description": "컴포넌트 설계 스터디",
+                      "category_keys": ["frontend"]})
+        for i, pname in enumerate(("임수연", "최비성")):
+            TeamMember.objects.get_or_create(
+                team=outside_team, user=users[pname],
+                defaults={"team_role": TeamRole.OWNER if i == 0 else TeamRole.MEMBER})
+        outside_team.member_count = TeamMember.objects.filter(team=outside_team).count()
+        outside_team.save(update_fields=["member_count"])
+
+        outside_project, _ = Project.objects.get_or_create(
+            team=outside_team, name="컴포넌트 라이브러리 정리",
+            defaults={"team_name": outside_team.name, "created_by": users["임수연"],
+                      "progress": 20})
+        for pname in ("임수연", "최비성"):
+            ProjectMember.objects.get_or_create(project=outside_project, user=users[pname])
+        outside_project.member_count = (
+            ProjectMember.objects.filter(project=outside_project).count())
+        outside_project.save(update_fields=["member_count"])
+        # ensure_project_room()을 일부러 안 부른다 — 방이 하나도 없는
+        # 프로젝트로 남겨 둔다. (혹시 남아 있을 옛 방이 있으면 지운다 —
+        # --reset 없이 다시 돌릴 때를 대비.)
+        ChatRoom.objects.filter(type="PROJECT", project=outside_project).delete()
 
     # ═══════════════════════════════════════════ 작업 플로우
 
