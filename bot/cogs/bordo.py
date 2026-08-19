@@ -5,9 +5,10 @@ from discord.ext import commands
 from services.backend import get_error
 
 class BordoCog(commands.Cog):
-    def __init__(self, bot, backend):
+    def __init__(self, bot, backend, gate):
         self.bot = bot
         self.backend = backend
+        self.gate = gate
         
     @app_commands.command(
         name="bordo-connect", 
@@ -69,6 +70,10 @@ class BordoCog(commands.Cog):
             )
             return
 
+        # 캐시를 안 지우면 방금 연결한 서버가 게이트 캐시 TTL(5분) 동안
+        # 계속 "미연결"로 막힌다.
+        self.gate.invalidate_guild(interaction.guild_id)
+
         await interaction.followup.send(
             f"이 서버를 '{result.get('name', '팀')}'에 연결했습니다.", ephemeral=True
         )
@@ -109,7 +114,16 @@ class BordoCog(commands.Cog):
     )
     @app_commands.describe(target="질문할 대리인의 주인 멘션", question="질문 내용")
     async def ask_bordo(self, interaction: discord.Interaction, target: discord.Member, question: str):
+        # defer가 먼저다 — 3초 응답 시한 안에 게이트의 backend.get()이 (길드·
+        # 개인 두 번 연속이라 특히) 안 끝날 수 있다.
         await interaction.response.defer()
+
+        # 길드 체크는 guild_id가 없으면(DM) 자동으로 통과하도록 짜여 있다.
+        # 다만 target이 discord.Member 타입이라 DM에서는 애초에 파라미터
+        # 해석 단계에서 막힐 수 있다 — 이 게이트 변경과는 별개의 기존 문제라
+        # 여기서는 안 건드린다.
+        if not await self.gate.require(interaction):
+            return
 
         result = await self.backend.post("/internal/v1/deputy/ask", json={
             "requester_discord_id": str(interaction.user.id),
