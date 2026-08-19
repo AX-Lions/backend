@@ -5,11 +5,15 @@
 따로 부르면 첫 진입에서만 왕복이 수십 번 생기고, 클라이언트가 합계를 직접
 더하면 서버와 숫자가 어긋납니다.
 """
+import logging
 from datetime import datetime, time, timedelta
+from pathlib import Path
 
 from django.conf import settings as dj_settings
+from django.core.files.storage import default_storage
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
+from django.http import FileResponse
 from django.utils import timezone
 from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -47,6 +51,9 @@ def room_access(user, room_id, *, allow_left=False):
     if not member or (member.left_at and not allow_left):
         raise BordoError("CHAT_ROOM_NOT_FOUND", details={"room_id": str(room_id)})
     return room, member
+
+
+logger = logging.getLogger("bordo.chat")
 
 
 def visible_messages(room, member):
@@ -797,15 +804,31 @@ def attachments(request, room_id):
     if not f:
         raise BordoError("VALIDATION_ERROR", "file 이 필요합니다.")
 
+    limit = dj_settings.CHAT_ATTACHMENT_MAX_BYTES
+    if f.size > limit:
+        # 상한이 없으면 실수로 올린 큰 파일 하나가 디스크를 채우고, 그때부터
+        # 모든 업로드가 함께 실패합니다.
+        raise BordoError("VALIDATION_ERROR",
+                         f"{limit // (1024 * 1024)}MB 를 넘는 파일은 올릴 수 없습니다.",
+                         details={"size_bytes": f.size, "limit_bytes": limit})
+
     mime = getattr(f, "content_type", "") or ""
-    att = ChatAttachment.objects.create(
-        room=room, uploader=request.user, name=f.name, size_bytes=f.size,
+    att = ChatAttachment(
+        room=room, uploader=request.user, name=f.name[:255], size_bytes=f.size,
         mime_type=mime,
         kind=(ChatAttachment.Kind.IMAGE if mime.startswith("image/")
               else ChatAttachment.Kind.FILE),
-        # 실제 저장소 연동 전까지는 자리만 잡아둡니다.
-        url=f"/media/chat/{room.id}/{f.name}",
         expires_at=timezone.now() + timedelta(hours=ATTACHMENT_TTL_HOURS))
+
+    # 파일 이름을 저장 경로에 쓰지 않습니다.
+    #
+    # 올린 이름에 `../` 가 들어오면 저장소 밖으로 빠져나가고, 한글·공백이 섞이면
+    # 운영체제마다 다르게 저장됩니다. 같은 이름을 두 번 올리면 앞의 것을
+    # 덮어써 다른 사람 첨부가 사라집니다. 보여줄 이름은 `name` 에 따로 있습니다.
+    att.stored_path = default_storage.save(
+        f"chat/{room.id}/{att.id}{Path(f.name).suffix[:16]}", f)
+    att.url = f"/api/v1/chat/attachments/{att.id}/download"
+    att.save()
     return Response(AttachmentSerializer(att).data, status=201)
 
 
@@ -841,8 +864,50 @@ def attachment_detail(request, attachment_id):
         raise BordoError("REFERENCED_BY_OTHERS",
                          "이미 전송된 첨부입니다. 메시지를 지우면 함께 사라집니다.",
                          details={"message_id": str(att.message_id)})
+    _drop_file(att)
     att.delete()
     return Response(status=204)
+
+
+def _drop_file(att) -> None:
+    """
+    실제 파일도 지웁니다.
+
+    행만 지우면 디스크에는 남아 주소를 아는 사람이 계속 받을 수 있습니다.
+    첨부는 하드 삭제 대상이라 되돌릴 자리도 없습니다.
+    """
+    if not att.stored_path:
+        return
+    try:
+        default_storage.delete(att.stored_path)
+    except Exception:                                          # noqa: BLE001
+        # 파일이 이미 없어도 행 삭제는 끝내야 합니다. 여기서 막히면 화면에는
+        # 지워지지 않은 첨부가 계속 남습니다.
+        logger.warning("첨부 파일 삭제 실패 attachment=%s path=%s",
+                       att.id, att.stored_path)
+
+
+@api_view(["GET"])
+def attachment_download(request, attachment_id):
+    """
+    첨부 내려받기.
+
+    ## 왜 `/media/` 로 그냥 안 여는가
+
+    주소만 알면 누구나 받게 됩니다. 채팅 첨부는 **그 방 참여자만** 봐야 하므로
+    권한을 보는 자리를 지납니다. 참여자가 아니면 404 입니다 — 403 을 주면
+    "그런 파일이 있긴 하다" 가 샙니다.
+    """
+    att = ChatAttachment.objects.filter(pk=attachment_id).first()
+    if not att or not att.stored_path:
+        raise BordoError("STATE_NOT_FOUND", "첨부를 찾을 수 없습니다.")
+    room_access(request.user, att.room_id)
+
+    if not default_storage.exists(att.stored_path):
+        raise BordoError("STATE_NOT_FOUND", "파일이 저장소에 없습니다.")
+
+    return FileResponse(default_storage.open(att.stored_path, "rb"),
+                        as_attachment=True, filename=att.name)
 
 
 # ─────────────────────────────────────────── 달력 · 요약 · 검색

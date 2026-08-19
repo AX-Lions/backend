@@ -136,6 +136,10 @@ class ChatAttachment(UUIDModel, TimeStamped):
                               default=Status.UPLOADED)
     kind = models.CharField(max_length=6, choices=Kind.choices, default=Kind.FILE)
     name = models.CharField(max_length=255)
+    #: 저장소 안의 경로. `url` 과 나눠 두는 이유 — `url` 은 화면이 누르는
+    #: **내려받기 주소**이고 이쪽은 서버가 파일을 찾는 자리입니다. 하나로 합치면
+    #: 저장소를 바꿀 때 이미 보낸 메시지의 링크가 전부 깨집니다.
+    stored_path = models.CharField(max_length=500, blank=True, default="")
     size_bytes = models.PositiveBigIntegerField(default=0)
     mime_type = models.CharField(max_length=120, blank=True, default="")
     url = models.CharField(max_length=500, blank=True, default="")
