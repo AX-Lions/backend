@@ -297,6 +297,68 @@ class Command(BaseCommand):
 
     # ═══════════════════════════════════════════ 작업 플로우
 
+    def _flow_helpers(self, project, users, now):
+        """
+        작업 플로우 시드 3종(글로벌 회의 도구·연합학술제·결제 모듈)이 공유하는
+        scaffolding. 세 곳에서 각자 손으로 다시 타이핑했더니, emit()의 진하기
+        계산 로직 같은 걸 고치려면 세 곳을 따로 맞춰야 했다 — 여기 하나로
+        모은다.
+
+        반환: (emit, work, move, ask, drawn) — drawn은 `[0]`에 누적되는
+        1원소 리스트다(클로저 안에서 정수를 그대로 두면 재대입이 안 되므로).
+        호출부는 `drawn[0]`을 최종 카운트로 쓴다.
+        """
+        from apps.agent.models import AgentLookup
+        from apps.agent.services.lookup import draw_edge
+        from apps.meetings.models import FlowCategory, FlowEdge
+        from apps.states.models import WorkItem
+
+        drawn = [0]
+
+        def emit(days_ago, make):
+            """
+            모델을 만들고, 그때 그려진 화살표를 과거로 옮깁니다.
+
+            시그널은 `timezone.now()` 로 찍습니다. 시드가 만든 것이 전부 같은
+            시각이면 **진하기가 균일해져** 최근일수록 진해지는 규칙이 화면에서
+            확인되지 않습니다(작업 플로우의 진하기는 조회 기간 기준입니다).
+
+            어느 엣지가 새로 생겼는지는 만들기 전후의 id 집합을 비교해 찾습니다.
+            시그널이 몇 개를 그리는지는 시드가 알 바가 아니고, 알아야 한다면
+            시드가 생성기 내부를 흉내 내는 셈이 됩니다.
+            """
+            scope = FlowEdge.objects.filter(project=project,
+                                            category=FlowCategory.WORK)
+            before = set(scope.values_list("id", flat=True))
+            obj = make()
+            drawn[0] += scope.exclude(id__in=before).update(
+                occurred_at=now - timedelta(days=days_ago))
+            return obj
+
+        def work(owner, title, status, progress):
+            return lambda: WorkItem.objects.create(
+                project=project, owner=owner, title=title,
+                status=status, progress=progress)
+
+        def move(item, status, progress):
+            def go():
+                item.status, item.progress = status, progress
+                item.save()
+                return item
+            return go
+
+        def ask(days, asker, target, topic, reason, question, answer, source):
+            # 인자를 직접 받는다 — for 루프 안에서 클로저로 캡처하면 루프
+            # 변수가 마지막 값으로 늦게 바인딩되는 문제가 있어(원래 코드가
+            # 그래서 def ask(a=asker, ...) 기본값 트릭을 매번 다시 썼다),
+            # 여기서는 애초에 그 문제가 안 생기는 모양으로 뒀다.
+            emit(days, lambda: draw_edge(AgentLookup.objects.create(
+                project=project, asker=users[asker], target=users[target],
+                topic=topic, reason=reason, question=question, answer=answer,
+                source=source, occurred_at=now - timedelta(days=days))))
+
+        return emit, work, move, ask, drawn
+
     def _seed_work_flow(self, project, users, now):
         """
         작업 모드 화면에 들어갈 데이터.
@@ -322,48 +384,13 @@ class Command(BaseCommand):
         하나라도 비면 필터 목록에 그 칸이 안 나옵니다 — 목록은 실제로 존재하는
         종류만 내려주기 때문입니다.
         """
-        from apps.agent.models import AgentLookup
-        from apps.agent.services.lookup import draw_edge
         from apps.chat.models import ChatMessage
         from apps.chat.services import ensure_project_room
         from apps.documents.models import Document
-        from apps.meetings.models import FlowCategory, FlowEdge, FlowSource
-        from apps.states.models import WorkItem, WorkStatus
+        from apps.meetings.models import FlowSource
+        from apps.states.models import WorkStatus
 
-        drawn = 0
-
-        def emit(days_ago, make):
-            """
-            모델을 만들고, 그때 그려진 화살표를 과거로 옮깁니다.
-
-            시그널은 `timezone.now()` 로 찍습니다. 시드가 만든 것이 전부 같은
-            시각이면 **진하기가 균일해져** 최근일수록 진해지는 규칙이 화면에서
-            확인되지 않습니다(작업 플로우의 진하기는 조회 기간 기준입니다).
-
-            어느 엣지가 새로 생겼는지는 만들기 전후의 id 집합을 비교해 찾습니다.
-            시그널이 몇 개를 그리는지는 시드가 알 바가 아니고, 알아야 한다면
-            시드가 생성기 내부를 흉내 내는 셈이 됩니다.
-            """
-            nonlocal drawn
-            scope = FlowEdge.objects.filter(project=project,
-                                            category=FlowCategory.WORK)
-            before = set(scope.values_list("id", flat=True))
-            obj = make()
-            drawn += scope.exclude(id__in=before).update(
-                occurred_at=now - timedelta(days=days_ago))
-            return obj
-
-        def work(owner, title, status, progress):
-            return lambda: WorkItem.objects.create(
-                project=project, owner=owner, title=title,
-                status=status, progress=progress)
-
-        def move(item, status, progress):
-            def go():
-                item.status, item.progress = status, progress
-                item.save()
-                return item
-            return go
+        emit, work, move, ask, drawn = self._flow_helpers(project, users, now)
 
         # ── 작업 · 수정
         #
@@ -509,16 +536,9 @@ class Command(BaseCommand):
              "",
              FlowSource.GITHUB),
         ]:
-            def ask(a=asker, t=target, tp=topic, r=reason, q=question,
-                    ans=answer, s=source, d=days):
-                return draw_edge(AgentLookup.objects.create(
-                    project=project, asker=users[a], target=users[t],
-                    topic=tp, reason=r, question=q, answer=ans,
-                    source=s, occurred_at=now - timedelta(days=d)))
+            ask(days, asker, target, topic, reason, question, answer, source)
 
-            emit(days, ask)
-
-        return drawn
+        return drawn[0]
 
     # ═══════════════════════════════════════════ 연합학술제 · 결제 모듈
 
@@ -530,36 +550,13 @@ class Command(BaseCommand):
         쓰지는 않고, **프로젝트를 바꿔도 빈 화면이 나오지 않게** 하는 것이
         목적이라 다섯 카테고리(작업·수정·공유·피드백·AI 조회)만 전부 채운다.
         """
-        from apps.agent.models import AgentLookup
-        from apps.agent.services.lookup import draw_edge
         from apps.chat.models import ChatMessage
         from apps.chat.services import ensure_project_room
         from apps.documents.models import Document
-        from apps.meetings.models import FlowCategory, FlowEdge, FlowSource
-        from apps.states.models import WorkItem, WorkStatus
+        from apps.meetings.models import FlowSource
+        from apps.states.models import WorkStatus
 
-        drawn = 0
-
-        def emit(days_ago, make):
-            nonlocal drawn
-            scope = FlowEdge.objects.filter(project=project, category=FlowCategory.WORK)
-            before = set(scope.values_list("id", flat=True))
-            obj = make()
-            drawn += scope.exclude(id__in=before).update(
-                occurred_at=now - timedelta(days=days_ago))
-            return obj
-
-        def work(owner, title, status, progress):
-            return lambda: WorkItem.objects.create(
-                project=project, owner=owner, title=title,
-                status=status, progress=progress)
-
-        def move(item, status, progress):
-            def go():
-                item.status, item.progress = status, progress
-                item.save()
-                return item
-            return go
+        emit, work, move, ask, drawn = self._flow_helpers(project, users, now)
 
         # ── 작업 · 수정 (다섯 명 전원 — 노드를 눌렀을 때 빈 사람이 없게)
         changed = [
@@ -613,50 +610,20 @@ class Command(BaseCommand):
              "",
              FlowSource.NOTION),
         ]:
-            def ask(a=asker, t=target, tp=topic, r=reason, q=question,
-                    ans=answer, s=source, d=days):
-                return draw_edge(AgentLookup.objects.create(
-                    project=project, asker=users[a], target=users[t],
-                    topic=tp, reason=r, question=q, answer=ans,
-                    source=s, occurred_at=now - timedelta(days=d)))
+            ask(days, asker, target, topic, reason, question, answer, source)
 
-            emit(days, ask)
-
-        return drawn
+        return drawn[0]
 
     def _seed_payment_module_flow(self, project, users, now):
         """"결제 모듈" 프로젝트의 작업 플로우. `_seed_academic_festival_flow`와
         같은 이유로, main만큼은 아니지만 다섯 카테고리를 전부 채운다."""
-        from apps.agent.models import AgentLookup
-        from apps.agent.services.lookup import draw_edge
         from apps.chat.models import ChatMessage
         from apps.chat.services import ensure_project_room
         from apps.documents.models import Document
-        from apps.meetings.models import FlowCategory, FlowEdge, FlowSource
-        from apps.states.models import WorkItem, WorkStatus
+        from apps.meetings.models import FlowSource
+        from apps.states.models import WorkStatus
 
-        drawn = 0
-
-        def emit(days_ago, make):
-            nonlocal drawn
-            scope = FlowEdge.objects.filter(project=project, category=FlowCategory.WORK)
-            before = set(scope.values_list("id", flat=True))
-            obj = make()
-            drawn += scope.exclude(id__in=before).update(
-                occurred_at=now - timedelta(days=days_ago))
-            return obj
-
-        def work(owner, title, status, progress):
-            return lambda: WorkItem.objects.create(
-                project=project, owner=owner, title=title,
-                status=status, progress=progress)
-
-        def move(item, status, progress):
-            def go():
-                item.status, item.progress = status, progress
-                item.save()
-                return item
-            return go
+        emit, work, move, ask, drawn = self._flow_helpers(project, users, now)
 
         # ── 작업 · 수정
         changed = [
@@ -710,16 +677,9 @@ class Command(BaseCommand):
              "",
              FlowSource.GITHUB),
         ]:
-            def ask(a=asker, t=target, tp=topic, r=reason, q=question,
-                    ans=answer, s=source, d=days):
-                return draw_edge(AgentLookup.objects.create(
-                    project=project, asker=users[a], target=users[t],
-                    topic=tp, reason=r, question=q, answer=ans,
-                    source=s, occurred_at=now - timedelta(days=d)))
+            ask(days, asker, target, topic, reason, question, answer, source)
 
-            emit(days, ask)
-
-        return drawn
+        return drawn[0]
 
     def _seed_academic_meeting(self, project, users, now):
         """연합학술제의 끝난 회의 하나. main의 회의만큼 촘촘하지는 않지만
