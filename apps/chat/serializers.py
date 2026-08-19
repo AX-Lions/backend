@@ -77,12 +77,13 @@ class RoomSummarySerializer(serializers.ModelSerializer):
     unread_count = serializers.SerializerMethodField()
     has_important = serializers.SerializerMethodField()
     members = serializers.SerializerMethodField()
+    muted = serializers.SerializerMethodField()
 
     class Meta:
         model = ChatRoom
         fields = ("id", "type", "title", "team_id", "team_name", "project_id",
                   "project_name", "path_label", "avatar_urls", "members",
-                  "last_message", "unread_count", "has_important")
+                  "last_message", "unread_count", "has_important", "muted")
 
     def get_title(self, obj):
         """
@@ -111,6 +112,10 @@ class RoomSummarySerializer(serializers.ModelSerializer):
         (`team_id`가 비어 있습니다) 뒤질 목록 자체가 없습니다.
         """
         return (self.context.get("member_map") or {}).get(obj.id, [])
+
+    def get_muted(self, obj):
+        """**보는 사람 기준**입니다. 한 사람이 껐다고 남의 목록에서도 꺼지면 안 됩니다."""
+        return (self.context.get("muted_map") or {}).get(obj.id, False)
 
     def get_last_message(self, obj):
         return (self.context.get("last_map") or {}).get(obj.id)
