@@ -476,21 +476,32 @@ class Command(BaseCommand):
         # 않습니다 — 팀 화면에 사적인 대화가 실립니다.
         room = ensure_project_room(project)
 
-        def say(sender_name, body, important=True):
-            return lambda: ChatMessage.objects.create(
-                room=room, sender=users[sender_name], sender_name=sender_name,
-                body=body, is_important=important)
+        def say(sender_name, body, days_ago, important=True):
+            def make():
+                # ChatMessage.sent_at은 auto_now_add라 create() 인자로 시각을
+                # 줘도 조용히 무시된다. 생성 직후 update()로 다시 써야 실제로
+                # 반영되고, 메모리 인스턴스의 필드도 같이 맞춰야 나중에 이
+                # 인스턴스를 다시 save()할 때(`flag()` 참고) 원래 시각으로
+                # 되돌아가지 않는다(#137).
+                msg = ChatMessage.objects.create(
+                    room=room, sender=users[sender_name], sender_name=sender_name,
+                    body=body, is_important=important)
+                sent_at = now - timedelta(days=days_ago)
+                ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+                msg.sent_at = sent_at
+                return msg
+            return make
 
-        emit(5, say("임수연", "우측 패널이 1280 이하에서 잘립니다. 너비를 다시 봐야 합니다."))
-        emit(2, say("최비성", "응답 구조를 바꿨습니다. 기존 필드는 한 주만 같이 내려갑니다."))
+        emit(5, say("임수연", "우측 패널이 1280 이하에서 잘립니다. 너비를 다시 봐야 합니다.", 5))
+        emit(2, say("최비성", "응답 구조를 바꿨습니다. 기존 필드는 한 주만 같이 내려갑니다.", 2))
         # 사람마다 피드백이 있어야 우측 패널의 `피드백` 칩이 0 이 아닙니다.
-        emit(6, say("서재민", "로그인 실패 원인에 따라 오류 메시지를 구분하는 게 좋겠습니다."))
-        emit(4, say("서재민", "회의 상세 화면은 모바일에서 좌우 스크롤이 생깁니다. 기준폭을 낮춥시다."))
-        emit(3, say("강다은", "Discord 공지 문구에 회의 시각이 두 번 들어갑니다."))
+        emit(6, say("서재민", "로그인 실패 원인에 따라 오류 메시지를 구분하는 게 좋겠습니다.", 6))
+        emit(4, say("서재민", "회의 상세 화면은 모바일에서 좌우 스크롤이 생깁니다. 기준폭을 낮춥시다.", 4))
+        emit(3, say("강다은", "Discord 공지 문구에 회의 시각이 두 번 들어갑니다.", 3))
 
         # 중요 표시는 화면에서 **나중에** 켭니다(`PATCH .../important`). 켜지는
         # 순간에도 그려지는지 시드가 함께 확인합니다.
-        later = say("유수인", "프로필 이미지는 원형으로 통일해 주십시오.", important=False)()
+        later = say("유수인", "프로필 이미지는 원형으로 통일해 주십시오.", 1, important=False)()
 
         def flag():
             later.is_important = True
@@ -617,14 +628,22 @@ class Command(BaseCommand):
         # ── 피드백 (프로젝트마다 방이 따로다 — ensure_project_room이 이 project 것을 새로 만든다)
         room = ensure_project_room(project)
 
-        def say(sender_name, body):
-            return lambda: ChatMessage.objects.create(
-                room=room, sender=users[sender_name], sender_name=sender_name,
-                body=body, is_important=True)
+        def say(sender_name, body, days_ago):
+            def make():
+                # #137 — ChatMessage.sent_at은 auto_now_add라 create() 인자로는
+                # 안 먹는다. 생성 직후 update()로 다시 써야 한다.
+                msg = ChatMessage.objects.create(
+                    room=room, sender=users[sender_name], sender_name=sender_name,
+                    body=body, is_important=True)
+                sent_at = now - timedelta(days=days_ago)
+                ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+                msg.sent_at = sent_at
+                return msg
+            return make
 
-        emit(5, say("임수연", "세션 시간표에 발표자 사진이 안 뜹니다. 이미지 경로 확인해주세요."))
-        emit(3, say("최비성", "참가 신청 폼에 소속 학교 필드를 추가했습니다."))
-        emit(2, say("강다은", "후원사 로고 배치가 겹쳐 보입니다."))
+        emit(5, say("임수연", "세션 시간표에 발표자 사진이 안 뜹니다. 이미지 경로 확인해주세요.", 5))
+        emit(3, say("최비성", "참가 신청 폼에 소속 학교 필드를 추가했습니다.", 3))
+        emit(2, say("강다은", "후원사 로고 배치가 겹쳐 보입니다.", 2))
 
         # ── AI 조회 (하나는 유보 — answer를 비워 둔다)
         for days, asker, target, topic, reason, question, answer, source in [
@@ -714,14 +733,22 @@ class Command(BaseCommand):
         # ── 피드백
         room = ensure_project_room(project)
 
-        def say(sender_name, body):
-            return lambda: ChatMessage.objects.create(
-                room=room, sender=users[sender_name], sender_name=sender_name,
-                body=body, is_important=True)
+        def say(sender_name, body, days_ago):
+            def make():
+                # #137 — ChatMessage.sent_at은 auto_now_add라 create() 인자로는
+                # 안 먹는다. 생성 직후 update()로 다시 써야 한다.
+                msg = ChatMessage.objects.create(
+                    room=room, sender=users[sender_name], sender_name=sender_name,
+                    body=body, is_important=True)
+                sent_at = now - timedelta(days=days_ago)
+                ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+                msg.sent_at = sent_at
+                return msg
+            return make
 
-        emit(4, say("임수연", "환불 버튼 위치가 결제 버튼과 너무 가깝습니다."))
-        emit(3, say("강다은", "결제 실패 메시지가 너무 딱딱합니다. 톤 조정 부탁드려요."))
-        emit(2, say("서재민", "정산 배치가 자정마다 도는데 시간대 확인이 필요합니다."))
+        emit(4, say("임수연", "환불 버튼 위치가 결제 버튼과 너무 가깝습니다.", 4))
+        emit(3, say("강다은", "결제 실패 메시지가 너무 딱딱합니다. 톤 조정 부탁드려요.", 3))
+        emit(2, say("서재민", "정산 배치가 자정마다 도는데 시간대 확인이 필요합니다.", 2))
 
         # ── AI 조회 (하나는 유보)
         for days, asker, target, topic, reason, question, answer, source in [
@@ -1274,17 +1301,26 @@ class Command(BaseCommand):
         from apps.chat.services import (direct_key, ensure_ai_room, ensure_team_room,
                                 peer_agent_key)
 
+        def send(room, sender, sender_name, body, sent_at, *, is_agent=False):
+            # ChatMessage.sent_at은 auto_now_add라 create() 인자로는 안 먹는다
+            # (Django가 조용히 무시한다). 생성 직후 update()로 다시 써야 실제로
+            # 반영된다 — 안 그러면 이 함수가 만드는 메시지 전부가 시드를 돌린
+            # 그 순간의 시각으로 찍혀서 날짜 구분선·달력·미리보기 시각이 전부
+            # 하루/한 시각으로 뭉친다 (#137).
+            msg = ChatMessage.objects.create(
+                room=room, sender=sender, sender_name=sender_name, body=body,
+                is_agent=is_agent)
+            ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+            return msg
+
         team_room = ensure_team_room(team)
-        for pname, body in [
-            ("강다은", "다음 주 학술제 부스 배치도 공유드립니다."),
-            ("유수인", "이번 주 금요일 전체 회고 시간 잡을게요."),
-        ]:
-            ChatMessage.objects.create(room=team_room, sender=users[pname],
-                                       sender_name=pname, body=body)
+        send(team_room, users["강다은"], "강다은", "다음 주 학술제 부스 배치도 공유드립니다.",
+             now - timedelta(days=3))
+        send(team_room, users["유수인"], "유수인", "이번 주 금요일 전체 회고 시간 잡을게요.",
+             now - timedelta(hours=2))
 
         ai_room = ensure_ai_room(owner)
-        ChatMessage.objects.create(room=ai_room, sender=owner, sender_name=owner.name,
-                                   body="오늘 일정 알려줘.")
+        send(ai_room, owner, owner.name, "오늘 일정 알려줘.", now - timedelta(days=1))
         # `sender` 는 주인이지만 **말한 것은 대리인**입니다.
         #
         # 없으면 화면이 본인이 보낸 메시지로 그립니다. 「자리를 비운 사이
@@ -1293,10 +1329,9 @@ class Command(BaseCommand):
         #
         # `SendMessageSkill` 도 `is_agent=True` 로 만듭니다 — 시드가 실제 경로와
         # 다른 모양을 만들면 화면이 시드에서만 다르게 보입니다.
-        ChatMessage.objects.create(
-            room=ai_room, sender=owner, sender_name=f"{owner.name}의 Bordo",
-            is_agent=True,
-            body="오늘 9시 정기 팀 회의, 13시 디자인 리뷰, 17시 개발팀 Sync가 있습니다.")
+        send(ai_room, owner, f"{owner.name}의 Bordo",
+             "오늘 9시 정기 팀 회의, 13시 디자인 리뷰, 17시 개발팀 Sync가 있습니다.",
+             now - timedelta(days=1) + timedelta(minutes=1), is_agent=True)
 
         # 1:1 방 — 유수인 · 최비성. direct_key가 정렬해서 만드니 누가 먼저
         # 걸어도 같은 방이 된다.
@@ -1305,10 +1340,10 @@ class Command(BaseCommand):
             type=RoomType.DIRECT, dedupe_key=d_key, defaults={"created_by": owner})
         for u in (owner, users["최비성"]):
             RoomMember.objects.get_or_create(room=direct_room, user=u)
-        ChatMessage.objects.create(room=direct_room, sender=users["최비성"],
-                                   sender_name="최비성", body="결제 API 명세 확인해주실 수 있나요?")
-        ChatMessage.objects.create(room=direct_room, sender=owner,
-                                   sender_name=owner.name, body="네, 오늘 중으로 볼게요.")
+        send(direct_room, users["최비성"], "최비성", "결제 API 명세 확인해주실 수 있나요?",
+             now - timedelta(hours=5))
+        send(direct_room, owner, owner.name, "네, 오늘 중으로 볼게요.",
+             now - timedelta(hours=4))
 
         # 대리인에게 직접 묻는 방 — 서재민이 유수인의 대리인에게. 방향이 있는
         # 키라 peer_agent_key(요청자, 대상)로 만든다.
@@ -1318,12 +1353,11 @@ class Command(BaseCommand):
             defaults={"created_by": users["서재민"], "agent_owner": owner})
         for u in (users["서재민"], owner):
             RoomMember.objects.get_or_create(room=peer_room, user=u)
-        ChatMessage.objects.create(
-            room=peer_room, sender=users["서재민"], sender_name="서재민",
-            body="유수인님 대신 여쭤봅니다 — 디자인 시안 오늘 확정되나요?")
-        ChatMessage.objects.create(
-            room=peer_room, sender=owner, sender_name=f"{owner.name}의 Bordo",
-            is_agent=True,
-            body="네, 오늘 중 확정 예정이라고 전달받았습니다.")
+        send(peer_room, users["서재민"], "서재민",
+             "유수인님 대신 여쭤봅니다 — 디자인 시안 오늘 확정되나요?",
+             now - timedelta(days=2))
+        send(peer_room, owner, f"{owner.name}의 Bordo",
+             "네, 오늘 중 확정 예정이라고 전달받았습니다.",
+             now - timedelta(days=2) + timedelta(minutes=2), is_agent=True)
 
 
