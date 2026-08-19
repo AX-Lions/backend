@@ -38,6 +38,7 @@ urlpatterns = [
     # ── 00. 홈
     path(f"{API}/home", home.home),
     path(f"{API}/me/briefing-dismiss", home.briefing_dismiss),
+    path(f"{API}/me/inbox", home.inbox),
     path(f"{API}/meetings/<uuid:meeting_id>/favorite", home.meeting_favorite),
 
     # ── 01. 인증

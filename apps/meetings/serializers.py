@@ -63,7 +63,11 @@ class FlowEdgeSerializer(serializers.ModelSerializer):
 class UtteranceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Utterance
-        fields = ("participant_id", "participant_name", "body", "spoken_at")
+        # `is_agent` 를 함께 냅니다. 이 값이 없으면 회의록에서 대리인이 대신한
+        # 말과 본인이 직접 한 말이 같은 모양으로 섞입니다 — `participant_id` 는
+        # 둘 다 주인을 가리키므로 클라이언트가 구별할 방법이 없습니다.
+        fields = ("participant_id", "participant_name", "body", "spoken_at",
+                  "is_agent")
 
 
 class MeetingSummarySerializer(serializers.ModelSerializer):

@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 from datetime import timedelta
 
@@ -569,6 +570,46 @@ def meeting_end(request):
 
 # ═══════════════════════════════════════════ 발언 · 상태
 
+#: Discord 멘션 표기. `<@123>` 과 별명 형태 `<@!123>` 둘 다 옵니다.
+_MENTION = re.compile(r"<@!?(\d+)>")
+
+
+def _resolve_mentions(body: str, mentions) -> str:
+    """
+    `<@1234567890>` 을 사람 이름으로 바꿉니다.
+
+    ## 왜 필요한가
+
+    봇은 `mentions` 를 실어 보내는데 서버가 안 읽고 있었습니다. 그래서 대상
+    판정(`targeting.pick`)이 원문만 보고 **스노플레이크 숫자를 한국어 이름
+    목록과 맞춰야** 했고, 대개 `아무에게도 향하지 않음` 을 골랐습니다 —
+    멘션으로 부른 대리인이 입을 안 여는 것이 이 때문입니다. 가장 강한 신호를
+    이미 받아 놓고 안 쓰고 있었습니다.
+
+    ## 왜 별도 칸이 아니라 본문을 고치는가
+
+    회의록·요약·논쟁점 예측이 전부 `Utterance.body` 를 읽습니다. 멘션을 옆
+    칸에 두면 그 셋이 각자 합쳐야 하고, 지금도 요약에는 숫자가 그대로 실려
+    나갑니다. 사람이 읽는 회의록에도 이름이 낫습니다.
+
+    이은 계정이 없는 사람은 그대로 둡니다. 지우면 누구를 부른 것인지가
+    사라지고, 아무 이름이나 넣으면 없는 사람이 회의록에 등장합니다.
+    """
+    from apps.accounts.models import User
+
+    ids = {str(m) for m in (mentions or []) if str(m).strip()}
+    ids |= set(_MENTION.findall(body or ""))
+    if not ids:
+        return body
+
+    names = dict(User.objects.filter(discord_user_id__in=ids)
+                 .values_list("discord_user_id", "name"))
+    if not names:
+        return body
+
+    return _MENTION.sub(lambda m: names.get(m.group(1)) or m.group(0), body)
+
+
 @internal(["POST"])
 def discord_messages(request):
     """
@@ -579,8 +620,19 @@ def discord_messages(request):
     from apps.agent.tasks import run_agent_for_utterance
     from apps.meetings.models import Meeting, MeetingStatus, Utterance
 
-    # 위와 같은 이유입니다. 빈 값이면 웹 회의 스레드로 발언이 새어 들어갑니다.
-    thread_id = _require(request.data.get("thread_id"), "thread_id")
+    # 스레드가 아닌 채널의 메시지는 조용히 흘려보냅니다.
+    #
+    # 봇은 길드의 모든 메시지를 넘기는데, 스레드가 아니면 `thread_id` 가 `null`
+    # 입니다(`bot/cogs/general.py`). 여기서 400 을 내면 **평소 잡담 한 줄마다**
+    # 오류가 쌓여, 정작 봐야 할 오류가 그 안에 묻힙니다. 회의 밖 발언을 버리는
+    # 것은 아래 `no_active_meeting` 과 같은 판단이라 응답도 같은 모양으로 냅니다.
+    #
+    # 조회 전에 빠져나가야 합니다 — 빈 값으로 조회하면 웹에서 만든 회의
+    # (`discord_channel_id=""`)가 잡혀 발언이 남의 회의로 새어 들어갑니다.
+    thread_id = str(request.data.get("thread_id") or "").strip()
+    if not thread_id:
+        return Response({"skipped": "not_a_thread"}, status=202)
+
     body = (request.data.get("content") or request.data.get("body") or "").strip()
     if not body:
         return Response({"skipped": "empty"}, status=202)
@@ -595,6 +647,8 @@ def discord_messages(request):
     from apps.accounts.models import User
     speaker = User.objects.filter(
         discord_user_id=str(request.data.get("author_discord_id") or "")).first()
+
+    body = _resolve_mentions(body, request.data.get("mentions"))
 
     utterance = Utterance.objects.create(
         meeting=meeting, participant=speaker,

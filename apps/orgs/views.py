@@ -1,6 +1,7 @@
 """팀 · 프로젝트 · 즐겨찾기."""
 import secrets
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.db.models import F
@@ -52,6 +53,7 @@ def teams(request):
         team = Team.objects.create(
             name=name,
             description=request.data.get("description", "") or "",
+            timezone=_team_timezone(request.data.get("timezone")),
             created_by=request.user,
             category_keys=request.data.get("categories") or [],
             member_count=1,
@@ -98,6 +100,48 @@ def team_members(request, team_id):
     return Response(listing([TeamMemberSerializer(m).data for m in rows]))
 
 
+def _team_timezone(value) -> str:
+    """
+    팀 기준 시간대. 없는 지역 이름은 400 입니다.
+
+    조용히 기본값으로 바꾸면 사용자는 골랐다고 생각하는데 서버에는 다른 값이
+    들어갑니다. 빈 값은 "안 고름" 이라 그대로 둡니다 — 되돌릴 길을 막지 않습니다.
+    """
+    name = str(value or "").strip()
+    if not name:
+        return ""
+    try:
+        ZoneInfo(name)
+    except Exception:                                          # noqa: BLE001
+        raise BordoError("VALIDATION_ERROR", "알 수 없는 시간대입니다.",
+                         details={"timezone": name})
+    return name
+
+
+def _invite_ttl(data) -> timedelta:
+    """
+    초대 코드 유효기간.
+
+    화면은 `expires_in_hours` 를 보내는데 서버가 `valid_days` 만 읽어, 72시간으로
+    만든 코드가 조용히 7일짜리가 됐습니다. 400 도 안 나서 만든 사람은 사흘 뒤
+    닫힐 줄 알고 공유합니다.
+
+    시간 쪽을 먼저 봅니다 — 더 정밀한 단위가 이깁니다.
+    """
+    hours = data.get("expires_in_hours")
+    if hours is not None:
+        try:
+            hours = int(hours)
+        except (TypeError, ValueError):
+            raise BordoError("VALIDATION_ERROR", "expires_in_hours 는 정수입니다.",
+                             details={"expires_in_hours": hours})
+        if hours <= 0:
+            raise BordoError("VALIDATION_ERROR", "유효기간은 0보다 커야 합니다.",
+                             details={"expires_in_hours": hours})
+        return timedelta(hours=hours)
+    return timedelta(days=int(data.get("valid_days", 7)))
+
+
 @api_view(["POST"])
 def invite_codes(request, team_id):
     team_membership(request.user, team_id, roles=ADMINS)
@@ -106,7 +150,7 @@ def invite_codes(request, team_id):
         code=code, team_id=team_id,
         default_role=request.data.get("default_role", TeamRole.MEMBER),
         max_uses=int(request.data.get("max_uses", 10)),
-        expires_at=timezone.now() + timedelta(days=int(request.data.get("valid_days", 7))),
+        expires_at=timezone.now() + _invite_ttl(request.data),
     )
     return Response(InviteCodeSerializer(inv).data, status=201)
 
