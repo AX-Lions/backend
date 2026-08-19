@@ -90,7 +90,18 @@ class BordoCog(commands.Cog):
             await interaction.followup.send(error.get("message", "팀 조회에 실패했습니다."), ephemeral=True)
             return
 
-        await interaction.followup.send(str(result), ephemeral=True)
+        teams = result.get("teams") if isinstance(result, dict) else None
+        if not teams:
+            await interaction.followup.send("아직 소속된 팀이 없습니다.", ephemeral=True)
+            return
+
+        listing = "\n".join(f"- {t.get('name', '이름 없음')} (`{t.get('role', '')}`)" for t in teams)
+        message = f"소속된 팀:\n{listing}"
+        # 팀이 아주 많은 경우를 대비한 방어. Discord 메시지 한도(2000자)를
+        # 넘기면 send() 자체가 예외로 죽어 목록이 하나도 안 보인다.
+        if len(message) > 2000:
+            message = message[:1990] + "\n…"
+        await interaction.followup.send(message, ephemeral=True)
 
     @app_commands.command(
         name="ask-bordo",
