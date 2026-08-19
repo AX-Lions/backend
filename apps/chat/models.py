@@ -159,6 +159,12 @@ class ChatMessage(UUIDModel):
                                null=True, related_name="chat_messages")
     sender_name = models.CharField(max_length=100)         # 비정규화
     is_agent = models.BooleanField(default=False, help_text="대리인이 보낸 메시지")
+    #: 주인이 자리를 비운 사이 대리인이 대신 받은 말.
+    #:
+    #: `is_agent` 만으로는 못 가릅니다 — 옆에서 시켜서 한 말도 대리인이 보낸
+    #: 것이라, 돌아와서 「없는 동안 오간 대화」를 볼 때 그것까지 섞이면
+    #: 무엇을 확인해야 하는지가 흐려집니다.
+    answered_while_away = models.BooleanField(default=False)
     body = models.TextField(blank=True, default="")
 
     is_important = models.BooleanField(default=False)
