@@ -21,7 +21,15 @@ import logging
 
 from celery import shared_task
 
+from django.core.cache import cache
+
+from apps.common.events import publish
+
 logger = logging.getLogger("bordo.agent")
+
+#: 논쟁점 생성 열쇠의 수명. 모델 호출이 끝나면 바로 지우므로 이 값은 **죽은
+#: 워커가 열쇠를 붙잡고 있는 시간의 상한**입니다.
+BUILD_LOCK_SEC = 300
 
 
 @shared_task(name="agent.run_for_utterance")
@@ -242,3 +250,63 @@ def _reply(conversation, question, run, body: str) -> None:
             question.save(update_fields=["run"])
         conversation.last_message_preview = body[:200]
         conversation.save(update_fields=["last_message_preview", "updated_at"])
+
+
+@shared_task(name="agent.build_debate_points")
+def build_debate_points(meeting_id: str, force: bool = False) -> None:
+    """
+    회의 하나의 예상 논쟁점을 만듭니다.
+
+    불참을 등록하면 불립니다. **기다리지 않습니다** — 모델 호출이라 몇 초가
+    걸리고, 그 사이 버튼이 멈춰 있으면 사용자는 눌리지 않은 줄 알고 다시
+    누릅니다.
+
+    ## 언제 건너뛰는가
+
+    **대리인이 만든 쟁점이 이미 있을 때만** 건너뜁니다. 두 사람이 차례로 불참을
+    누를 때마다 다시 돌면 같은 회의에 모델 호출이 사람 수만큼 나가고, 그때마다
+    예측이 달라져 먼저 답한 사람의 쟁점이 사라집니다.
+
+    반대로 **안건에서 규칙으로 베낀 대체본밖에 없으면 다시 시도합니다.** 키가
+    잠깐 막혔거나 타임아웃 한 번이면 그 회의는 회의가 끝날 때까지 안건 제목을
+    그대로 베낀 쟁점만 보여 주게 됩니다.
+
+    ## 잠금을 DB 로 걸지 않는 이유
+
+    회의 행을 `select_for_update` 로 잡으면 **모델 응답을 기다리는 수십 초 동안
+    그 행을 건드리는 요청이 전부 막힙니다.** 여기서 필요한 것은 "누가 만들
+    것인가" 를 정하는 것뿐이라, 스스로 풀리는 캐시 열쇠로 충분합니다.
+    """
+    from apps.meetings.models import DebatePoint, Meeting
+
+    from .services import contention
+
+    meeting = Meeting.objects.filter(pk=meeting_id).first()
+    if meeting is None:
+        logger.warning("회의를 찾을 수 없습니다: %s", meeting_id)
+        return
+
+    if not force and DebatePoint.objects.filter(meeting=meeting,
+                                                created_by_agent=True).exists():
+        return
+
+    # 열쇠를 못 잡으면 다른 실행이 만들고 있습니다. 기다리지 않고 물러납니다 —
+    # 어차피 결과는 같고, 기다리면 두 실행이 나란히 붙잡혀 있게 됩니다.
+    lock = f"debate:build:{meeting_id}"
+    if not cache.add(lock, 1, timeout=BUILD_LOCK_SEC):
+        return
+
+    try:
+        made = contention.build_for(meeting)
+    except Exception:                                          # noqa: BLE001
+        # 예측이 실패해도 불참 등록은 이미 끝나 있습니다. 여기서 터뜨리면
+        # 화면은 등록에 실패한 것으로 읽습니다.
+        logger.exception("논쟁점 생성 실패 meeting=%s", meeting_id)
+        return
+    finally:
+        # 실패했으면 곧바로 다시 시도할 수 있어야 합니다.
+        cache.delete(lock)
+
+    if made:
+        publish(meeting.project_id, "meeting.debate.ready",
+                {"meeting_id": str(meeting.id), "count": made})

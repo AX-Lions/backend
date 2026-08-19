@@ -201,7 +201,7 @@ class WritePolicyTest(Base):
         from apps.chat.models import ChatMessage
 
         AgentSettings.objects.filter(user=self.me).update(
-            disclose_work_plan_thought=False)
+            disclose_work=False, disclose_plan=False, disclose_thought=False)
         spy = CatalogSpy(
             # 의도를 `OTHER` 로 둡니다. `STATUS` 로 두면 **POLICY 단계에서 실행
             # 자체가 거절돼** 도구 루프에 들어가지도 않습니다 — 그러면 이 테스트는
@@ -255,7 +255,7 @@ class WritePolicyTest(Base):
         from apps.agent.services.llm import ToolCall
 
         AgentSettings.objects.filter(user=self.me).update(
-            disclose_work_plan_thought=False)
+            disclose_work=False, disclose_plan=False, disclose_thought=False)
         spy = CatalogSpy(
             # `STATUS` 로 두면 POLICY 가 먼저 거절해 도구 루프에 안 들어갑니다.
             LLMResponse(text="OTHER"),

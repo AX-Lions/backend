@@ -71,7 +71,7 @@ class PolicyGateTest(Base):
     def test_blocked_intent_never_calls_generation(self):
         """막힌 뒤에 만들어 두면 새어 나갈 자리가 생깁니다."""
         AgentSettings.objects.filter(user=self.me).update(
-            disclose_work_plan_thought=False)
+            disclose_work=False, disclose_plan=False, disclose_thought=False)
         llm = FakeLLM(intent("STATUS"))
         out = self._run(llm)
 

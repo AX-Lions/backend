@@ -19,7 +19,11 @@ from .tasks import run_agent_for_conversation
 logger = logging.getLogger("bordo.agent")
 
 BOOL_FIELDS = ("mention_feasibility", "allow_schedule_change",
-               "allow_midmeeting_question", "disclose_work_plan_thought")
+               "allow_midmeeting_question",
+               "disclose_work", "disclose_plan", "disclose_thought")
+
+#: 옛 클라이언트가 쓰던 한 칸. 셋을 함께 움직이는 지름길로만 받습니다.
+LEGACY_DISCLOSURE = "disclose_work_plan_thought"
 
 
 def get_settings(user):
@@ -34,13 +38,29 @@ def settings_view(request):
         return Response(AgentSettingsSerializer(obj).data)
 
     changed = {}
+
+    # 옛 키를 먼저 적용합니다. 화면이 둘을 함께 보내면 **낱개 스위치가 이겨야**
+    # 합니다 — 사용자가 실제로 만진 것은 낱개 쪽입니다.
+    if LEGACY_DISCLOSURE in request.data:
+        want = bool(request.data[LEGACY_DISCLOSURE])
+        for f in ("disclose_work", "disclose_plan", "disclose_thought"):
+            if getattr(obj, f) != want:
+                changed[f] = {"from": getattr(obj, f), "to": want}
+                setattr(obj, f, want)
+
     for f in BOOL_FIELDS:
         if f in request.data:
             new = bool(request.data[f])
             old = getattr(obj, f)
-            if new != old:
-                changed[f] = {"from": old, "to": new}
-                setattr(obj, f, new)
+            # 옛 키가 먼저 건드렸으면 `from` 은 **그때 값**을 유지합니다.
+            before = changed[f]["from"] if f in changed else old
+            if new != before:
+                changed[f] = {"from": before, "to": new}
+            else:
+                # 옛 키가 옮겨 놓은 것을 낱개가 되돌린 경우입니다. 바뀐 것이
+                # 없는데 목록에 남겨 두면 설정 버전이 헛되이 오릅니다.
+                changed.pop(f, None)
+            setattr(obj, f, new)
 
     if "agent_name" in request.data:
         # 길이만 봅니다. 빈 값은 "기본 호칭으로 되돌린다" 는 뜻이라 허용합니다 —

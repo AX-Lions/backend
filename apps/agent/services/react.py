@@ -101,7 +101,11 @@ def run(*, principal, question: str, meeting=None, project_id=None,
     client = client or default_client
     registry = registry or default_registry
 
-    snapshot = _snapshot_of(principal)
+    # 이 회의에서의 내 설정 한 줄. 스냅샷·자료 범위·프롬프트가 모두 여기서
+    # 나오므로 한 번만 읽습니다.
+    participant = _participant_of(
+        getattr(meeting, "id", None) or scope_meeting_id, principal)
+    snapshot = _snapshot_of(principal, participant)
     max_hops = dj_settings.BORDO.get("MAX_HOPS", 3)
 
     run_obj = AgentRun.objects.create(
@@ -118,8 +122,11 @@ def run(*, principal, question: str, meeting=None, project_id=None,
                        text="대리인끼리 주고받은 횟수가 상한에 닿아 본인 확인이 필요합니다.")
 
     steps: list[dict] = []
-    evidence: list[dict] = []
-    seen: set = set()
+    # 회의 전에 적어 둔 입장을 **처음부터** 근거로 깔아 둡니다. 모델이 도구를
+    # 안 불러도 판정이 이것을 봅니다 (`_stance_evidence` 주석 참고).
+    stances = _stances_for(getattr(meeting, "id", None) or scope_meeting_id, principal)
+    evidence: list[dict] = _stance_evidence(stances)
+    seen: set = {(e["source_type"], e["source_id"]) for e in evidence}
 
     def _step(step_kind: str, **payload):
         # 인자 이름을 kind 로 두면 payload 의 kind 키와 부딪혀 TypeError 로 죽습니다.
@@ -152,7 +159,11 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             intent=intent,
             meeting_title=getattr(meeting, "title", ""),
             project_name=getattr(meeting, "project_name", ""),
-            delegate_prompt=delegate_prompt,
+            # 회의별 지시. 호출부가 안 넘겼어도 참석자 행에 있으면 그것을 씁니다 —
+            # `/internal/v1/deputy/ask` 와 피어 조회는 넘기지 않는데, 그때만
+            # 「추가 설정」에 적어 둔 것이 무시되면 경로에 따라 대리인이 달라집니다.
+            delegate_prompt=(delegate_prompt
+                             or getattr(participant, "delegate_prompt", "")),
             constraints=gate.constraints,
             # 설정 스냅샷에서 꺼냅니다. 설정 행을 다시 읽지 않는 이유는 실행
             # 도중에 사용자가 바꿔도 **이 실행은 시작할 때의 설정으로 끝나야**
@@ -161,7 +172,13 @@ def run(*, principal, question: str, meeting=None, project_id=None,
             # 설정 화면에 저장해 둔 지시. 한동안 아무도 안 읽었습니다 —
             # 사용자는 "말하면 안 되는 것" 을 적어 두고 대리인이 지킨다고
             # 믿고 있었습니다.
-            standing_prompts=prompts.standing_prompts_for(principal),
+            standing_prompts=_prompts_for(principal, participant),
+            # 회의 전에 논쟁점마다 적어 둔 입장. **회의별 지시보다 뒤**에 놓여
+            # 가장 세게 걸립니다 — 이 쟁점이 실제로 나왔을 때 대리인이 다르게
+            # 말하면 준비 화면을 채운 일이 헛것이 됩니다.
+            # 위에서 이미 모아 둔 것을 씁니다 — 프롬프트와 근거가 같은 목록이어야
+            # "적어 둔 대로 말하되 그 근거로 판정" 이 어긋나지 않습니다.
+            stances=stances,
         )
         ctx = SkillContext(
             principal_id=str(principal.id), actor_id=str(actor_id or principal.id),
@@ -295,17 +312,127 @@ def run(*, principal, question: str, meeting=None, project_id=None,
 
 # ── 상태 기록 ──────────────────────────────────────────────
 
-def _snapshot_of(principal) -> dict:
+def _participant_of(meeting_id, principal):
+    """이 회의에서의 내 참석자 행. 없으면 None."""
+    if not meeting_id:
+        return None
+    from apps.meetings.models import MeetingParticipant
+    return (MeetingParticipant.objects
+            .filter(meeting_id=meeting_id, user_id=principal.id)
+            .first())
+
+
+def _snapshot_of(principal, participant=None) -> dict:
     """
     실행 시작 시점의 POLICY 를 DB 에서 새로 읽습니다.
 
     `principal.agent_settings` 로 가면 인스턴스에 캐시된 값이 잡힙니다. 사용자가
     회의 직전에 설정을 바꿨는데 그 전에 불러온 객체를 들고 있으면 **낡은 정책으로
     판정**하게 되고, 스냅샷에도 낡은 값이 박혀 나중에 재현할 때 사실과 어긋납니다.
+
+    ## 회의별 덮어쓰기
+
+    준비 화면에서 `이번에만 다르게 사용` 을 고른 경우입니다. 평소 설정 위에
+    그 회의 것만 얹습니다. **병합한 결과가 그대로 `AgentRun.settings_snapshot`
+    에 박힙니다** — 나중에 "왜 저 회의에서만 저렇게 말했지" 를 되짚을 때
+    평소 설정만 남아 있으면 답이 안 나옵니다.
     """
     from ..models import AgentSettings
     s = AgentSettings.objects.filter(user=principal).first()
-    return s.as_snapshot() if s else {}
+    base = s.as_snapshot() if s else {}
+    if participant is None:
+        return base
+
+    # 파생 키 재계산은 `effective_settings` 안에 있습니다 — 준비 화면도 같은
+    # 메서드를 지나야 화면과 판정이 갈리지 않습니다.
+    return participant.effective_settings(base)
+
+
+def _prompts_for(principal, participant) -> list[str]:
+    """
+    이 실행에 실을 시스템 프롬프트.
+
+    회의별 목록이 있으면 그것만 씁니다. **빈 배열도 존중합니다** — 준비 화면에서
+    프롬프트를 전부 지운 사람에게 평소 지시를 그대로 쓰면, 이번 회의에서만
+    지우려던 것이 그대로 나갑니다.
+    """
+    override = getattr(participant, "prompt_override", None)
+    if override is not None:
+        return [str(p) for p in override]
+    return prompts.standing_prompts_for(principal)
+
+
+def _stances_for(meeting_id, principal) -> list[dict]:
+    """
+    회의 전에 논쟁점마다 적어 둔 내 입장.
+
+    회의가 없는 실행에는 없습니다 — 쟁점은 회의에 매달린 것입니다.
+    """
+    if not meeting_id:
+        return []
+    from apps.meetings.models import DebateStance
+
+    rows = (DebateStance.objects
+            .filter(point__meeting_id=meeting_id, user=principal)
+            .select_related("point").order_by("point__order"))
+    out = []
+    for r in rows:
+        picked = next((o for o in (r.point.options or [])
+                       if str(o.get("key")) == r.option_key), None)
+        out.append({"title": r.point.title, "body": r.body,
+                    "option": (picked or {}).get("title", ""),
+                    "stance_id": str(r.id),
+                    "updated_at": r.updated_at})
+    return out
+
+
+def _stance_evidence(stances: list[dict]) -> list[dict]:
+    """
+    입장을 **근거로도** 넣습니다.
+
+    ## 왜 프롬프트만으로는 안 되는가
+
+    루프가 끝나면 반드시 `judge` 를 지나는데, 프롬프트에 답이 적혀 있으면 모델은
+    도구를 **한 번도 안 부르고** 바로 답합니다. 그러면 `evidence` 가 비어 R1
+    (근거없음)에 걸려, 준비해 둔 답 대신 "관련 기록을 찾지 못해 보류했습니다"
+    가 회의에 나갑니다.
+
+    **입장을 적어 두는 상황은 대부분 시스템에 기록이 없어서입니다.** 바로 그
+    경우에 대리인이 입을 다무는 셈이라, 준비 화면을 만든 이유가 사라집니다.
+
+    ## `judge` 에 예외를 두지 않는 이유
+
+    "근거 없이도 말하는 경로" 를 하나 만들면 유보 규칙 전체가 약해집니다.
+    본인이 회의를 앞두고 직접 적은 문장은 **가장 확실한 근거**입니다 — 규칙이
+    막으려는 것(대리인이 기록 없이 지어내는 것)과 정반대입니다. 예외가 아니라
+    근거로 인정하는 편이 규칙과 맞습니다.
+
+    `source_type` 을 `stance` 로 둡니다. `work`·`plan`·`thought` 가 아니라서
+    자료 공개 설정(`can_disclose`)과 확신도 규칙(R5)에 걸리지 않습니다 —
+    본인이 지금 적은 말이라 오래됐을 수도, 확신이 없을 수도 없습니다.
+    """
+    from .judge import MATCH_DIRECT
+
+    out = []
+    for s in stances:
+        body = (s.get("body") or "").strip()
+        if not body:
+            continue
+        out.append({
+            "source_type": "stance",
+            "source_id": s.get("stance_id", ""),
+            "title_snapshot": s.get("title", ""),
+            "excerpt": body[:300],
+            "owner_is_principal": True,
+            "match": MATCH_DIRECT,
+            "visibility": "team",
+            "staleness_days": 0,
+            # `AgentRun.evidence` 는 JSONField 라 datetime 을 그대로 담으면
+            # 저장할 때 터집니다 — 실행 전체가 FAILED 로 끝납니다.
+            "updated_at": (s["updated_at"].isoformat()
+                           if s.get("updated_at") else None),
+        })
+    return out
 
 
 def _set(run_obj: AgentRun, status: str):
@@ -383,7 +510,9 @@ def _may_write(skill_name: str, snapshot: dict | None) -> str:
         return ("본인이 일정 수정을 대리인에게 맡기지 않도록 설정해 두었습니다. "
                 "일정은 제안하지 않고 본인에게 남깁니다.")
 
-    if not s.get("disclose_work_plan_thought", True):
+    # 낱개 중 **하나라도** 꺼져 있으면 막습니다. 통째로 나가는 자리라 어느 종류가
+    # 섞였는지 가릴 수 없습니다 (`policy.fully_disclosed` 주석 참고).
+    if not policy.fully_disclosed(snapshot):
         if skill_name == "ask_peer_agent":
             # 남에게 물으려면 이쪽 맥락을 얼마간 건네야 합니다. 본인이 자기
             # 기록을 안 알리기로 했다면 그 맥락도 나가면 안 됩니다.

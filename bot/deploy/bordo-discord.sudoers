@@ -1,0 +1,16 @@
+# 배포 스크립트가 봇을 재시작할 때만 쓰는 권한.
+#
+#   sudo install -m 0440 -o root -g root \
+#        deploy/bordo-discord.sudoers /etc/sudoers.d/bordo-discord
+#   sudo visudo -c            # 문법 확인. 틀리면 sudo 자체가 막히므로 반드시 봅니다
+#
+# GitHub Actions 러너는 비대화형이라 비밀번호를 입력할 수 없습니다. 그렇다고
+# 전체 NOPASSWD 를 주면 배포 권한이 곧 루트 권한이 됩니다. 이 서비스의
+# 재시작과 상태 조회만 열어 둡니다.
+#
+# 사용자 이름이 zanviq 가 아니면 아래를 바꾸십시오.
+
+zanviq ALL=(root) NOPASSWD: /usr/bin/systemctl restart bordo-discord
+zanviq ALL=(root) NOPASSWD: /usr/bin/systemctl stop bordo-discord
+zanviq ALL=(root) NOPASSWD: /usr/bin/systemctl start bordo-discord
+zanviq ALL=(root) NOPASSWD: /usr/bin/systemctl status bordo-discord

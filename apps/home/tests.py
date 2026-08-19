@@ -97,3 +97,18 @@ class HomeDisplayTest(TestCase):
                                           user_name="유수인",
                                           attendance=Attendance.DELEGATED)
         self.assertEqual(self._get()["recent_meeting_summary"]["status"], "불참한 회의")
+
+
+class TodayScheduleAbsenceTest(HomeDisplayTest):
+    """`회의에 참여하지 않아요` 버튼이 부를 곳."""
+
+    def test_delegation_carries_both_urls(self):
+        Meeting.objects.filter(pk=self.meeting.pk).update(scheduled_at=timezone.now())
+        MeetingParticipant.objects.create(meeting=self.meeting, user=self.me,
+                                          user_name=self.me.name)
+        row = self._get()["today_schedule"][0]
+        d = row["delegation"]
+        self.assertIsNotNone(d, "참석자면 delegation 이 있어야 버튼이 뜹니다")
+        self.assertTrue(d["absence_url"].endswith("/absence"))
+        self.assertTrue(d["prep_url"].endswith("/prep"))
+        self.assertIn(row["meeting_id"], d["absence_url"])

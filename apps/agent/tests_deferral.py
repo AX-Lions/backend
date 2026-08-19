@@ -124,7 +124,7 @@ class ThroughLoopTest(Base):
     def test_policy_block_also_leaves_a_question(self):
         """정책으로 막힌 것도 본인은 알아야 합니다."""
         AgentSettings.objects.filter(user=self.me).update(
-            disclose_work_plan_thought=False)
+            disclose_work=False, disclose_plan=False, disclose_thought=False)
         out = self._run(FakeLLM(LLMResponse(text="STATUS")))
         self.assertIsNotNone(out.pending_question)
         self.assertIn("설정", out.pending_question.body)
