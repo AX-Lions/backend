@@ -351,9 +351,23 @@ def deferred(meeting, *, principal, asker, surface=Surface.DISCORD):
 
 
 def artifact_proposed(meeting, *, principal, kind: str, title: str):
-    """회의 후 — 태스크·일정 후보가 서버에 쌓였습니다."""
+    """
+    회의 후 — 태스크·일정 후보가 서버에 쌓였습니다.
+
+    ## 태스크 후보를 `결론` 으로 그리는 이유
+
+    한동안 `계획`(`PLAN`) 으로 그렸는데, 회의 모드 필터는 여섯 칸이고
+    거기에 `계획` 이 없습니다. 필터 목록은 실제로 등장한 종류만 내려주므로,
+    태스크 후보가 하나 쌓이는 순간 **화면에 없는 칸이 새로 뜹니다.**
+
+    태스크 후보가 쌓였다는 것은 회의에서 무엇이 정해졌는지에 가깝습니다.
+    `요청사항` 도 후보였지만 그쪽은 누가 하기로 한 것이 정해졌을 때이고,
+    후보 단계는 아직 사람이 승인하기 전입니다.
+
+    일정 쪽은 그대로 둡니다 — 필터에 `일정` 칸이 있습니다.
+    """
     content = (FlowContentType.SCHEDULE if kind == "schedule"
-               else FlowContentType.PLAN)
+               else FlowContentType.CONCLUSION)
     return record(meeting,
                   from_node=agent_node(principal), to_nodes=[server_node()],
                   label=title or ("일정 제안" if kind == "schedule" else "할 일 제안"),
