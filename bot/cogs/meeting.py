@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -14,13 +13,9 @@ log = logging.getLogger("bordo")
 
 class MeetingCog(commands.Cog):
 
-    def __init__(self, bot, backend, delegate_on_users: set[str]):
+    def __init__(self, bot, backend):
         self.bot = bot
         self.backend = backend
-
-        # [기존] _delegate_on_users
-        # DelegateCog와 같은 set을 공유
-        self.delegate_on_users = delegate_on_users
 
         # [기존] _active_meeting_threads
         self.active_meeting_threads: dict[int, dict] = {}
@@ -127,20 +122,13 @@ class MeetingCog(commands.Cog):
             "meeting_id": meeting_id,
             "thread_id": str(thread.id),
         }
-        result = await self.backend.post("/internal/v1/meetings/start", json=payload)
-
-        if result is None:
-            # BackendClient가 이미 재시도했는데도 완전히 실패했다는 뜻이지만,
-            # 마지막 시도가 서버에서는 실제로 성공하고 응답만 유실됐을 수도
-            # 있다. 같은 thread_id로 한 번 더 보내면 Backend의 중복 처리
-            # (discord_channel_id로 기존 회의 찾기)가 안전하게 확인해준다 —
-            # 진짜 실패였으면 여기서도 그대로 None/에러가 온다.
-            #
-            # BackendClient 자체도 이미 최대 ~16.5초를 들여 재시도한 뒤였다 —
-            # 바로 다시 부르면 아직 복구 중인 Backend에 요청을 곱절로
-            # 몰아넣는 꼴이라, 잠깐 물러났다가 한 번만 더 시도한다.
-            await asyncio.sleep(2.0)
-            result = await self.backend.post("/internal/v1/meetings/start", json=payload)
+        # BackendClient가 이미 재시도했는데도 완전히 실패했다는 뜻이지만,
+        # 마지막 시도가 서버에서는 실제로 성공하고 응답만 유실됐을 수도
+        # 있다. 같은 thread_id로 한 번 더 보내면 Backend의 중복 처리
+        # (discord_channel_id로 기존 회의 찾기)가 안전하게 확인해준다 —
+        # 진짜 실패였으면 여기서도 그대로 None/에러가 온다.
+        result = await self.backend.post_with_retry(
+            "/internal/v1/meetings/start", json=payload)
 
         if result is None:
             await interaction.followup.send(

@@ -2,49 +2,118 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from services.backend import get_error
+
+
 class DelegateCog(commands.Cog):
-    def __init__(self, bot, backend, meeting_cog, delegate_on_users):
+    def __init__(self, bot, backend, meeting_cog):
         self.bot = bot
         self.backend = backend
         self.meeting_cog = meeting_cog
-        
-        self.delegate_on_users = delegate_on_users
-        
+
+    async def _announce_delegate_change(self, user_id: int, result, *, delegated: bool) -> None:
+        """대리 참석 전환을 진행 중인 회의 스레드에 알린다.
+
+        Backend 응답의 thread_ids를 우선 쓴다 — 방금 실제로 갱신한 회의가
+        무엇인지는 Backend가 정확히 안다. 아직 이 필드를 안 주는 구버전
+        응답이면(키 자체가 없으면) active_meeting_threads를 스캔하던 예전
+        방식으로 폴백한다 — Backend가 thread_ids를 내려주기 시작하면 이
+        분기는 자동으로 안 타게 된다.
+        """
+        uid = str(user_id)
+
+        # get_error()는 dict가 아닌 result(2xx인데 JSON이 아닌 응답)도
+        # 안전하게 통과시키므로, 여기서도 같은 경우를 방어한다 — 알릴
+        # 스레드를 알 수 없으니 조용히 스킵한다(Backend 저장 자체는
+        # 이미 끝난 뒤라 사용자에게는 성공으로 안내된다).
+        thread_ids = result.get("thread_ids") if isinstance(result, dict) else None
+        if isinstance(thread_ids, str):
+            # 원소 하나짜리를 배열 대신 문자열로 보내는 실수를 방어한다 —
+            # 그대로 순회하면 "123..."의 글자 하나하나를 id로 오인한다.
+            thread_ids = [thread_ids]
+        if thread_ids is None:
+            thread_ids = [
+                tid for tid, meeting in self.meeting_cog.active_meeting_threads.items()
+                if uid in meeting.get("participants", {})
+            ]
+
+        status = "delegated" if delegated else "present"
+        text = (
+            f"🤖 <@{user_id}>님이 대리 참석으로 전환했습니다. AI 대리인이 대신 참석합니다."
+            if delegated else
+            f"🙋 <@{user_id}>님이 대리 참석을 해제하고 직접 참석으로 전환했습니다."
+        )
+
+        for raw_thread_id in thread_ids:
+            try:
+                thread_id = int(raw_thread_id)
+            except (TypeError, ValueError):
+                continue
+
+            meeting = self.meeting_cog.active_meeting_threads.get(thread_id)
+            if meeting is not None and uid in meeting.get("participants", {}):
+                meeting["participants"][uid] = status
+
+            await self.meeting_cog.announce_to_thread(thread_id, text)
+
     @app_commands.command(
-        name="delegate-on", 
+        name="delegate-on",
         description="내 대리 참석을 활성화합니다. 어디서든 실행할 수 있습니다."
     )
     @app_commands.describe(scope="대리 참석 범위 (메모용, 예: 전체/특정 프로젝트명)")
     async def delegate_on(self, interaction: discord.Interaction, scope: str):
         await interaction.response.defer(ephemeral=True)
-    
-        # [TEMP] 특정 회의 스레드에 종속되지 않는 전역 설정으로 저장한다. 어느 채널에서 실행해도 동작한다.
-        self.delegate_on_users.add(str(interaction.user.id))
-    
-        # 이미 진행 중인 회의에 참석자로 등록돼 있다면, 그 자리의 상태도 즉시 갱신한다.
-        for thread_id, meeting in self.meeting_cog.active_meeting_threads.items():
-            if str(interaction.user.id) in meeting["participants"]:
-                meeting["participants"][str(interaction.user.id)] = "delegated"
-                await self.meeting_cog.announce_to_thread(
-                    thread_id, f"🤖 <@{interaction.user.id}>님이 대리 참석으로 전환했습니다. AI 대리인이 대신 참석합니다."
-                )
-    
-        await self.backend.post("/internal/v1/delegate/on", json={"discord_user_id": str(interaction.user.id), "scope": scope})
-        await interaction.followup.send("대리 참석을 활성화했습니다. 앞으로 시작되는 회의에도 자동 적용됩니다.", ephemeral=True)    
+
+        result = await self.backend.post_with_retry(
+            "/internal/v1/delegate/on",
+            json={"discord_user_id": str(interaction.user.id), "scope": scope},
+        )
+
+        if result is None:
+            await interaction.followup.send(
+                "대리 참석 활성화에 실패했습니다. 잠시 후 다시 시도해주세요.",
+                ephemeral=True,
+            )
+            return
+
+        error = get_error(result)
+        if error:
+            await interaction.followup.send(
+                f"대리 참석 활성화에 실패했습니다: {error.get('message', '')}",
+                ephemeral=True,
+            )
+            return
+
+        # Backend에 실제로 반영된 뒤에만 스레드에 알린다 — 실패했는데
+        # "전환했습니다"라고 먼저 게시해두면, 다른 참석자는 그 메시지만
+        # 보고 실제로는 안 바뀐 상태를 성공으로 오해한다.
+        await self._announce_delegate_change(interaction.user.id, result, delegated=True)
+
+        await interaction.followup.send("대리 참석을 활성화했습니다. 앞으로 시작되는 회의에도 자동 적용됩니다.", ephemeral=True)
 
     @app_commands.command(name="delegate-off", description="대리 참석을 해제합니다. 어디서든 실행할 수 있습니다.")
     async def delegate_off(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        # [TEMP] 전역 설정 해제. 본인이 직접 참석하는 것으로 되돌린다.
-        self.delegate_on_users.discard(str(interaction.user.id))
+        result = await self.backend.post_with_retry(
+            "/internal/v1/delegate/off", json={"discord_user_id": str(interaction.user.id)}
+        )
 
-        for thread_id, meeting in self.meeting_cog.active_meeting_threads.items():
-            if str(interaction.user.id) in meeting["participants"]:
-                meeting["participants"][str(interaction.user.id)] = "present"
-                await self.meeting_cog.announce_to_thread(
-                    thread_id, f"🙋 <@{interaction.user.id}>님이 대리 참석을 해제하고 직접 참석으로 전환했습니다."
-                )
+        if result is None:
+            await interaction.followup.send(
+                "대리 참석 해제에 실패했습니다. 잠시 후 다시 시도해주세요.",
+                ephemeral=True,
+            )
+            return
 
-        await self.backend.post("/internal/v1/delegate/off", json={"discord_user_id": str(interaction.user.id)})
+        error = get_error(result)
+        if error:
+            await interaction.followup.send(
+                f"대리 참석 해제에 실패했습니다: {error.get('message', '')}",
+                ephemeral=True,
+            )
+            return
+
+        await self._announce_delegate_change(interaction.user.id, result, delegated=False)
+
         await interaction.followup.send("대리 참석을 해제했습니다.", ephemeral=True)
