@@ -155,6 +155,53 @@ def invite_codes(request, team_id):
     return Response(InviteCodeSerializer(inv).data, status=201)
 
 
+def _join_team_wide_projects(team_id, user) -> list:
+    """
+    새로 들어온 사람을 **팀 전원이 들어 있는 프로젝트**에만 넣습니다.
+
+    ## 왜 필요한가
+
+    `join_team` 이 `TeamMember` 만 만들어서, 초대 코드로 들어온 사람은 팀에는
+    있는데 홈이 비어 있었습니다. 팀에서 돌아가는 프로젝트가 화면에 하나도
+    안 뜹니다. 반면 프로젝트를 만들 때는 `member_ids` 를 안 주면 팀 전원을
+    넣습니다 — 두 동작이 어긋나 있었습니다.
+
+    ## 왜 전부가 아니라 이것만
+
+    팀의 모든 프로젝트에 넣으면 **일부만 골라 만든 프로젝트에 일부러 빼 둔
+    사람이 들어갑니다.** 권한을 넓히는 쪽으로 잘못되면 되돌려도 이미 본 것은
+    못 지웁니다.
+
+    "이 프로젝트의 범위가 곧 팀 전체" 인 것만 따라갑니다. 프로젝트를 만들 때의
+    기본값(`member_ids` 없으면 팀 전원)과 뜻이 같습니다.
+
+    기준 시점은 **이 사람이 들어오기 직전의 팀원**입니다. 방금 만든 본인의
+    `TeamMember` 까지 세면 어느 프로젝트도 전원을 담고 있지 않게 됩니다.
+    """
+    existing = set(TeamMember.objects.filter(team_id=team_id)
+                   .exclude(user=user).values_list("user_id", flat=True))
+    if not existing:
+        # 첫 팀원입니다. 비교할 기준이 없어 아무 데도 안 넣습니다.
+        return []
+
+    projects = list(Project.objects.filter(team_id=team_id))
+    if not projects:
+        return []
+
+    members = {}
+    for pid, uid in (ProjectMember.objects
+                     .filter(project_id__in=[p.id for p in projects])
+                     .values_list("project_id", "user_id")):
+        members.setdefault(pid, set()).add(uid)
+
+    joined = []
+    for project in projects:
+        if existing <= members.get(project.id, set()):
+            ProjectMember.objects.get_or_create(project=project, user=user)
+            joined.append({"id": str(project.id), "name": project.name})
+    return joined
+
+
 @api_view(["POST"])
 def join_team(request):
     code = (request.data.get("code") or "").strip()
@@ -172,9 +219,15 @@ def join_team(request):
                                   team_role=inv.default_role)
         InviteCode.objects.filter(pk=inv.pk).update(used_count=F("used_count") + 1)
         Team.objects.filter(pk=inv.team_id).update(member_count=F("member_count") + 1)
+        joined = _join_team_wide_projects(inv.team_id, request.user)
+
     return Response({"team_id": str(inv.team_id), "team_name": inv.team.name,
                      "joined": True, "team_role": inv.default_role,
-                     "joined_at": timezone.now()})
+                     "joined_at": timezone.now(),
+                     # 화면이 "프로젝트 N 개에 함께 들어갔습니다" 를 그릴 수
+                     # 있게 이름을 같이 줍니다. 개수만 주면 어디에 들어갔는지
+                     # 확인하려고 목록을 한 번 더 불러야 합니다.
+                     "joined_projects": joined})
 
 
 # ─────────────────────────────────────────── 프로젝트

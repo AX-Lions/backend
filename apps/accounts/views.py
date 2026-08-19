@@ -80,3 +80,34 @@ def preferences(request):
         "dismissed_tooltips": user.dismissed_tooltips,
         "updated_at": timezone.now(),
     })
+
+
+@api_view(["GET", "PATCH"])
+def presence(request):
+    """
+    자리에 있는가. `ACTIVE` · `AWAY` 둘뿐입니다.
+
+    **브라우저에 둘 수 없는 값입니다.** 자리를 비운다는 것은 창을 닫는 일이라,
+    로컬에 두면 닫는 순간 그 사람의 대리인이 다시 조용해집니다.
+
+    `바쁨` 같은 중간값을 안 만든 이유 — 대리인이 나설지 말지는 예·아니오이고,
+    중간값을 두면 그 상태에서 대리인이 어떻게 행동하는지 아무도 정하지 못합니다.
+
+    ## 남의 상태는 방 응답으로 봅니다
+
+    여기서는 내 것만 다룹니다. 상대 상태는 `GET /chat/rooms` 의 `members[]` 에
+    실려 옵니다 — 방을 그리는 김에 같이 오므로 왕복이 늘지 않습니다.
+    """
+    user = request.user
+    if request.method == "GET":
+        return Response({"status": user.presence, "at": user.presence_at})
+
+    want = str(request.data.get("status") or "").upper()
+    if want not in ("ACTIVE", "AWAY"):
+        raise BordoError("VALIDATION_ERROR", "status 는 ACTIVE 또는 AWAY 입니다.",
+                         details={"status": want})
+    if want != user.presence:
+        user.presence = want
+        user.presence_at = timezone.now()
+        user.save(update_fields=["presence", "presence_at", "updated_at"])
+    return Response({"status": user.presence, "at": user.presence_at})
