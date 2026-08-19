@@ -5,6 +5,7 @@
 플로우 그래프는 `flow_edge` 한 테이블만 읽으면 그려집니다 — 노드 이름과
 방향 표기가 행 안에 들어 있어 사용자 테이블을 조인하지 않습니다.
 """
+import uuid
 from datetime import timedelta
 
 from django.db import transaction
@@ -769,6 +770,114 @@ def _participant_summary(name: str, counts: dict, label: dict) -> str:
     parts = [f"{label.get(k, k)} {v}건"
              for k, v in sorted(counts.items(), key=lambda kv: -kv[1])]
     return f"{name} 님은 이 기간에 " + ", ".join(parts) + "을 남겼습니다."
+
+
+@api_view(["GET"])
+def meeting_participant_flow(request, meeting_id, node_id):
+    """
+    회의 스코프 플로우 우측 패널 — **노드 하나(사람 또는 그 사람의 대리인)가
+    이 회의에서 무엇을 주고받았는가.** 판에서 사람 노드를 누르면 열립니다.
+
+    `flow_participant()`(작업 모드)와 다른 점 셋 (이슈 #136):
+
+    - 스코프가 **회의 하나**입니다(기간이 아닙니다).
+    - `node_id`가 UUID가 아닐 수 있습니다. 대리인 노드는
+      `{user_id}:agent` 형태라(`apps/agent/services/flow.py`의
+      `agent_node()`) URL에서 uuid 컨버터로 못 받습니다 — 문자열로 받아
+      여기서 콜론으로 가릅니다.
+    - `groups`(보낸 것만) 대신 `sent`·`received`를 **따로** 줍니다. 이
+      패널의 알약 줄이 "전달한 내용"과 "전달받은 내용"을 함께 거르는
+      필터라, 받은 쪽이 아예 없으면 그 종류의 알약 자체가 안 생깁니다.
+    """
+    meeting = meeting_access(request.user, meeting_id)
+
+    is_agent = node_id.endswith(":agent")
+    raw_user_id = node_id[:-len(":agent")] if is_agent else node_id
+    try:
+        user_id = uuid.UUID(raw_user_id)
+    except (ValueError, AttributeError, TypeError):
+        # node_id 자체가 UUID 모양이 아니면 참석자일 수가 없습니다. 여기서
+        # 걸러야 아래 쿼리가 잘못된 값으로 500 을 내지 않습니다.
+        raise BordoError("STATE_NOT_FOUND", "이 회의 참석자가 아닙니다.")
+
+    participant = (MeetingParticipant.objects
+                  .filter(meeting=meeting, user_id=user_id)
+                  .select_related("user").first())
+    if participant is None:
+        # 이 회의 참석자가 아니면 404 입니다. 403 을 주면 "그런 사람이
+        # 있긴 하다" 가 새어 나갑니다.
+        raise BordoError("STATE_NOT_FOUND", "이 회의 참석자가 아닙니다.")
+    user = participant.user
+
+    name = agent_display_name(user) if is_agent else user.name
+    kind = "AGENT" if is_agent else "USER"
+
+    edges = (FlowEdge.objects
+            .filter(meeting=meeting, category=FlowCategory.MEETING)
+            .order_by("-occurred_at"))
+
+    tz = user_tz(request.user)
+    label = {c.value: c.label for c in FlowContentType}
+
+    def item(e):
+        return {
+            "edge_id": str(e.id),
+            "title": e.label,
+            "direction_label": e.direction_label,
+            # 화면에 그대로 찍히는 문자열은 서버가 완성합니다. 클라이언트가
+            # 포맷하면 브라우저 시간대로 나가 같은 항목을 사람마다 다르게 봅니다.
+            "occurred_label": timezone.localtime(e.occurred_at, tz).strftime("%y.%m.%d %H:%M"),
+            "occurred_at": e.occurred_at,
+            "source": e.source or None,
+            "source_url": e.source_url or None,
+        }
+
+    counts, sent_groups, received_groups = {}, {}, {}
+    for e in edges:
+        frm_id = (e.from_node or {}).get("id")
+        to_ids = {n.get("id") for n in (e.to_nodes or []) if n}
+
+        sent = frm_id == node_id
+        received = node_id in to_ids
+        if not sent and not received:
+            continue
+
+        counts[e.content_type] = counts.get(e.content_type, 0) + 1
+        if sent:
+            sent_groups.setdefault(e.content_type, []).append(item(e))
+        if received:
+            received_groups.setdefault(e.content_type, []).append(item(e))
+
+    def as_groups(groups):
+        return [{"content_type": k, "label": label.get(k, k), "items": v}
+                for k, v in groups.items()]
+
+    return Response({
+        "node_id": node_id,
+        "name": name,
+        "kind": kind,
+        "headline": _meeting_participant_headline(name, sent_groups, received_groups),
+        "counts": [{"content_type": k, "label": label.get(k, k), "count": v}
+                   for k, v in sorted(counts.items(), key=lambda kv: -kv[1])],
+        "sent": as_groups(sent_groups),
+        "received": as_groups(received_groups),
+    })
+
+
+def _meeting_participant_headline(name: str, sent_groups: dict, received_groups: dict) -> str:
+    """`_participant_summary()`의 회의 스코프 버전. 보낸 것·받은 것을 모두
+    사실만 집계해 한 문장으로 만듭니다 — LLM 을 부르지 않습니다."""
+    sent_total = sum(len(v) for v in sent_groups.values())
+    received_total = sum(len(v) for v in received_groups.values())
+    if not sent_total and not received_total:
+        return f"{name} 님은 이 회의에서 남긴 기록이 없습니다."
+
+    parts = []
+    if sent_total:
+        parts.append(f"보낸 것 {sent_total}건")
+    if received_total:
+        parts.append(f"받은 것 {received_total}건")
+    return f"{name} 님은 이 회의에서 " + " · ".join(parts) + "을 남겼습니다."
 
 
 # ─────────────────────────────────────────── AI 브리핑

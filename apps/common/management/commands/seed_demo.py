@@ -183,17 +183,28 @@ class Command(BaseCommand):
 
         self._seed_meeting_transcript(meeting, users, owner)
 
+        # 안건 3개 · 엣지 11건뿐이면 시간순 인덱스 재생이 5.5초 만에 끝나고
+        # 안건 제목이 서너 줄씩 연달아 반복된다(이슈 #136 B-3). 6개로 늘려
+        # 뒤쪽 엣지들이 여러 안건에 흩어지게 한다.
         agendas = []
-        for i, (title, content, direction) in enumerate([
-            ("회의 일정 조율", "시간대가 다른 팀원을 고려해 슬롯을 다시 잡는다.", "최비성 → 임수연, 서재민"),
-            ("디자인 시안 마감", "8월 18일까지 확정하기로 합의.", "임수연 → 최비성"),
-            ("개발 일정 연장", "대리인이 유수인 대신 일정 연장 요청을 전달.", "유수인의 Bordo → 최비성, 서재민"),
+        for i, (title, content, direction, item_owner, by_agent) in enumerate([
+            ("회의 일정 조율", "시간대가 다른 팀원을 고려해 슬롯을 다시 잡는다.",
+             "최비성 → 임수연, 서재민", users["최비성"], False),
+            ("디자인 시안 마감", "8월 18일까지 확정하기로 합의.",
+             "임수연 → 최비성", users["최비성"], False),
+            ("개발 일정 연장", "대리인이 유수인 대신 일정 연장 요청을 전달.",
+             "유수인의 Bordo → 최비성, 서재민", owner, True),
+            ("API 명세 리뷰 시점", "다음 회의 전까지 최종 명세를 리뷰하기로 함.",
+             "최비성 → 임수연", users["최비성"], False),
+            ("Discord 알림 형식 통일", "공지 문구 형식을 표준화하기로 함.",
+             "임수연 → 최비성", users["임수연"], False),
+            ("회의 중 확인 요청 처리", "대리 참석 중 확인이 필요한 사안을 미리 지시해 둠.",
+             "유수인 → 유수인의 Bordo", owner, True),
         ]):
             agendas.append(Agenda.objects.create(
                 meeting=meeting, title=title, sort_order=i + 1, content=content,
                 direction_label=direction, status=Agenda.Status.DISCUSSED,
-                owner=owner if i == 2 else users["최비성"],
-                created_by_agent=(i == 2)))
+                owner=item_owner, created_by_agent=by_agent))
 
         doc = MeetingDocumentRef.objects.create(
             project=main, title="글로벌 회의 운영 기획안", owner=users["최비성"],
@@ -217,48 +228,97 @@ class Command(BaseCommand):
         # 같은 사람 쌍에 여러 건을 넣습니다 — 화면의 화살표는 쌍마다 하나이고
         # 그 위에 `의견 3` `요청사항 5` 처럼 종류별 개수가 붙기 때문입니다.
         # 한 건씩만 두면 집계가 전부 1 로 나와 뱃지가 제대로인지 알 수 없습니다.
+        #
+        # 이슈 #136 에서 지적된 것들을 이 회의(가장 크게 채운 회의, 시연에서
+        # 메인으로 쓸 예정)에 반영한다 — 다른 두 회의(연합학술제·결제 모듈)는
+        # "빈 화면 방지"가 목적이라 그대로 둔다.
+        #
+        # B-1: 같은 쌍에 회색(본인 직접)·주황(대리인 경유) 화살표가 함께 있는
+        #      경우가 하나도 없었다 — 임수연↔유수인 쌍에 직접 화살표를 하나
+        #      추가해, 이미 있던 임수연→유수인의 Bordo(대리인 경유) 옆에
+        #      나란히 놓는다.
+        # B-2: 본인→본인의 Bordo(자기 대리인) 화살표가 하나도 없었다 — 대리
+        #      참석 시작 전 사전 지시, 끝날 무렵 확인 요청을 하나씩 넣는다.
+        # B-3: 11건·안건 3개라 재생이 5.5초 만에 끝나고 안건 제목이 서너 줄씩
+        #      반복됐다 — 18건·안건 6개로 늘리고, 같은 안건이 3번 이상
+        #      연달아 나오지 않도록 섞는다.
+        # B-4: 한 사람이 주고받는 종류가 1~2개뿐이라 우측 패널의 다중 선택
+        #      필터를 눌러 볼 상황이 없었다 — 최비성·임수연은 이제 각자
+        #      5종을 넘긴다.
+        # B-5: 서재민이 받기만 하고 보내지는 않는 것(#134 회귀 케이스)은
+        #      그대로 둔다 — 이 회의에서 서재민을 발신자로 넣지 않는다.
         MT = FlowCategory.MEETING
         edges = [
+            # 사전 지시 — 대리 참석이 시작되기 전에 유수인이 자기 대리인에게
+            # 미리 일러둔 것(B-2).
+            (MT, FlowContentType.REQUEST, "요청사항",
+             node(owner), [node(owner, agent=True)], agendas[5], None,
+             Surface.SERVICE, 58),
+
             # 문서를 여기 답니다. 회의 중에 기획안이 오간 자리라, 화살표를 누르면
             # 문서 전달 맥락으로 넘어갑니다. 어디에도 안 달면 문서가 어느 흐름에서
             # 나왔는지 화면에서 짚을 수 없습니다.
             (MT, FlowContentType.OPINION, "의견",
              node(users["최비성"]), [node(users["임수연"])], agendas[0], doc,
-             Surface.DISCORD, 48),
+             Surface.DISCORD, 54),
             (MT, FlowContentType.OPINION, "의견",
              node(users["최비성"]), [node(users["임수연"])], agendas[0], None,
-             Surface.DISCORD, 45),
+             Surface.DISCORD, 51),
             (MT, FlowContentType.OPINION, "의견",
              node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
-             Surface.SERVICE, 44),
+             Surface.SERVICE, 48),
+            (MT, FlowContentType.OPINION, "의견",
+             node(users["최비성"]), [node(users["임수연"])], agendas[3], None,
+             Surface.DISCORD, 45),
             (MT, FlowContentType.REQUEST, "요청사항",
              node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
-             Surface.DISCORD, 41),
+             Surface.DISCORD, 42),
             (MT, FlowContentType.REQUEST, "요청사항",
              node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
-             Surface.DISCORD, 39),
+             Surface.DISCORD, 40),
+            (MT, FlowContentType.SCHEDULE, "일정",
+             node(users["최비성"]), [node(users["임수연"])], agendas[3], None,
+             Surface.SERVICE, 37),
             (MT, FlowContentType.CHANGE, "변동사항",
              node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
-             Surface.SERVICE, 33),
+             Surface.SERVICE, 34),
 
             (MT, FlowContentType.REQUEST, "요청사항",
              node(users["임수연"]), [node(owner, agent=True)], agendas[2], None,
-             Surface.DISCORD, 28),
+             Surface.DISCORD, 31),
             (MT, FlowContentType.CHANGE, "변동사항",
              node(users["임수연"]), [node(owner, agent=True)], agendas[2], None,
-             Surface.DISCORD, 26),
+             Surface.DISCORD, 28),
+            (MT, FlowContentType.OPINION, "의견",
+             node(users["임수연"]), [node(users["최비성"])], agendas[4], None,
+             Surface.DISCORD, 25),
             (MT, FlowContentType.SCHEDULE, "일정",
              node(users["임수연"]), [node(owner, agent=True)], agendas[2], None,
-             Surface.SERVICE, 24),
+             Surface.SERVICE, 22),
+            # 대리인을 거치지 않고 본인에게 직접 — 바로 위 대리인 경유
+            # 화살표들과 같은 쌍(임수연↔유수인)에 회색 화살표도 있어야
+            # "본인 직접 vs 대리인 경유"가 화면에 함께 보인다(B-1).
+            (MT, FlowContentType.REQUEST, "요청사항",
+             node(users["임수연"]), [node(owner)], agendas[2], None,
+             Surface.SERVICE, 20),
 
             (MT, FlowContentType.CONCLUSION, "결론",
              node(owner, agent=True),
+             [node(users["최비성"]), node(users["임수연"])], agendas[4], None,
+             Surface.DISCORD, 17),
+            (MT, FlowContentType.CONCLUSION, "결론",
+             node(owner, agent=True),
              [node(users["최비성"]), node(users["서재민"])], agendas[2], None,
-             Surface.DISCORD, 18),
+             Surface.DISCORD, 14),
             (MT, FlowContentType.ETC, "기타",
              node(owner, agent=True), [node(users["서재민"])], None, None,
-             Surface.SERVICE, 14),
+             Surface.SERVICE, 8),
 
+            # 복귀 후 확인 요청 — 대리 참석 중 결정된 것을 유수인이 돌아와
+            # 자기 대리인에게 확인하는 자리(B-2).
+            (MT, FlowContentType.ETC, "기타",
+             node(owner), [node(owner, agent=True)], agendas[5], None,
+             Surface.SERVICE, 4),
         ]
         for cat, ctype, label, src, dsts, agenda, document, surface, mins_ago in edges:
             e = FlowEdge.objects.create(
