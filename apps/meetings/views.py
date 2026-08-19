@@ -61,10 +61,39 @@ def meetings(request, project_id):
                 .prefetch_related("participants")[:50])
         return Response(listing(MeetingSerializer(rows, many=True).data))
 
+    from apps.orgs.models import ProjectMember
+
     title = (request.data.get("title") or "").strip()
-    scheduled_at = request.data.get("scheduled_at")
-    if not title or not scheduled_at:
-        raise BordoError("VALIDATION_ERROR", "title 과 scheduled_at 은 필수입니다.")
+    if not title:
+        raise BordoError("VALIDATION_ERROR", "title 은 필수입니다.")
+    # 들어오는 자리에서 파싱합니다. 그대로 `create()` 에 넣으면 DB 에는 들어가지만
+    # 메모리 인스턴스는 문자열이라 바로 직렬화할 때 터집니다 — 잘못된 값이
+    # 400 이 아니라 500 으로 나갔습니다.
+    scheduled_at = parse_dt(request.data.get("scheduled_at"), "scheduled_at",
+                            required=True)
+
+    # 참석자를 고를 수 있습니다.
+    #
+    # 화면(`NewMeetingDialog`)에 참석자 피커가 있는데 서버가 이 키를 안 읽어,
+    # 골라도 프로젝트 전원이 들어갔습니다. 옆에 나란히 있는 일정 만들기
+    # (`POST /projects/{id}/calendar/events`)는 이미 받고 있어, 똑같이 생긴
+    # 다이얼로그 둘이 다르게 동작했습니다.
+    participant_ids = request.data.get("participant_ids") or []
+    if participant_ids:
+        valid = set(map(str, ProjectMember.objects
+                        .filter(project=project, user_id__in=participant_ids)
+                        .values_list("user_id", flat=True)))
+        outsiders = [str(u) for u in participant_ids if str(u) not in valid]
+        if outsiders:
+            raise BordoError("PROJECT_ACCESS_DENIED",
+                             "프로젝트 참여자만 회의에 넣을 수 있습니다.",
+                             details={"not_in_project": outsiders})
+    else:
+        # 안 보내면 지금까지처럼 전원입니다. 빈 배열을 "아무도 아님" 으로 읽으면
+        # 이 키를 모르는 클라이언트가 참석자 없는 회의를 만듭니다.
+        valid = set(map(str, ProjectMember.objects.filter(project=project)
+                        .values_list("user_id", flat=True)))
+
     with transaction.atomic():
         meeting = Meeting.objects.create(
             project=project, project_name=project.name, title=title,
@@ -73,14 +102,12 @@ def meetings(request, project_id):
             discord_channel_id=request.data.get("discord_channel_id", "") or "",
             created_by=request.user,
         )
-        from apps.orgs.models import ProjectMember
-        members = (ProjectMember.objects.filter(project=project)
+        members = (ProjectMember.objects.filter(project=project, user_id__in=valid)
                    .select_related("user"))
         MeetingParticipant.objects.bulk_create([
             MeetingParticipant(meeting=meeting, user=m.user, user_name=m.user.name)
             for m in members])
         MeetingSummary.objects.create(meeting=meeting)
-    meeting.refresh_from_db()
     return Response(MeetingSerializer(meeting).data, status=201)
 
 
