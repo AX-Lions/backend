@@ -245,15 +245,18 @@ class MeetingTest(Base):
 
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["briefings"], 2)
+        self.assertEqual(r.json()["title"], "DB 스키마 리뷰")
         spy.assert_called_once()
         m.refresh_from_db()
         self.assertEqual(m.status, MeetingStatus.ENDED)
 
     def test_end_twice(self):
+        """duplicate 응답에도 title이 있어야 한다 — 봇이 요약 임베드 제목에 쓴다."""
         self._start()
         self.post("/meetings/end", {"thread_id": THREAD})
         r = self.post("/meetings/end", {"thread_id": THREAD})
         self.assertTrue(r.json()["duplicate"])
+        self.assertEqual(r.json()["title"], "DB 스키마 리뷰")
 
     def test_summary_failure_does_not_block_ending(self):
         """종료가 안 되면 봇이 계속 발언을 넘깁니다."""

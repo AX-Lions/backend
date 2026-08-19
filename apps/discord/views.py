@@ -524,7 +524,8 @@ def meeting_end(request):
             raise BordoError("MEETING_NOT_FOUND", "해당 스레드의 회의를 찾을 수 없습니다.")
 
         if meeting.status == MeetingStatus.ENDED:
-            return Response({"meeting_id": str(meeting.id), "duplicate": True})
+            return Response({"meeting_id": str(meeting.id), "title": meeting.title,
+                             "duplicate": True})
 
         ended_at = parse_dt(request.data.get("ended_at"), "ended_at") or timezone.now()
         meeting.status = MeetingStatus.ENDED
@@ -555,6 +556,7 @@ def meeting_end(request):
     summary = getattr(meeting, "summary", None)
     return Response({
         "meeting_id": str(meeting.id),
+        "title": meeting.title,
         "briefings": briefings,
         "summary": {
             "one_line": getattr(summary, "one_line", ""),
