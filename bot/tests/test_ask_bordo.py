@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import aiohttp
 import discord
 
 from cogs.bordo import BordoCog, _MESSAGE_LIMIT
@@ -89,6 +90,21 @@ class AskBordoTests(unittest.IsolatedAsyncioTestCase):
 
         interaction.edit_original_response.assert_called_with(
             content="🤖 **유수인의 Bordo**: 답변을 받아오지 못했습니다.")
+
+    async def test_deputy_ask_disables_retry_and_extends_timeout(self):
+        # #132 - BackendClient 기본(5초 타임아웃, 3회 시도)으로는 ReAct 실행
+        # (최대 20초 × 6단계)이 끝나기 전에 봇이 포기하고 같은 요청을 세 번
+        # 중복 실행시켰다. 이 호출만 타임아웃을 늘리고 재시도를 꺼야 한다.
+        interaction, target = make_interaction()
+        cog, backend, _ = make_cog({"body": "정상 답변"})
+
+        await cog.ask_bordo.callback(cog, interaction, target, "질문")
+
+        backend.post.assert_called_once()
+        _, kwargs = backend.post.call_args
+        self.assertEqual(kwargs.get("max_retries"), 0)
+        self.assertIsInstance(kwargs.get("timeout"), aiohttp.ClientTimeout)
+        self.assertEqual(kwargs["timeout"].total, 90)
 
     async def test_gate_fail_no_placeholder_no_backend_call(self):
         interaction, target = make_interaction()
