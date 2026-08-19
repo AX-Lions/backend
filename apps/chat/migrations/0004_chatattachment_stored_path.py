@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('chat', '0001_initial'),
+        ('chat', '0003_roommember_muted_at'),
     ]
 
     operations = [
