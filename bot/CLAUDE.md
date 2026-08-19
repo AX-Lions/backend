@@ -14,8 +14,10 @@ python main.py
 선택: `BORDO_BACKEND_URL`(기본 `http://localhost:8000`), `BORDO_OUTBOX_INTERVAL`,
 `OPENAI_API_KEY` / `OPENAI_MODEL`.
 
-Developer Portal: `MESSAGE CONTENT INTENT` 활성화 필수, 초대 스코프는 `bot` +
-`applications.commands` **둘 다** (후자가 빠지면 슬래시 명령이 에러 없이 등록 실패).
+Developer Portal: `MESSAGE CONTENT INTENT`·`PRESENCE INTENT`·`SERVER MEMBERS INTENT` 활성화
+필수(멤버 인텐트가 없으면 길드 멤버 캐시가 비어 있어 presence 이벤트 자체가 안 옴), 초대
+스코프는 `bot` + `applications.commands` **둘 다** (후자가 빠지면 슬래시 명령이 에러 없이
+등록 실패).
 
 ## 아키텍처 원칙
 

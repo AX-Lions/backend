@@ -43,6 +43,11 @@ except ValueError:
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.presences = True
+# PRESENCE_UPDATE는 discord.py가 길드 멤버 캐시에서 대상을 못 찾으면 조용히
+# 버린다(discord/state.py의 parse_presence_update). members 인텐트가 없으면
+# 캐시가 거의 비어 있어 on_presence_update 자체가 대부분 안 불린다.
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -118,6 +123,24 @@ async def on_ready():
         json={
             "status": "online",
             "at": MeetingCog._now_iso()
+        }
+    )
+
+
+@bot.event
+async def on_presence_update(before: discord.Member, after: discord.Member):
+    if after.bot:
+        return  # 봇 계정 발신 제외 — 이 봇 자신이나 다른 봇의 상태는 대리 참석 신호가 아니다
+
+    # 활동(게임 등) 변화에도 매번 불린다. status가 안 바뀌었으면 보낼 게 없다.
+    if before.status == after.status:
+        return
+
+    await backend.post(
+        "/internal/v1/discord/presence",
+        json={
+            "discord_user_id": str(after.id),
+            "status": str(after.status),
         }
     )
 
