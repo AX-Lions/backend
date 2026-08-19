@@ -7,6 +7,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from services.backend import BackendClient
+from services.gate import GateService
 from cogs.general import GeneralCog
 from cogs.meeting import MeetingCog
 from cogs.delegate import DelegateCog
@@ -67,28 +68,33 @@ if not PRESENCE_INTENT:
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 backend = BackendClient(BACKEND_BASE_URL, SERVICE_TOKEN)
+gate = GateService(backend)
 
 
 async def setup_hook():
     meeting_cog = MeetingCog(
         bot,
         backend,
+        gate,
     )
 
     delegate_cog = DelegateCog(
         bot,
         backend,
         meeting_cog,
+        gate,
     )
 
     bordo_cog = BordoCog(
         bot,
-        backend
+        backend,
+        gate,
     )
 
     general_cog = GeneralCog(
         bot,
-        backend
+        backend,
+        gate,
     )
 
     outbox_cog = OutboxCog(
