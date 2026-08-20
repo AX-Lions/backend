@@ -32,6 +32,20 @@ logger = logging.getLogger("bordo.agent")
 BUILD_LOCK_SEC = 300
 
 
+def debate_lock_key(meeting_id) -> str:
+    return f"debate:build:{meeting_id}"
+
+
+def is_building_debate(meeting_id) -> bool:
+    """
+    지금 논쟁점을 만들고 있는가.
+
+    준비 화면이 이 값으로 「예상하는 중」과 「없음」을 가릅니다. 없이 두면 생성
+    중에도 화면이 빈 목록을 그려, 사용자는 예측이 실패한 줄 알고 나가 버립니다.
+    """
+    return cache.get(debate_lock_key(meeting_id)) is not None
+
+
 @shared_task(name="agent.run_for_utterance")
 def run_agent_for_utterance(utterance_id: str) -> None:
     from apps.meetings.models import Utterance
@@ -330,7 +344,7 @@ def build_debate_points(meeting_id: str, force: bool = False) -> None:
 
     # 열쇠를 못 잡으면 다른 실행이 만들고 있습니다. 기다리지 않고 물러납니다 —
     # 어차피 결과는 같고, 기다리면 두 실행이 나란히 붙잡혀 있게 됩니다.
-    lock = f"debate:build:{meeting_id}"
+    lock = debate_lock_key(meeting_id)
     if not cache.add(lock, 1, timeout=BUILD_LOCK_SEC):
         return
 

@@ -29,7 +29,7 @@ from django.utils import timezone
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from apps.agent.tasks import build_debate_points
+from apps.agent.tasks import build_debate_points, is_building_debate
 from apps.common.background import run_soon
 from apps.common.display import meeting_when, user_tz
 from apps.common.events import publish
@@ -229,11 +229,11 @@ def point_row(point, stance) -> dict:
     }
 
 
-def debate_notice(rows, delegated: bool) -> str:
+def debate_notice(rows, delegated: bool, building: bool = False) -> str:
     """
     화면 부제.
 
-    세 가지를 가릅니다. 하나로 뭉치면 **거짓말이 됩니다** —
+    네 가지를 가릅니다. 하나로 뭉치면 **거짓말이 됩니다** —
     안건을 베낀 것에 `Bordo가 예상했어요` 를 붙이거나, 만들고 있는 중에
     `없어요` 라고 단정하게 됩니다.
     """
@@ -243,10 +243,14 @@ def debate_notice(rows, delegated: bool) -> str:
                     f"논쟁점을 예상했어요.")
         # 규칙으로 안건을 옮겨 온 것입니다. 예측이라고 말하면 안 됩니다.
         return f"회의 안건 {len(rows)}개예요. 미리 입장을 적어 두면 대리인이 그대로 전합니다."
+    if building:
+        # 진짜로 지금 돌고 있는 경우입니다. 화면은 이 상태에서 스피너를 그리고
+        # 몇 초마다 다시 부릅니다.
+        return "Bordo가 논쟁점을 예상하고 있어요. 곧 채워집니다."
     if delegated:
-        # 불참을 등록하면 곧바로 예측이 걸립니다. 아직 없다고 단정하면 사용자는
-        # 새로고침할 이유를 못 찾습니다.
-        return "Bordo가 논쟁점을 예상하고 있어요. 잠시 후 다시 확인해 주세요."
+        # 대리 참석인데 만들고 있지도 않다 = 예측이 실패했거나 근거가 없습니다.
+        # `잠시 후 다시` 라고 하면 오지 않을 것을 기다리게 됩니다.
+        return "예상된 논쟁점이 없어요. 입장을 직접 적어 두면 대리인이 그대로 전합니다."
     return "아직 예상된 논쟁점이 없어요. 회의 자료가 쌓이면 Bordo가 예상해 드려요."
 
 
@@ -262,9 +266,16 @@ def debate_block(meeting, user, delegated: bool = False) -> dict:
             for s in DebateStance.objects.filter(point__in=points, user=user)}
     rows = [point_row(p, mine.get(str(p.id))) for p in points]
     answered = sum(1 for r in rows if r["status"] == "ANSWERED")
+    # 아직 하나도 없을 때만 물어봅니다. 이미 목록이 있으면 다시 도는 중이라도
+    # 화면은 그 목록을 그리면 되고, 스피너를 얹으면 있는 것이 사라지는 것처럼
+    # 보입니다.
+    building = not rows and is_building_debate(meeting.id)
     return {
         # 화면 부제. 개수와 출처가 들어가므로 서버가 완성합니다.
-        "notice": debate_notice(rows, delegated),
+        "notice": debate_notice(rows, delegated, building),
+        # 화면이 스피너를 그리고 몇 초 뒤 다시 부를지 정하는 값입니다.
+        # 문구로만 알리면 클라이언트가 문자열을 비교해야 합니다.
+        "status": "GENERATING" if building else "READY",
         "count": len(rows),
         "answered_count": answered,
         "points": rows,
