@@ -115,6 +115,10 @@ def events(request, project_id):
         EventParticipant.objects.bulk_create(
             [EventParticipant(event=event, user_id=u) for u in valid],
             ignore_conflicts=True)
+        if event.kind == EventKind.MEETING and not event.related_meeting_id:
+            event.related_meeting = _open_meeting(event, project, valid,
+                                                  request.user)
+            event.save(update_fields=["related_meeting", "updated_at"])
 
     if request.data.get("notify_discord"):
         _request_announcement(event)
@@ -123,6 +127,50 @@ def events(request, project_id):
     body["conflicts"] = _conflicts(event, valid)
     publish(project.id, "calendar.event.created", {"event_id": str(event.id)})
     return Response(body, status=201)
+
+
+def _open_meeting(event, project, user_ids, creator):
+    """
+    `kind=MEETING` 인 일정에 **회의 실체를 같이 만듭니다.**
+
+    ## 일정만 만들면 그 회의는 어디에도 없습니다
+
+    달력 칸(`CalendarEvent`)과 회의(`Meeting`)는 다른 물건입니다. 발언·플로우·
+    브리핑이 매달리는 쪽은 회의이고, 화면들도 회의를 봅니다 —
+    홈 「오늘 일정」(`apps/home/views.py`)도, 봇 `/meeting-start` 의 자동완성
+    (`apps/discord/views.py` 의 `meetings_scheduled`)도 `Meeting` 만 조회합니다.
+
+    그런데 웹에서 회의를 만드는 길은 이 팝업 하나뿐이고, 이것이 일정만 만들었기
+    때문에 **웹에서 만든 회의가 홈에도 안 뜨고 Discord 에서 열리지도 않았습니다.**
+    봇은 없는 회의를 즉석에서 만들지 않으므로(이슈 #89) 여기서 만들지 않으면
+    회의를 시작할 방법이 아예 없습니다.
+
+    ## 마감·블록은 그대로 둡니다
+
+    `DEADLINE`·`BLOCK` 까지 회의로 만들면 `디자인 시안 마감` 같은 칸이
+    자동완성 목록에 회의로 올라옵니다. 참석자도 발언도 없는 회의라 열어도
+    빈 화면입니다.
+    """
+    from apps.meetings.models import Meeting, MeetingParticipant, MeetingSummary
+
+    minutes = 60
+    if event.end_at:
+        # 달력은 끝 시각을 받지만 회의는 길이(분)로 듭니다. 음수·0 이 되면
+        # 회의 상세의 시간 표시가 `21:00 ~ 21:00` 으로 찍힙니다.
+        minutes = max(1, int((event.end_at - event.start_at).total_seconds() // 60))
+
+    meeting = Meeting.objects.create(
+        project=project, project_name=project.name, title=event.title,
+        scheduled_at=event.start_at, duration_min=minutes, created_by=creator)
+    members = (ProjectMember.objects.filter(project=project, user_id__in=user_ids)
+               .select_related("user"))
+    MeetingParticipant.objects.bulk_create([
+        MeetingParticipant(meeting=meeting, user=m.user, user_name=m.user.name)
+        for m in members])
+    # 요약 행이 없으면 회의 상세가 500 입니다 — `POST /projects/{id}/meetings`
+    # 도 같은 이유로 여기서 함께 만듭니다.
+    MeetingSummary.objects.create(meeting=meeting)
+    return meeting
 
 
 def _conflicts(event, user_ids):
