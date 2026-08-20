@@ -160,7 +160,7 @@ class BordoCog(commands.Cog):
         # 이것) 남는데, Discord 것은 이 코드가 채우지 않는 한 영영 안 채워진다.
         # 그래서 새로 보내지 않고 defer()가 만든 원본 응답 자체를 채운다.
         await interaction.edit_original_response(
-            content=f"🤔 **{target.display_name}의 Bordo**가 생각 중입니다..."
+            content=f"🤔 **{target.display_name}의 Bordo**가 자료를 찾는 중입니다..."
         )
 
         # ReAct 실행은 최대 20초(OPENAI_TIMEOUT_SEC) × 6단계(MAX_STEPS)라
@@ -196,6 +196,19 @@ class BordoCog(commands.Cog):
         body = (result.get("body") or "").strip() if isinstance(result, dict) else ""
         if not body:
             body = "답변을 받아오지 못했습니다."
+
+        content = f"🤖 **{target.display_name}의 Bordo**: {body}"
+        # 무엇을 보고 답했는지. 라벨·제목 둘 다 서버가 이미 한국어로 완성해
+        # 준다 — 봇은 그대로 이어붙이기만 한다("봇은 판단하지 않는다").
+        # 유보(202)일 때도 evidence가 올 수 있다 — "이만큼은 봤는데
+        # 부족했다"를 보여주는 게 유보 사유를 감추는 것보다 낫다.
+        evidence = result.get("evidence") if isinstance(result, dict) else None
+        if evidence:
+            sources = " · ".join(f'{e.get("label", "")} "{e.get("title", "")}"'
+                                 for e in evidence if e.get("title"))
+            if sources:
+                content += f"\n📎 참고: {sources}"
+
         await self._finish_response(
-            interaction, f"🤖 **{target.display_name}의 Bordo**: {body}",
+            interaction, content,
             log_ctx=f"(run_id={result.get('run_id') if isinstance(result, dict) else None})")
