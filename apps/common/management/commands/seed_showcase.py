@@ -68,9 +68,9 @@ DOMAIN = "@demo.bordo.dev"
 PEOPLE = [
     ("lead", f"taehyun{DOMAIN}", "강태현", "backend",
      "Asia/Seoul", "/flowchart/profile-1.jpeg"),
-    ("away", f"seoa{DOMAIN}", "윤서아", "design",
+    ("away", f"emily{DOMAIN}", "에밀리 한", "design",
      "America/Los_Angeles", "/flowchart/profile-2.jpeg"),
-    ("member", f"doyun{DOMAIN}", "문도윤", "frontend",
+    ("member", f"minh{DOMAIN}", "응우옌 민", "frontend",
      "Asia/Ho_Chi_Minh", "/flowchart/profile-3.jpeg"),
 ]
 
@@ -234,7 +234,7 @@ class Command(BaseCommand):
 
     def _agent_setup(self, away, lead):
         """
-        불참자(윤서아)의 대리인 설정.
+        불참자(에밀리 한)의 대리인 설정.
 
         **`allow_schedule_change=False` 가 핵심입니다.** 회의에서 일정을 미루자는
         말이 나오면 대리인이 답하지 않고 유보하고, 그 유보가 `PendingQuestion`
@@ -253,7 +253,7 @@ class Command(BaseCommand):
         st.disclose_plan = True
         st.disclose_thought = False
         st.tone = "FORMAL"
-        st.agent_name = ""                      # 비우면 `윤서아의 Bordo`
+        st.agent_name = ""                      # 비우면 `에밀리 한의 Bordo`
         st.active_version = 2
         st.save()
 
@@ -278,7 +278,7 @@ class Command(BaseCommand):
         대리인이 회의에서 인용할 재료.
 
         이게 비면 대리인은 회의 내내 "확인이 필요합니다" 만 반복합니다. 시연에서
-        보여줘야 하는 것은 **근거를 들고 답하는 장면**이라, 불참자(윤서아)의
+        보여줘야 하는 것은 **근거를 들고 답하는 장면**이라, 불참자(에밀리 한)의
         작업·계획·생각을 먼저 깔아 둡니다.
         """
         self._states(project, people, now)
@@ -321,8 +321,8 @@ class Command(BaseCommand):
             defaults={"category": "backend", "priority": Priority.P2,
                       "status": WorkStatus.TODO,
                       "planned_start_at": now + timedelta(days=3)})
-        # 문도윤 몫. **대리인을 둘 돌릴 때 필요합니다** — 사람이 하나뿐인 촬영에서는
-        # 강태현이 두 부재자의 대리인에게 각각 묻습니다. 문도윤에게 근거가 작업
+        # 응우옌 민 몫. **대리인을 둘 돌릴 때 필요합니다** — 사람이 하나뿐인 촬영에서는
+        # 강태현이 두 부재자의 대리인에게 각각 묻습니다. 응우옌 민에게 근거가 작업
         # 하나뿐이면 그 대리인은 진행률만 말하고 나머지는 유보로 흘러, 화면에
         # 「관련 기록을 찾지 못해」가 두 번 뜹니다.
         PlanItem.objects.get_or_create(
@@ -384,7 +384,7 @@ class Command(BaseCommand):
                       "summary": "회의 상세 화면 최종 시안",
                       "hash": content_hash("회의 상세 화면 시안"),
                       "delivery_context": [
-                          {"participant_name": "윤서아",
+                          {"participant_name": "에밀리 한",
                            "utterance": "시안 공유합니다. 8/18에 확정할 예정입니다.",
                            "url": "https://www.figma.com/design/bordo/meeting-detail"}]})
 
@@ -532,7 +532,7 @@ class Command(BaseCommand):
         if not created:
             return meeting
 
-        # 윤서아만 대리 참석입니다. `delegated=True` 와 `attendance=DELEGATED` 는
+        # 에밀리 한만 대리 참석입니다. `delegated=True` 와 `attendance=DELEGATED` 는
         # 같은 행위의 두 표기라 반드시 함께 움직입니다 - 하나만 켜면 브리핑이
         # 아예 안 생깁니다(브리핑은 대리 참석자에게만).
         MeetingParticipant.objects.create(
@@ -559,21 +559,21 @@ class Command(BaseCommand):
             next_plans=["명세 확정 후 프론트 연동 지원",
                         "다음 회의에서 API 명세 리뷰"],
             one_line="응답 구조를 서버가 완성해 내려주는 것으로 정리하고, 시안 마감을 8/18로 확정했어요.",
-            main_opinions=[{"speaker": "문도윤",
+            main_opinions=[{"speaker": "응우옌 민",
                             "text": "표시 문자열을 클라이언트가 만들면 사람마다 다르게 보입니다"},
-                           {"speaker": "윤서아의 Bordo",
+                           {"speaker": "에밀리 한의 Bordo",
                             "text": "시안 마감은 8월 18일을 넘기지 않습니다"}])
 
         doc = MeetingDocumentRef.objects.create(
             project=project, title="회의 API 명세 v1", owner=lead,
-            direction_label="강태현 --> 문도윤",
+            direction_label="강태현 --> 응우옌 민",
             sections=[{"heading": "배경", "one_line_summary": "응답 구조가 화면마다 다르다",
                        "body": "표시 문자열을 클라이언트가 조립해 사람마다 다른 시각이 찍혔습니다."},
                       {"heading": "제안", "one_line_summary": "서버가 완성해 내려준다",
                        "body": "displayed_at · time_range 를 서버가 만들어 그대로 그립니다."}],
             delivery_context=[{"participant_name": "강태현",
                                "utterance": "명세 초안 공유드립니다."},
-                              {"participant_name": "문도윤",
+                              {"participant_name": "응우옌 민",
                                "utterance": "확인하고 목 데이터 맞추겠습니다."}])
 
         self._past_edges(FlowEdge, FlowCategory, FlowContentType, Surface,
@@ -586,11 +586,11 @@ class Command(BaseCommand):
     def _past_agendas(self, Agenda, meeting, lead, away, member):
         rows = [
             ("응답 구조 통일", "표시 문자열을 서버가 완성해 내려주기로 합의.",
-             "강태현 → 문도윤", lead, False),
+             "강태현 → 응우옌 민", lead, False),
             ("디자인 시안 마감", "8월 18일까지 확정. 대리인이 저장된 기준으로 답변.",
-             "윤서아의 Bordo → 강태현", away, True),
-            ("개발 일정 1주 연장", "의견은 모였으나 확정은 윤서아 확인 후로 유보.",
-             "문도윤 → 윤서아의 Bordo", member, True),
+             "에밀리 한의 Bordo → 강태현", away, True),
+            ("개발 일정 1주 연장", "의견은 모였으나 확정은 에밀리 한 확인 후로 유보.",
+             "응우옌 민 → 에밀리 한의 Bordo", member, True),
         ]
         out = []
         for i, (title, content, direction, owner, by_agent) in enumerate(rows):
@@ -619,23 +619,23 @@ class Command(BaseCommand):
                 spoken_at=started + timedelta(minutes=minute))
 
         say(0, "lead", "시작하겠습니다. 오늘 안건은 셋입니다 - 응답 구조, 시안 마감, 개발 일정.")
-        say(1, "lead", "윤서아님은 오늘 자리를 비우셔서 대리인이 대신 들어와 있습니다.")
+        say(1, "lead", "에밀리 한님은 오늘 자리를 비우셔서 대리인이 대신 들어와 있습니다.")
         say(3, "member", "응답 구조부터요. 지금은 표시 문자열을 저희가 조립하는데, "
                          "브라우저 시간대로 찍혀서 사람마다 다른 시각이 보입니다.")
         say(5, "lead", "그럼 displayed_at 같은 완성형 필드를 서버가 내려주는 걸로 바꾸죠.")
         say(7, "member", "그게 낫습니다. 저희 보정 로직은 걷어내겠습니다.")
         say(9, "lead", "정리하면 표시 문자열은 서버가 완성해 내려줍니다.")
-        say(16, "lead", "다음, 디자인 시안 마감인데 윤서아님 쪽 일정이 어떻게 되나요?")
-        say(17, "away", "윤서아님이 저장해 두신 기준으로는 8월 18일입니다. "
+        say(16, "lead", "다음, 디자인 시안 마감인데 에밀리 한님 쪽 일정이 어떻게 되나요?")
+        say(17, "away", "에밀리 한님이 저장해 두신 기준으로는 8월 18일입니다. "
                         "현재 시안 작업은 70% 진행돼 있고, 남은 것은 브리핑 패널입니다.",
             agent=True)
         say(19, "member", "그 날짜면 저희 연동 일정도 맞출 수 있습니다.")
         say(21, "lead", "좋습니다. 시안 마감은 8월 18일로 확정하겠습니다.")
         say(30, "member", "마지막인데요, 디자인이 밀리면 개발도 1주 정도 미뤄야 할 것 같습니다. "
-                          "윤서아님 대리인께 여쭤봐도 될까요?")
+                          "에밀리 한님 대리인께 여쭤봐도 될까요?")
         say(32, "away", "일정을 미루는 결정은 제가 정할 수 있는 항목이 아닙니다. "
                         "오늘은 회의에서 나온 의견만 정리해 전달드리고, "
-                        "최종 확정은 윤서아님 확인 후에 다시 말씀드리겠습니다.", agent=True)
+                        "최종 확정은 에밀리 한님 확인 후에 다시 말씀드리겠습니다.", agent=True)
         say(34, "lead", "알겠습니다. 그럼 연장은 확인 대기로 두겠습니다.")
         say(48, "lead", "오늘은 여기까지 - 응답 구조 통일, 시안 8/18 확정, "
                         "개발 일정은 확인 대기입니다.")
@@ -687,15 +687,15 @@ class Command(BaseCommand):
 
             (F.REQUEST, "요청사항", node(lead), [node(away, agent=True)],
              agendas[1], None, Surface.DISCORD, 34,
-             [(lead.name, "다음, 디자인 시안 마감인데 윤서아님 쪽 일정이 어떻게 되나요?")]),
+             [(lead.name, "다음, 디자인 시안 마감인데 에밀리 한님 쪽 일정이 어떻게 되나요?")]),
             (F.OPINION, "의견", node(away, agent=True), [node(lead)],
              agendas[1], None, Surface.DISCORD, 33,
-             [(agent_name, "윤서아님이 저장해 두신 기준으로는 8월 18일입니다. "
+             [(agent_name, "에밀리 한님이 저장해 두신 기준으로는 8월 18일입니다. "
                            "현재 시안 작업은 70% 진행돼 있고, 남은 것은 브리핑 패널입니다.")]),
             (F.SCHEDULE, "일정", node(away, agent=True), [node(lead), node(member)],
              agendas[1], None, Surface.DISCORD, 31,
              [(agent_name, "마감일은 8월 18일로 잡혀 있습니다. 그 뒤 일정을 바꾸는 것은 "
-                           "윤서아님 확인이 필요합니다."),
+                           "에밀리 한님 확인이 필요합니다."),
               (member.name, "그 날짜면 저희 연동 일정도 맞출 수 있습니다.")]),
             (F.CONCLUSION, "결론", node(lead), [node(member), node(away, agent=True)],
              agendas[1], None, Surface.DISCORD, 29,
@@ -704,16 +704,16 @@ class Command(BaseCommand):
             (F.REQUEST, "요청사항", node(member), [node(away, agent=True)],
              agendas[2], None, Surface.DISCORD, 20,
              [(member.name, "디자인이 밀리면 개발도 1주 정도 미뤄야 할 것 같습니다. "
-                            "윤서아님 대리인께 여쭤봐도 될까요?")]),
+                            "에밀리 한님 대리인께 여쭤봐도 될까요?")]),
             (F.SCHEDULE, "일정", node(away, agent=True), [node(member), node(lead)],
              agendas[2], None, Surface.DISCORD, 18,
              [(agent_name, "개발 1주 연장 건은 회의에서 나온 의견으로 정리해 "
-                           "윤서아님께 전달드리겠습니다.")]),
+                           "에밀리 한님께 전달드리겠습니다.")]),
             # 유보를 남긴 자리. 화면 필터에 `유보` 칸이 없어 `기타` 로 들어갑니다.
             (F.ETC, "기타", node(away, agent=True), [node(lead)],
              agendas[2], None, Surface.SERVICE, 16,
              [(agent_name, "일정을 미루는 결정은 제가 정할 수 있는 항목이 아닙니다. "
-                           "최종 확정은 윤서아님 확인 후에 다시 말씀드리겠습니다."),
+                           "최종 확정은 에밀리 한님 확인 후에 다시 말씀드리겠습니다."),
               (lead.name, "알겠습니다. 그럼 연장은 확인 대기로 두겠습니다.")]),
         ]
         for ctype, label, src, dsts, agenda, document, surface, mins_ago, says in rows:
@@ -747,7 +747,7 @@ class Command(BaseCommand):
         answered = AgentRun.objects.create(
             user=away, meeting=meeting, status=AgentRun.Status.COMPLETED,
             settings_snapshot=away.agent_settings.as_snapshot(),
-            steps=[{"kind": "search", "detail": "윤서아의 계획·작업에서 마감일 확인"},
+            steps=[{"kind": "search", "detail": "에밀리 한의 계획·작업에서 마감일 확인"},
                    {"kind": "policy", "detail": "공개 범위 확인 - 계획 공개 허용"},
                    {"kind": "verdict", "answer": True,
                     "reason": "저장된 계획에 마감일이 명시돼 있음"}],
@@ -755,7 +755,7 @@ class Command(BaseCommand):
                        "excerpt": "planned_end_at = 8월 18일"},
                       {"kind": "work", "title_snapshot": "회의 상세 화면 최종 시안",
                        "excerpt": "진행률 70%, 남은 것은 브리핑 패널"}],
-            result="윤서아님이 저장해 두신 기준으로는 8월 18일입니다. "
+            result="에밀리 한님이 저장해 두신 기준으로는 8월 18일입니다. "
                    "현재 시안 작업은 70% 진행돼 있습니다.")
         deferred = AgentRun.objects.create(
             user=away, meeting=meeting, status=AgentRun.Status.COMPLETED,
