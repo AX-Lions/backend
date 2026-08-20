@@ -137,7 +137,16 @@ def home(request):
     } for m in meetings]
 
     # ── 오늘 일정 — 회의가 Discord 에서 열리므로 채널 정보를 같이 내려줍니다
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # 하루를 **보는 사람의 시간대로** 자릅니다.
+    #
+    # 예전에는 `now`(UTC) 의 자정을 썼습니다. 서버가 UTC 라 한국 사람에게는
+    # 오전 9시에 하루가 끊겼고, 그 뒤의 회의가 **아무의 「오늘 일정」에도 안
+    # 떴습니다** — 회의는 오늘 저녁인데 홈이 비어 있어 불참 버튼 자체가
+    # 없었습니다. 팀원이 서로 다른 지역에 있는 것이 이 서비스의 전제이므로,
+    # 같은 회의가 사람마다 다른 날로 묶이는 것이 오히려 맞습니다.
+    local_midnight = timezone.localtime(now, tz).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    start = local_midnight
     end = start + timezone.timedelta(days=1)
     today = (Meeting.objects
              .filter(project_id__in=project_ids, scheduled_at__range=(start, end))
