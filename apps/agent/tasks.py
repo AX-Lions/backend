@@ -248,14 +248,34 @@ def _reply(conversation, question, run, body: str) -> None:
     질문 쪽에도 `run` 을 답니다. 중복 실행을 막는 표시이면서, 나중에 "이 답이
     무엇을 보고 나왔는가" 를 질문에서부터 따라갈 수 있게 됩니다.
     """
+    from datetime import timedelta
+
     from django.db import transaction
+    from django.db.models import Max
 
     from .models import AgentMessage
 
     with transaction.atomic():
-        AgentMessage.objects.create(conversation=conversation,
-                                    role=AgentMessage.Role.AGENT,
-                                    body=body, run=run)
+        answer = AgentMessage.objects.create(conversation=conversation,
+                                             role=AgentMessage.Role.AGENT,
+                                             body=body, run=run)
+        # 답이 질문보다 **앞에 오는 것**을 막습니다.
+        #
+        # `sent_at` 은 `auto_now_add` 라 `timezone.now()` 를 씁니다. 그런데
+        # 시계 해상도가 굵은 환경(Windows 는 약 15ms)에서는 몇 밀리초 사이에
+        # 만든 두 행이 **같은 값**을 갖습니다. 목록은 `sent_at` 하나로만
+        # 정렬하므로(`views.py` 의 `order_field="-sent_at"`), 값이 같으면
+        # 순서가 정해지지 않아 **답이 질문 위에 뜹니다.**
+        #
+        # 화면에 오류는 안 납니다. 대화가 거꾸로 보일 뿐이라, 보는 사람은
+        # 대리인이 묻지도 않은 말에 답한 것으로 읽습니다.
+        prev = (AgentMessage.objects
+                .filter(conversation=conversation)
+                .exclude(pk=answer.pk)
+                .aggregate(last=Max("sent_at"))["last"])
+        if prev is not None and answer.sent_at <= prev:
+            (AgentMessage.objects.filter(pk=answer.pk)
+             .update(sent_at=prev + timedelta(milliseconds=1)))
         if run is not None:
             question.run = run
             question.save(update_fields=["run"])
