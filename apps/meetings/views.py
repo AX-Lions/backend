@@ -264,6 +264,12 @@ def _work_period(params):
     return from_at, to_at
 
 
+def _dot_day(dt, tz) -> str:
+    """`8.14` — 작업 흐름 헤더의 날짜. **보는 사람 시간대**로 찍습니다."""
+    d = timezone.localtime(dt, tz)
+    return f"{d.month}.{d.day}"
+
+
 def _resolve_category(raw):
     cat = (raw or FlowCategory.MEETING).upper()
     if cat not in FlowCategory.values:
@@ -463,6 +469,7 @@ def project_flow(request, project_id):
 
     # 기본 구간은 좌측 인덱스 · 우측 패널과 한 곳에서 정합니다.
     from_at, to_at = _work_period(request.query_params)
+    tz = user_tz(request.user)
 
     params = request.query_params.copy()
     params.setdefault("category", FlowCategory.WORK)
@@ -488,7 +495,15 @@ def project_flow(request, project_id):
     return Response({
         "project_id": str(project.id),
         # 서버가 문자열까지 만듭니다. 클라이언트가 만들면 시간대·표기가 갈립니다.
-        "period_label": f"{from_at.month}.{from_at.day} - {to_at.month}.{to_at.day} "
+        #
+        # **보는 사람 시간대로 찍습니다.** 전에는 `from_at.month` 를 그대로
+        # 읽어 UTC 로 나갔고, 한국에서 오전 9시 전에 열면 `8.13 - 8.20` 처럼
+        # 하루 밀린 구간이 떴습니다 — 오늘 만든 회의가 구간 밖으로 보입니다.
+        # 좌측 인덱스(`indexes`)는 이미 `day_label` 로 찍고 있어 두 값이
+        # 같은 화면에서 갈리기까지 했습니다.
+        # 점 표기는 시안 그대로입니다(`8.10 - 8.16 작업 흐름`). `day_label` 은
+        # `8/14` 라 여기서 쓸 수 없습니다.
+        "period_label": f"{_dot_day(from_at, tz)} - {_dot_day(to_at, tz)} "
                         f"{'작업' if cat == FlowCategory.WORK else '회의'} 흐름",
         "from": from_at, "to": to_at,
         "category": cat,
@@ -701,9 +716,15 @@ def flow_edge_detail(request, edge_id):
         lookup = edge.lookups.first()
         if lookup is not None:
             body["lookup_id"] = str(lookup.id)
+    # 엣지에 실린 말이 먼저입니다. 문서 쪽 `delivery_context` 는 그 문서가 오갈
+    # 때의 대화라 화살표마다 같은 값이고, 화살표 열둘이 전부 같은 문장을 보여
+    # 주게 됩니다. 문서가 붙은 엣지는 문서 카드에 그대로 남습니다.
+    if edge.delivery_context:
+        body["delivery_context"] = edge.delivery_context
     if edge.document:
         body["document"] = DocumentRefSerializer(edge.document).data
-        body["delivery_context"] = edge.document.delivery_context
+        if not body["delivery_context"]:
+            body["delivery_context"] = edge.document.delivery_context
     if edge.agenda:
         body["agenda"] = AgendaSerializer(
             edge.agenda, context={"edge_map": {edge.agenda_id: [edge.id]}}).data

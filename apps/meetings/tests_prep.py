@@ -131,6 +131,36 @@ class AbsenceTest(Base):
         self.assertEqual(self.api.post(self.url(m)).status_code, 403)
 
 
+class PredictDebatePointsTest(Base):
+    """
+    논쟁점 예상을 **불참 등록과 떼어 놓은** 자리.
+
+    전에는 트리거가 `register_absence` 하나뿐이라, 준비 화면의 `적용하기` 가
+    몰래 불참을 등록해야만 논쟁점이 생겼습니다. 설정만 저장하려던 사람이
+    회의 불참으로 바뀌었습니다.
+    """
+
+    def test_needs_delegation_first(self):
+        """맡기지 않았는데 예측을 돌리면 회의마다 참석자 수만큼 모델이 돕니다."""
+        m = self.meeting()
+        res = self.api.post(self.url(m, "debate-points/predict"))
+        self.assertEqual(res.status_code, 409, res.content)
+        self.assertEqual(res.json()["error"]["code"], "MEETING_NOT_DELEGATED")
+
+    def test_delegated_can_predict(self):
+        m = self.meeting()
+        self.api.post(self.url(m))
+        res = self.api.post(self.url(m, "debate-points/predict"))
+        self.assertEqual(res.status_code, 202, res.content)
+        self.assertEqual(res.json()["status"], "GENERATING")
+
+    def test_finished_meeting_is_blocked(self):
+        """끝난 회의에 쟁점을 새로 뽑으면 이미 나온 브리핑과 말이 어긋납니다."""
+        m = self.meeting(status=MeetingStatus.ENDED)
+        res = self.api.post(self.url(m, "debate-points/predict"))
+        self.assertEqual(res.status_code, 409, res.content)
+
+
 class PrepReadTest(Base):
 
     def setUp(self):

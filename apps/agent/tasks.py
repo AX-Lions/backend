@@ -32,6 +32,20 @@ logger = logging.getLogger("bordo.agent")
 BUILD_LOCK_SEC = 300
 
 
+def debate_lock_key(meeting_id) -> str:
+    return f"debate:build:{meeting_id}"
+
+
+def is_building_debate(meeting_id) -> bool:
+    """
+    지금 논쟁점을 만들고 있는가.
+
+    준비 화면이 이 값으로 「예상하는 중」과 「없음」을 가릅니다. 없이 두면 생성
+    중에도 화면이 빈 목록을 그려, 사용자는 예측이 실패한 줄 알고 나가 버립니다.
+    """
+    return cache.get(debate_lock_key(meeting_id)) is not None
+
+
 @shared_task(name="agent.run_for_utterance")
 def run_agent_for_utterance(utterance_id: str) -> None:
     from apps.meetings.models import Utterance
@@ -59,6 +73,17 @@ def run_agent_for_utterance(utterance_id: str) -> None:
     if utterance.is_agent:
         return
 
+    # 안건은 여기서 한 번만 구해 이 발언에서 나오는 화살표 전부에 넘깁니다.
+    # 각자 구하면 같은 조회와 같은 토큰 계산이 발언마다 두세 번 돕니다.
+    agenda = flow.agenda_for(utterance.meeting, utterance.body)
+
+    # 사람이 한 말부터 판에 남깁니다. **대리인을 부르지 않는 발언이 회의의
+    # 대부분**이라, 이걸 대상 판정 뒤에 두면 아래 `return` 에 걸려 판에는
+    # 대리인 화살표만 남습니다.
+    # 돌려받은 화살표를 들고 있습니다. 아래 `question_routed` 가 이걸 다시 쓰지
+    # 않으면 같은 발언이 판에 두 번 그려집니다.
+    speech_edge = flow.utterance_recorded(utterance.meeting, utterance, agenda=agenda)
+
     try:
         target = targeting.pick(utterance)
     except Exception:                                          # noqa: BLE001
@@ -67,6 +92,15 @@ def run_agent_for_utterance(utterance_id: str) -> None:
 
     if target is None:
         # 회의 발언 대부분은 질문이 아닙니다. 아무도 안 부르는 것이 정상입니다.
+        #
+        # 다만 **후보가 아예 없었던 것**은 다릅니다. 대리 참석을 등록한 사람이
+        # 하나도 없으면 누구를 불러도 조용합니다. 그 둘을 로그로 갈라 놓지
+        # 않으면, 이름을 두 번 부르고도 답이 없는 이유를 아무 데서도 알 수
+        # 없습니다 — 실제로 그 일이 있었습니다(에밀리 한, delegated=False).
+        if not targeting.candidates(utterance):
+            logger.info("답할 대리인이 없습니다 meeting=%s utterance=%s "
+                        "— 이 회의에 대리 참석을 등록한 사람이 없습니다",
+                        utterance.meeting_id, utterance_id)
         return
 
     # 화면에 남기는 것은 여기서 시작합니다. 대리인이 실패하더라도 "이 질문이 저
@@ -74,11 +108,9 @@ def run_agent_for_utterance(utterance_id: str) -> None:
     # 닿지도 않은 것은 사용자에게 전혀 다른 이야기입니다.
     flow.delegate_prompt_given(utterance.meeting, target.user,
                                target.delegate_prompt or "")
-    # 안건은 여기서 한 번만 구해 질문·답변 화살표에 함께 넘깁니다. 각자 구하면
-    # 같은 조회와 같은 토큰 계산이 발언마다 두 번 돕니다.
-    agenda = flow.agenda_for(utterance.meeting, utterance.body)
     flow.question_routed(utterance.meeting, asker=utterance.participant,
-                         target=target.user, agenda=agenda)
+                         target=target.user, agenda=agenda,
+                         quote=utterance.body, existing=speech_edge)
 
     try:
         outcome = react.run(
@@ -143,7 +175,7 @@ def _record_flow(outcome, utterance, principal, agenda=None) -> None:
             # 참석 상태가 아직 안 들어온 회의도 있습니다. 최소한 질문자에게는 그립니다.
             audience = [utterance.participant]
         flow.answered(utterance.meeting, principal=principal, audience=audience,
-                      agenda=agenda)
+                      agenda=agenda, quote=outcome.text or "")
     except Exception:                                          # noqa: BLE001
         logger.exception("플로우 기록 실패 run=%s", getattr(outcome.run, "id", None))
 
@@ -323,7 +355,7 @@ def build_debate_points(meeting_id: str, force: bool = False) -> None:
 
     # 열쇠를 못 잡으면 다른 실행이 만들고 있습니다. 기다리지 않고 물러납니다 —
     # 어차피 결과는 같고, 기다리면 두 실행이 나란히 붙잡혀 있게 됩니다.
-    lock = f"debate:build:{meeting_id}"
+    lock = debate_lock_key(meeting_id)
     if not cache.add(lock, 1, timeout=BUILD_LOCK_SEC):
         return
 

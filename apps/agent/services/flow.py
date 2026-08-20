@@ -115,7 +115,7 @@ def server_node() -> dict:
 def record(meeting, *, from_node: dict, to_nodes: list[dict], label: str,
            content_type: str, surface: str = Surface.SERVICE,
            category: str = FlowCategory.MEETING, agenda=None,
-           occurred_at=None) -> FlowEdge | None:
+           occurred_at=None, says: list[tuple[str, str]] | None = None) -> FlowEdge | None:
     """
     화살표 하나를 남깁니다.
 
@@ -153,6 +153,10 @@ def record(meeting, *, from_node: dict, to_nodes: list[dict], label: str,
             # 4명째부터는 접어서 보여줍니다. 화살표에 이름이 다 들어가면 읽히지 않습니다.
             extra_participant_count=max(0, len(to_nodes) - 3),
             agenda=agenda,
+            # 카드 본문에 찍히는 실제 대사입니다. 비워 두면 우측 패널이
+            # 제목과 창구(`Discord`)만 남은 빈 카드가 됩니다.
+            delivery_context=[{"participant_name": who, "utterance": what}
+                              for who, what in (says or []) if what],
             occurred_at=occurred_at or timezone.now(),
         )
         # 진행 중인 회의에서는 아직 의미가 없습니다. `compute_opacity()` 의
@@ -298,19 +302,171 @@ def delegate_prompt_given(meeting, user, prompt: str):
                       occurred_at=meeting.scheduled_at)
 
 
+#: 발언을 여섯 칸 중 어디로 넣을지 가르는 낱말.
+#:
+#: 앞에 오는 종류가 이깁니다 — `시안 마감은 8월 18일로 확정하겠습니다` 는
+#: 일정이자 결론인데, 회의에서 사람이 기억하는 것은 "정해졌다" 쪽입니다.
+_SPEECH_RULES = (
+    (FlowContentType.CONCLUSION, "결론",
+     ("확정", "결정", "하기로", "정리하면", "합의", "그렇게 가", "여기까지")),
+    (FlowContentType.SCHEDULE, "일정",
+     ("일정", "마감", "연장", "미루", "당기", "언제까지", "데드라인", "주까지", "일까지")),
+    (FlowContentType.CHANGE, "변동사항",
+     ("바뀝", "바꾸", "바꿔", "변경", "수정", "걷어내", "빼겠", "대신")),
+    (FlowContentType.REQUEST, "요청사항",
+     ("?", "주세요", "부탁", "요청", "해주", "해 주", "가능할까", "될까요", "여쭤")),
+)
+
+#: 의문문 어미. 물음표를 안 찍는 사람이 많아 낱말로도 봅니다.
+_QUESTION_TAILS = ("나요", "까요", "습니까", "ㅂ니까", "인가요", "은가요", "는가요",
+                   "된대", "어때요", "어떤가", "맞나", "맞죠", "죠?", "지요")
+
+#: 일정으로 보려면 **때를 가리키는 표현**이 같이 있어야 합니다.
+#:
+#: `일정` 이라는 낱말만으로 가르면 `남은 일정을 정리하겠습니다` 같은 개회 인사가
+#: 일정 화살표가 됩니다. 화면의 `일정` 칸은 "언제로 바뀌었나" 를 보는 자리라,
+#: 날짜도 기간도 없는 문장이 거기 들어가면 그 칸이 못 쓰게 됩니다.
+_WHEN_MARKS = ("마감", "데드라인", "언제까지", "월", "일", "주", "요일", "내일", "모레",
+               "다음 주", "이번 주", "기한")
+_DIGITS = tuple("0123456789")
+
+
+def _is_question(text: str) -> bool:
+    """
+    이 발언이 **묻는 말**인가.
+
+    묻는 말은 결론일 수 없습니다. 이걸 먼저 안 보면
+    `1주 연장으로 확정해도 될까요?` 가 `확정` 이라는 낱말 하나 때문에
+    **결론**으로 들어갑니다 — 아무도 답하지 않은 질문이 화면에서는
+    회의에서 정해진 것으로 보입니다.
+    """
+    tail = text.rstrip()
+    if tail.endswith("?"):
+        return True
+    # 마지막 문장만 봅니다. `시작하겠습니다. ... 될까요?` 처럼 앞에 평서문이
+    # 붙어 있어도 묻는 말이고, 반대로 앞쪽에 물음표가 있고 뒤가 단정이면
+    # 그건 스스로 답한 것이라 질문으로 보지 않습니다.
+    last = tail.rsplit(".", 1)[-1].strip() or tail
+    return any(last.endswith(t) or t in last[-6:] for t in _QUESTION_TAILS)
+
+#: 이보다 짧으면 화살표를 그리지 않습니다.
+#:
+#: `넵` · `ㅇㅋ` 까지 그리면 회의 하나에 화살표가 수십 개가 되고, 정작 무엇이
+#: 오갔는지가 그 안에 묻힙니다. 이 화면은 회의록이 아니라 맥락 지도입니다.
+_MIN_SPEECH = 12
+
+
+def classify_speech(body: str) -> tuple[str, str] | None:
+    """
+    발언 하나를 화면 필터 여섯 칸 중 하나로 넣습니다. 너무 짧으면 `None`.
+
+    **묻는 말이 가장 먼저입니다.** 낱말만 보면 질문 안에 든 `확정`·`일정` 이
+    그 문장을 결론이나 일정으로 만들어 버립니다. 회의에서 답을 못 받고 끝난
+    질문이 화면에서 「정해진 것」으로 보이는 것이 이 화면에서 가장 나쁜 오류입니다.
+    """
+    text = (body or "").strip()
+    if len(text) < _MIN_SPEECH:
+        return None
+    if _is_question(text):
+        return FlowContentType.REQUEST, "요청사항"
+    for content_type, label, keywords in _SPEECH_RULES:
+        if not any(k in text for k in keywords):
+            continue
+        # `일정` 은 낱말 하나로는 약합니다. 때를 가리키는 것이 같이 있어야
+        # 일정입니다 — 없으면 다음 규칙으로 넘겨 의견이 되게 둡니다.
+        if content_type == FlowContentType.SCHEDULE and not _has_when(text):
+            continue
+        return content_type, label
+    return FlowContentType.OPINION, "의견"
+
+
+def _has_when(text: str) -> bool:
+    """때를 가리키는 표현이 있는가. 숫자가 붙은 날짜·기간이면 확실합니다."""
+    if any(d in text for d in _DIGITS):
+        return any(m in text for m in _WHEN_MARKS)
+    return any(m in text for m in ("마감", "데드라인", "언제까지", "내일", "모레",
+                                   "다음 주", "이번 주", "기한"))
+
+
+def utterance_recorded(meeting, utterance, *, agenda=None) -> FlowEdge | None:
+    """
+    **사람이 회의에서 한 말**을 화살표로 남깁니다.
+
+    ## 이게 없으면 판에 대리인 화살표만 뜹니다
+
+    전에는 대리인이 낀 사건(질문 라우팅 · 답변 · 후보 산출물 · 브리핑)만
+    그렸습니다. 그러면 회의를 새로 열어 판을 봐도 사람 노드 사이에 선이 하나도
+    없어, **대리인 발언이 회의 맥락 없이 공중에 뜹니다.** 화면의 필터 여섯 칸도
+    두세 칸만 채워지고, 좌측 시간순 인덱스는 서너 줄로 끝납니다.
+
+    받는 쪽은 **그 자리에 있던 나머지 참석자**입니다. 회의 발언은 특정인에게
+    거는 말이라도 모두가 듣습니다 — 한 사람만 그리면 나머지가 그 결정을 모르는
+    것처럼 보입니다. 자리를 비운 사람은 본인이 아니라 **대리인 노드**로 받습니다.
+    실제로 그 자리에서 듣고 있던 것은 대리인이기 때문입니다.
+    """
+    from apps.meetings.models import Attendance, MeetingParticipant
+
+    if utterance is None or utterance.is_agent or utterance.participant is None:
+        return None
+
+    kind = classify_speech(utterance.body)
+    if kind is None:
+        return None
+    content_type, label = kind
+
+    rows = (MeetingParticipant.objects
+            .filter(meeting=meeting)
+            .exclude(user_id=utterance.participant_id)
+            .select_related("user")
+            .order_by("user_id"))
+    to_nodes = [agent_node(p.user) if p.attendance == Attendance.DELEGATED
+                else user_node(p.user) for p in rows]
+    if not to_nodes:
+        return None
+
+    return record(meeting,
+                  from_node=user_node(utterance.participant), to_nodes=to_nodes,
+                  label=label, content_type=content_type,
+                  surface=Surface.DISCORD, agenda=agenda,
+                  occurred_at=utterance.spoken_at,
+                  says=[(utterance.participant_name or utterance.participant.name,
+                         utterance.body)])
+
+
 def question_routed(meeting, *, asker, target, agenda=None,
-                    surface=Surface.DISCORD):
-    """회의 중 — 질문이 누구의 대리인에게 향했는지."""
+                    surface=Surface.DISCORD, quote="", existing=None):
+    """
+    회의 중 — 질문이 누구의 대리인에게 향했는지.
+
+    ## `existing` 이 있으면 새로 그리지 않습니다
+
+    같은 발언은 이미 `utterance_recorded()` 가 화살표로 남겼습니다. 여기서 또
+    만들면 **같은 문장이 판에 두 번** 뜹니다 — 좌측 시간순 인덱스에
+
+        4  요청사항  "민님 플로우 화면 연결 작업은 어디까지 됐나요?"
+        5  질문      "민님 플로우 화면 연결 작업은 어디까지 됐나요?"
+
+    처럼 한 말이 두 줄로 서고, 우측 패널의 개수 뱃지도 두 배로 셉니다.
+
+    그래서 이미 그린 화살표에 **표시만** 합니다. 받는 쪽은 그대로 둡니다 —
+    회의 발언은 특정인에게 건 말이라도 그 자리의 모두가 듣고, 대리 참석자는
+    이미 대리인 노드로 그려져 있습니다.
+    """
     if asker is None:
         return None
+    if existing is not None:
+        existing.label = "질문"
+        existing.save(update_fields=["label"])
+        return existing
     return record(meeting,
                   from_node=user_node(asker), to_nodes=[agent_node(target)],
                   label="질문", content_type=FlowContentType.REQUEST,
-                  surface=surface, agenda=agenda)
+                  surface=surface, agenda=agenda,
+                  says=[(asker.name, quote)] if quote else None)
 
 
 def answered(meeting, *, principal, audience: list, agenda=None,
-             surface=Surface.DISCORD):
+             surface=Surface.DISCORD, quote=""):
     """
     회의 중 — 대리인이 답했습니다.
 
@@ -321,7 +477,8 @@ def answered(meeting, *, principal, audience: list, agenda=None,
                   from_node=agent_node(principal),
                   to_nodes=[user_node(u) for u in audience],
                   label="대리인 답변", content_type=FlowContentType.OPINION,
-                  surface=surface, agenda=agenda)
+                  surface=surface, agenda=agenda,
+                  says=([(agent_display_name(principal), quote)] if quote else None))
 
 
 def deferred(meeting, *, principal, asker, surface=Surface.DISCORD):
@@ -375,7 +532,19 @@ def artifact_proposed(meeting, *, principal, kind: str, title: str):
 
 
 def briefing_delivered(meeting, *, principal):
-    """회의 후 — 불참자에게 브리핑이 전달됐습니다."""
+    """
+    회의 후 — 불참자에게 브리핑이 전달됐습니다.
+
+    ## `결론` 이 아니라 `기타` 입니다
+
+    전에는 `CONCLUSION` 이었습니다. 그러면 **아무것도 정해지지 않은 회의에도
+    `결론` 뱃지가 반드시 하나 붙습니다** — 대리 참석자가 있으면 브리핑은 늘
+    나가기 때문입니다. 실제로 답을 못 받은 질문 두 개로 끝난 회의에서 화면에
+    `결론 1` 이 떴습니다.
+
+    브리핑을 보냈다는 것은 회의에서 무엇이 정해졌는가와 아무 상관이 없습니다.
+    회의가 만든 사실이 아니라 서비스가 한 일이라 `기타` 가 맞습니다.
+    """
     return record(meeting,
                   from_node=agent_node(principal), to_nodes=[user_node(principal)],
-                  label="부재중 브리핑", content_type=FlowContentType.CONCLUSION)
+                  label="부재중 브리핑", content_type=FlowContentType.ETC)

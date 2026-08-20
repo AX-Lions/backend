@@ -51,7 +51,46 @@ class GeneralCog(commands.Cog):
             "idempotency_key": idempotency_key,
         }
 
-        await self.backend.post(
+        result = await self.backend.post(
             "/internal/v1/discord/messages",
             json=payload
         )
+
+        await self._show_listening(message, result)
+
+    #: 대리인이 이 말을 듣고 있다는 표시.
+    #:
+    #: 이모지 하나만 씁니다. 임시 메시지를 보내고 나중에 고치는 방법도 있지만,
+    #: 회의 스레드는 사람들이 읽는 자리라 봇이 줄을 하나 더 차지하면 대화가
+    #: 끊깁니다. 반응은 원문 아래에 조용히 붙습니다.
+    LISTENING_EMOJI = "👀"
+
+    async def _show_listening(self, message: discord.Message, result) -> None:
+        """
+        발언에 **곧바로** 반응을 붙인다.
+
+        ## 왜 필요한가
+
+        대리인 답변은 LLM 여러 단계를 거치고 Outbox 폴링(3초)까지 지나야
+        스레드에 뜬다. 그동안 회의는 완전히 조용해서, 말한 사람은 **대리인이
+        생각 중인지 아무도 안 불린 것인지 구별할 수 없다.**
+
+        ## 왜 「누구의 대리인인지」까지 안 적는가
+
+        반응에는 이름을 실을 수 없다. 대신 **답할 대리인이 하나도 없으면 아무
+        반응도 안 붙는다** — 그것만으로 두 상태가 갈린다. 이름이 필요하면 답이
+        올 때 그 메시지에 `{이름}의 Bordo:` 가 붙어서 온다.
+
+        ## 실패해도 조용히 넘어간다
+
+        `add_reactions` 권한이 없거나 메시지가 지워졌을 수 있다. 표시 하나
+        때문에 발언 중계가 예외로 끝나면 회의록이 비는 것이 더 큰 손해다.
+        """
+        if not isinstance(result, dict):
+            return
+        if not result.get("listening"):
+            return
+        try:
+            await message.add_reaction(self.LISTENING_EMOJI)
+        except discord.HTTPException as exc:
+            log.warning("청취 표시 실패 message=%s: %s", message.id, exc)

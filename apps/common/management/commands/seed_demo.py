@@ -300,79 +300,105 @@ class Command(BaseCommand):
         # B-5: 서재민이 받기만 하고 보내지는 않는 것(#134 회귀 케이스)은
         #      그대로 둔다 — 이 회의에서 서재민을 발신자로 넣지 않는다.
         MT = FlowCategory.MEETING
+        # 마지막 칸이 **그 화살표로 오간 말**입니다(`FlowEdge.delivery_context`).
+        # 비워 두면 우측 패널 카드가 제목과 창구(`Discord`)만 남아, 화살표를
+        # 눌러도 무슨 말이 오갔는지 알 수 없습니다.
         edges = [
             # 사전 지시 — 대리 참석이 시작되기 전에 유수인이 자기 대리인에게
             # 미리 일러둔 것(B-2).
             (MT, FlowContentType.REQUEST, "요청사항",
              node(owner), [node(owner, agent=True)], agendas[5], None,
-             Surface.SERVICE, 58),
+             Surface.SERVICE, 58,
+             [("유수인", "제가 자리를 비우는 동안 일정 연장 요청이 나오면 확정하지 마시고 저에게 남겨 주세요.")]),
 
             # 문서를 여기 답니다. 회의 중에 기획안이 오간 자리라, 화살표를 누르면
             # 문서 전달 맥락으로 넘어갑니다. 어디에도 안 달면 문서가 어느 흐름에서
             # 나왔는지 화면에서 짚을 수 없습니다.
             (MT, FlowContentType.OPINION, "의견",
              node(users["최비성"]), [node(users["임수연"])], agendas[0], doc,
-             Surface.DISCORD, 54),
+             Surface.DISCORD, 54,
+             [("최비성", "기획안 먼저 공유드립니다. 시간대 계산은 서버가 하는 게 맞아요."),
+              ("임수연", "확인하고 시안에 반영할게요.")]),
             (MT, FlowContentType.OPINION, "의견",
              node(users["최비성"]), [node(users["임수연"])], agendas[0], None,
-             Surface.DISCORD, 51),
+             Surface.DISCORD, 51,
+             [("최비성", "후보 슬롯은 세 개까지만 보여 주죠. 더 늘리면 고르기가 더 어려워집니다."),
+              ("임수연", "세 개면 카드로 한 줄에 들어가요.")]),
             (MT, FlowContentType.OPINION, "의견",
              node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
-             Surface.SERVICE, 48),
+             Surface.SERVICE, 48,
+             [("최비성", "시안이 늦어지면 개발이 통째로 밀립니다. 마감을 먼저 못 박는 게 낫습니다.")]),
             (MT, FlowContentType.OPINION, "의견",
              node(users["최비성"]), [node(users["임수연"])], agendas[3], None,
-             Surface.DISCORD, 45),
+             Surface.DISCORD, 45,
+             [("최비성", "명세 리뷰는 다음 회의 전에 한 번 돌려야 합니다. 지금 형태로 붙이면 또 고칩니다.")]),
             (MT, FlowContentType.REQUEST, "요청사항",
              node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
-             Surface.DISCORD, 42),
+             Surface.DISCORD, 42,
+             [("최비성", "시안 마감일을 팀 캘린더에도 올려 주세요."),
+              ("임수연", "오늘 안에 올리겠습니다.")]),
             (MT, FlowContentType.REQUEST, "요청사항",
              node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
-             Surface.DISCORD, 40),
+             Surface.DISCORD, 40,
+             [("최비성", "확정 전이라도 화면 흐름만 먼저 공유해 주시면 API 를 맞춰 두겠습니다.")]),
             (MT, FlowContentType.SCHEDULE, "일정",
              node(users["최비성"]), [node(users["임수연"])], agendas[3], None,
-             Surface.SERVICE, 37),
+             Surface.SERVICE, 37,
+             [("최비성", "API 명세 리뷰는 다음 회의 하루 전까지 끝내는 걸로 잡겠습니다.")]),
             (MT, FlowContentType.CHANGE, "변동사항",
              node(users["최비성"]), [node(users["임수연"])], agendas[1], None,
-             Surface.SERVICE, 34),
+             Surface.SERVICE, 34,
+             [("최비성", "응답 키가 suggested_slots 에서 slots 로 바뀝니다. 오늘 배포에 같이 나가요."),
+              ("임수연", "반영하고 알려 드릴게요.")]),
 
             (MT, FlowContentType.REQUEST, "요청사항",
              node(users["임수연"]), [node(owner, agent=True)], agendas[2], None,
-             Surface.DISCORD, 31),
+             Surface.DISCORD, 31,
+             [("임수연", "유수인님 쪽 개발 일정을 1주 미뤄도 괜찮을지 확인 부탁드립니다.")]),
             (MT, FlowContentType.CHANGE, "변동사항",
              node(users["임수연"]), [node(owner, agent=True)], agendas[2], None,
-             Surface.DISCORD, 28),
+             Surface.DISCORD, 28,
+             [("임수연", "시안 마감이 8월 18일로 확정되면서 개발 착수일도 같이 밀립니다.")]),
             (MT, FlowContentType.OPINION, "의견",
              node(users["임수연"]), [node(users["최비성"])], agendas[4], None,
-             Surface.DISCORD, 25),
+             Surface.DISCORD, 25,
+             [("임수연", "Discord 공지 문구가 사람마다 달라서 읽는 쪽이 헷갈립니다. 형식을 하나로 맞추죠.")]),
             (MT, FlowContentType.SCHEDULE, "일정",
              node(users["임수연"]), [node(owner, agent=True)], agendas[2], None,
-             Surface.SERVICE, 22),
+             Surface.SERVICE, 22,
+             [("임수연", "개발 착수는 8월 19일부터로 보고 있습니다. 유수인님 일정과 겹치는지 봐 주세요.")]),
             # 대리인을 거치지 않고 본인에게 직접 — 바로 위 대리인 경유
             # 화살표들과 같은 쌍(임수연↔유수인)에 회색 화살표도 있어야
             # "본인 직접 vs 대리인 경유"가 화면에 함께 보인다(B-1).
             (MT, FlowContentType.REQUEST, "요청사항",
              node(users["임수연"]), [node(owner)], agendas[2], None,
-             Surface.SERVICE, 20),
+             Surface.SERVICE, 20,
+             [("임수연", "유수인님, 돌아오시면 개발 일정 연장 건만 직접 확인 부탁드립니다.")]),
 
             (MT, FlowContentType.CONCLUSION, "결론",
              node(owner, agent=True),
              [node(users["최비성"]), node(users["임수연"])], agendas[4], None,
-             Surface.DISCORD, 17),
+             Surface.DISCORD, 17,
+             [("유수인의 Bordo", "공지 문구는 제목 · 일시 · 담당 순으로 통일하기로 정리됐습니다.")]),
             (MT, FlowContentType.CONCLUSION, "결론",
              node(owner, agent=True),
              [node(users["최비성"]), node(users["서재민"])], agendas[2], None,
-             Surface.DISCORD, 14),
+             Surface.DISCORD, 14,
+             [("유수인의 Bordo", "개발 일정 1주 연장은 회의에서 나온 의견으로 정리해 유수인님께 전달드리겠습니다."),
+              ("최비성", "그럼 확정은 내일 아침에 받겠습니다.")]),
             (MT, FlowContentType.ETC, "기타",
              node(owner, agent=True), [node(users["서재민"])], None, None,
-             Surface.SERVICE, 8),
+             Surface.SERVICE, 8,
+             [("유수인의 Bordo", "일정을 미루는 결정은 제가 정할 수 있는 항목이 아닙니다. 유수인님 확인 후에 다시 말씀드리겠습니다.")]),
 
             # 복귀 후 확인 요청 — 대리 참석 중 결정된 것을 유수인이 돌아와
             # 자기 대리인에게 확인하는 자리(B-2).
             (MT, FlowContentType.ETC, "기타",
              node(owner), [node(owner, agent=True)], agendas[5], None,
-             Surface.SERVICE, 4),
+             Surface.SERVICE, 4,
+             [("유수인", "제 대리인이 유보해 둔 개발 일정 연장 건, 지금 확인하겠습니다.")]),
         ]
-        for cat, ctype, label, src, dsts, agenda, document, surface, mins_ago in edges:
+        for cat, ctype, label, src, dsts, agenda, document, surface, mins_ago, says in edges:
             e = FlowEdge.objects.create(
                 meeting=meeting, project=meeting.project,
                 category=cat, content_type=ctype, surface=surface,
@@ -380,6 +406,8 @@ class Command(BaseCommand):
                 direction_label=f"{src['name']} → {', '.join(d['name'] for d in dsts)}",
                 participant_ids=[src["user_id"]] + [d["user_id"] for d in dsts],
                 agenda=agenda, document=document,
+                delivery_context=[{"participant_name": who, "utterance": what}
+                                  for who, what in says],
                 occurred_at=ended_at - timedelta(minutes=mins_ago))
             e.opacity = e.compute_opacity()
             e.save(update_fields=["opacity"])
@@ -424,9 +452,9 @@ class Command(BaseCommand):
         self._seed_main_meeting_stances(meeting, owner, now)
         self._seed_briefing_cards(meeting, agendas, users, owner, now)
         self._seed_chat_rooms(team, users, owner, now)
-        self._seed_away_handled(projects, users, owner, now)
-        self._seed_message_variety(projects, users, owner, meeting, now)
-        self._seed_search_and_summary(users, now)
+        self._seed_away_handled(team, projects, users, owner, now)
+        self._seed_message_variety(team, projects, users, owner, meeting, now)
+        self._seed_search_and_summary(team, users, now)
         self._seed_chat_read_state(projects, users, owner, now)
         self._touch_rooms()
 
@@ -1078,26 +1106,40 @@ class Command(BaseCommand):
                     "avatar_url": u.avatar_url or None}
 
         MT = FlowCategory.MEETING
+        # 마지막 칸은 위 회의록에서 그대로 가져온 대사입니다. 화살표를 눌렀을 때
+        # 카드에 찍힙니다 — 비우면 제목만 남아 무슨 말이 오갔는지 알 수 없습니다.
         edges = [
             (FlowContentType.OPINION, "의견", node(users["최비성"]), [node(users["임수연"])],
-             agendas[0], Surface.DISCORD, 40),
+             agendas[0], Surface.DISCORD, 40,
+             [("최비성", "부스 배치도 초안 봤는데 통로가 너무 좁아요. 사람 몰리면 위험할 것 같습니다."),
+              ("임수연", "저도 그 부분 걱정했어요. 통로 폭을 좀 늘리는 게 좋을 것 같아요.")]),
             (FlowContentType.REQUEST, "요청사항", node(users["최비성"]), [node(users["임수연"])],
-             agendas[0], Surface.DISCORD, 39),
+             agendas[0], Surface.DISCORD, 39,
+             [("최비성", "1.5m 정도면 여유 있을 것 같은데 어떠세요?")]),
             (FlowContentType.CHANGE, "변동사항", node(users["임수연"]), [node(users["최비성"])],
-             agendas[0], Surface.SERVICE, 38),
+             agendas[0], Surface.SERVICE, 38,
+             [("임수연", "통로 폭을 1.5m로 조정해서 배치도를 다시 그리겠습니다.")]),
             (FlowContentType.REQUEST, "요청사항", node(users["임수연"]),
-             [node(users["강다은"], agent=True)], agendas[1], Surface.DISCORD, 35),
+             [node(users["강다은"], agent=True)], agendas[1], Surface.DISCORD, 35,
+             [("임수연", "후원사 로고 배치 순서를 어떻게 할지 정해야 해요.")]),
             (FlowContentType.CONCLUSION, "결론", node(users["강다은"], agent=True),
-             [node(users["최비성"])], agendas[1], Surface.DISCORD, 34),
+             [node(users["최비성"])], agendas[1], Surface.DISCORD, 34,
+             [("강다은의 Bordo", "후원사 등급 기준은 이미 계약서에 명시돼 있어서, "
+                               "그 순서대로 배치하면 됩니다."),
+              ("최비성", "그럼 등급순으로 정리해서 배치도에 반영할게요.")]),
             (FlowContentType.SCHEDULE, "일정", node(users["유수인"]),
-             [node(users["최비성"]), node(users["임수연"])], None, Surface.SERVICE, 28),
+             [node(users["최비성"]), node(users["임수연"])], None, Surface.SERVICE, 28,
+             [("유수인", "최종 배치도는 9월 1일까지 공유해주세요."),
+              ("최비성", "포스터는 9월 3일에 인쇄 넣을 예정입니다.")]),
         ]
-        for ctype, label, src, dsts, agenda, surface, mins_ago in edges:
+        for ctype, label, src, dsts, agenda, surface, mins_ago, says in edges:
             e = FlowEdge.objects.create(
                 meeting=meeting, project=project, category=MT, content_type=ctype,
                 surface=surface, from_node=src, to_nodes=dsts, label=label,
                 direction_label=f"{src['name']} → {', '.join(d['name'] for d in dsts)}",
                 participant_ids=[src["user_id"]] + [d["user_id"] for d in dsts],
+                delivery_context=[{"participant_name": who, "utterance": what}
+                                  for who, what in says],
                 agenda=agenda, occurred_at=ended_at - timedelta(minutes=mins_ago))
             e.opacity = e.compute_opacity()
             e.save(update_fields=["opacity"])
@@ -1179,26 +1221,40 @@ class Command(BaseCommand):
                     "avatar_url": u.avatar_url or None}
 
         MT = FlowCategory.MEETING
+        # 마지막 칸은 위 회의록에서 그대로 가져온 대사입니다.
         edges = [
             (FlowContentType.REQUEST, "요청사항", node(users["최비성"]),
-             [node(users["서재민"], agent=True)], agendas[0], Surface.DISCORD, 36),
+             [node(users["서재민"], agent=True)], agendas[0], Surface.DISCORD, 36,
+             [("최비성", "정산 배치가 자정마다 도는데, 서버 시간대 기준이라 "
+                        "실제 한국 시간이랑 몇 분씩 어긋나요.")]),
             (FlowContentType.CHANGE, "변동사항", node(users["서재민"], agent=True),
-             [node(users["최비성"])], agendas[0], Surface.DISCORD, 34),
+             [node(users["최비성"])], agendas[0], Surface.DISCORD, 34,
+             [("서재민의 Bordo", "정산 주기 관련해서는 최비성님 확인을 받아야 하는 부분이라, "
+                               "우선 의견만 정리해서 전달드릴게요.")]),
             (FlowContentType.OPINION, "의견", node(users["임수연"]), [node(users["최비성"])],
-             agendas[1], Surface.SERVICE, 32),
+             agendas[1], Surface.SERVICE, 32,
+             [("임수연", "환불 쪽도 봐야 하는데, 화면마다 환불 안내 문구가 달라서 "
+                        "사용자들이 헷갈려해요.")]),
             (FlowContentType.OPINION, "의견", node(users["임수연"]), [node(users["최비성"])],
-             agendas[1], Surface.SERVICE, 30),
+             agendas[1], Surface.SERVICE, 30,
+             [("임수연", "제가 문구 정리해서 공유드릴게요.")]),
             (FlowContentType.CONCLUSION, "결론", node(users["최비성"]), [node(users["임수연"])],
-             agendas[1], Surface.DISCORD, 27),
+             agendas[1], Surface.DISCORD, 27,
+             [("최비성", "저희도 그 얘기 나왔었는데, 한 곳에서 관리하는 걸로 정리하죠.")]),
             (FlowContentType.SCHEDULE, "일정", node(users["유수인"]),
-             [node(users["최비성"]), node(users["서재민"])], None, Surface.SERVICE, 23),
+             [node(users["최비성"]), node(users["서재민"])], None, Surface.SERVICE, 23,
+             [("유수인", "정리하면 정산 시각은 자정 통일, 환불 문구는 임수연님이 정리, "
+                        "스크립트는 다음 주까지네요."),
+              ("최비성", "네 맞습니다. 정산 배치 스크립트는 제가 다음 주까지 수정할게요.")]),
         ]
-        for ctype, label, src, dsts, agenda, surface, mins_ago in edges:
+        for ctype, label, src, dsts, agenda, surface, mins_ago, says in edges:
             e = FlowEdge.objects.create(
                 meeting=meeting, project=project, category=MT, content_type=ctype,
                 surface=surface, from_node=src, to_nodes=dsts, label=label,
                 direction_label=f"{src['name']} → {', '.join(d['name'] for d in dsts)}",
                 participant_ids=[src["user_id"]] + [d["user_id"] for d in dsts],
+                delivery_context=[{"participant_name": who, "utterance": what}
+                                  for who, what in says],
                 agenda=agenda, occurred_at=ended_at - timedelta(minutes=mins_ago))
             e.opacity = e.compute_opacity()
             e.save(update_fields=["opacity"])
@@ -1566,7 +1622,7 @@ class Command(BaseCommand):
             if last:
                 touch(room, last.sent_at)
 
-    def _seed_away_handled(self, projects, users, owner, now):
+    def _seed_away_handled(self, team, projects, users, owner, now):
         """
         "자리 비운 사이 Bordo가 나눈 대화" 목록 (#137 1번). 왼쪽 목록 맨 위,
         가장 큰 자리인데 지금까지 시드에 answered_while_away=True 인 메시지가
@@ -1611,7 +1667,7 @@ class Command(BaseCommand):
               now - timedelta(hours=8, minutes=58))
 
         # TEAM 단체방.
-        team_room = ChatRoom.objects.get(type=RoomType.TEAM)
+        team_room = ChatRoom.objects.get(type=RoomType.TEAM, team=team)
         ask(team_room, "강다은", "유수인님, 이번 주 디자인 리뷰 자료 어디 있나요?",
             now - timedelta(hours=20))
         reply(team_room, "피그마 '디자인 최종안' 문서에 있습니다.",
@@ -1630,7 +1686,7 @@ class Command(BaseCommand):
         reply(project_room, "네, 오늘 반영했습니다.",
               now - timedelta(minutes=58), away=False)
 
-    def _seed_message_variety(self, projects, users, owner, meeting, now):
+    def _seed_message_variety(self, team, projects, users, owner, meeting, now):
         """
         메시지 상태 다양성 (#137 4번). 지금까지 시드가 만드는 메시지는
         전부 "사람이 방금 보낸 평범한 한 줄"이었다 — 삭제·수정·첨부·유보
@@ -1641,7 +1697,7 @@ class Command(BaseCommand):
         from apps.chat.services import direct_key
 
         main = projects[0]
-        team_room = ChatRoom.objects.get(type=RoomType.TEAM)
+        team_room = ChatRoom.objects.get(type=RoomType.TEAM, team=team)
         project_room = ChatRoom.objects.get(type=RoomType.PROJECT, project=main)
         direct_room = ChatRoom.objects.get(
             type=RoomType.DIRECT, dedupe_key=direct_key(owner.id, users["최비성"].id))
@@ -1728,7 +1784,7 @@ class Command(BaseCommand):
         pq.answer_body = answer.body
         pq.save(update_fields=["answered_at", "answer_body"])
 
-    def _seed_search_and_summary(self, users, now):
+    def _seed_search_and_summary(self, team, users, now):
         """
         방 안 검색 · 날짜별 요약 (#137 7번).
 
@@ -1745,7 +1801,7 @@ class Command(BaseCommand):
         """
         from apps.chat.models import ChatMessage, ChatRoom, DailyChatSummary, RoomType
 
-        team_room = ChatRoom.objects.get(type=RoomType.TEAM)
+        team_room = ChatRoom.objects.get(type=RoomType.TEAM, team=team)
 
         def send(body, days_ago):
             msg = ChatMessage.objects.create(

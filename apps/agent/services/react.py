@@ -224,7 +224,7 @@ def run(*, principal, question: str, meeting=None, project_id=None,
                 return _fail(run_obj, resp.error)
 
             if not resp.tool_calls:
-                answer_text = resp.text
+                answer_text = _spoken(resp.text)
                 _step("answer_draft", tokens=resp.total_tokens)
                 break
 
@@ -531,6 +531,38 @@ def _may_write(skill_name: str, snapshot: dict | None) -> str:
                     "개인 메시지로 따로 전하지 않습니다.")
 
     return ""
+
+
+#: 마지막 답변에서 걷어내는 머리말.
+#:
+#: 모델이 준비 과정을 답변 앞에 붙이는 일이 있습니다(`think: 먼저 기록에서…`,
+#: `검색 근거: work '…'`). **이 글은 그대로 회의 채팅에 올라갑니다** — 사람이
+#: 말하는 자리에 도구 로그가 섞이면 대리인이 아니라 기계가 뱉은 것으로 보입니다.
+#: 프롬프트로도 막지만(`prompts.py`), 모델이 흘릴 때를 대비해 한 번 더 거릅니다.
+_PREAMBLE = ("think:", "thought:", "생각:", "검색 근거:", "근거 검색:", "도구:",
+             "plan:", "계획:", "분석:")
+
+
+def _spoken(text: str) -> str:
+    """회의에 그대로 올릴 문장만 남깁니다."""
+    lines = (text or "").splitlines()
+    kept, dropped_any = [], False
+    for line in lines:
+        head = line.strip().lower()
+        if any(head.startswith(k) for k in _PREAMBLE):
+            dropped_any = True
+            continue
+        kept.append(line)
+
+    body = "\n".join(kept).strip()
+    # 머리말만 있고 본문이 없으면 원문을 그대로 씁니다. 빈 문자열을 돌려주면
+    # 위에서 `근거는 충분한데 문장을 못 만든 경우` 로 흘러 유보가 됩니다 —
+    # 답을 만들어 놓고 형식 때문에 유보하는 것은 더 나쁩니다.
+    if not body:
+        return (text or "").strip()
+    if dropped_any:
+        logger.info("답변 앞의 준비 문구를 걷어냈습니다")
+    return body
 
 
 def _finish(run_obj: AgentRun, *, answered: bool, text: str = "", reason: str = "",
