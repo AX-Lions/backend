@@ -701,9 +701,15 @@ def flow_edge_detail(request, edge_id):
         lookup = edge.lookups.first()
         if lookup is not None:
             body["lookup_id"] = str(lookup.id)
+    # 엣지에 실린 말이 먼저입니다. 문서 쪽 `delivery_context` 는 그 문서가 오갈
+    # 때의 대화라 화살표마다 같은 값이고, 화살표 열둘이 전부 같은 문장을 보여
+    # 주게 됩니다. 문서가 붙은 엣지는 문서 카드에 그대로 남습니다.
+    if edge.delivery_context:
+        body["delivery_context"] = edge.delivery_context
     if edge.document:
         body["document"] = DocumentRefSerializer(edge.document).data
-        body["delivery_context"] = edge.document.delivery_context
+        if not body["delivery_context"]:
+            body["delivery_context"] = edge.document.delivery_context
     if edge.agenda:
         body["agenda"] = AgendaSerializer(
             edge.agenda, context={"edge_map": {edge.agenda_id: [edge.id]}}).data

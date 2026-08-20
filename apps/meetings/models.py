@@ -338,6 +338,13 @@ class FlowEdge(UUIDModel, TimeStamped):
                                       related_name="flow_edges")
     agenda = models.ForeignKey(Agenda, on_delete=models.SET_NULL, null=True, blank=True,
                                related_name="flow_edges")
+    #: 이 화살표로 실제로 오간 말. `[{"participant_name", "utterance"}, …]`
+    #:
+    #: 우측 패널의 카드 본문이 이 값입니다. 전에는 **문서가 붙은 엣지에서만**
+    #: (`MeetingDocumentRef.delivery_context`) 나왔는데, 회의 화살표 대부분에는
+    #: 문서가 없어 카드에 제목과 `Discord` 만 남았습니다 — 회의록은 옆에
+    #: 열네 줄이 있는데 화면에서는 무슨 말이 오갔는지 볼 수가 없었습니다.
+    delivery_context = models.JSONField(default=list, blank=True)
     occurred_at = models.DateTimeField()
     opacity = models.FloatField(default=1.0)
 
