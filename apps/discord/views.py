@@ -619,6 +619,7 @@ def discord_messages(request):
     **원문을 그대로 둡니다.** 요약·해석은 뒤에서 합니다.
     """
     from apps.agent.tasks import run_agent_for_utterance
+    from apps.common.background import run_soon
     from apps.meetings.models import Meeting, MeetingStatus, Utterance
 
     # 스레드가 아닌 채널의 메시지는 조용히 흘려보냅니다.
@@ -660,8 +661,12 @@ def discord_messages(request):
     )
 
     # 대리인은 비동기로 깨웁니다. 봇은 기다리지 않습니다.
+    #
+    # `delay()` 를 직접 부르면 개발·시연 설정(`CELERY_TASK_ALWAYS_EAGER`)에서
+    # 이 요청 안에서 대리인이 통째로 돕니다. 봇의 HTTP 호출이 그동안 붙잡혀,
+    # 회의에서 다음 발언이 밀려 들어옵니다.
     try:
-        run_agent_for_utterance.delay(str(utterance.id))
+        run_soon(run_agent_for_utterance, str(utterance.id))
     except Exception:                                          # noqa: BLE001
         # 브로커가 없어도 발언은 이미 저장됐습니다. 회의록이 남는 것이 먼저입니다.
         logger.exception("대리인 기동 실패 utterance=%s", utterance.id)

@@ -30,6 +30,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from apps.agent.tasks import build_debate_points
+from apps.common.background import run_soon
 from apps.common.display import meeting_when, user_tz
 from apps.common.events import publish
 from apps.common.permissions import meeting_access
@@ -136,8 +137,12 @@ def register_absence(user, meeting_id):
     #
     # **기다리지 않습니다.** 여기서 터지면 등록 자체가 실패한 것으로 읽힙니다 —
     # 불참은 이미 저장돼 있는데 화면은 안 눌린 줄 압니다.
+    #
+    # `delay()` 를 직접 부르지 않는 이유 — 개발·시연은 `CELERY_TASK_ALWAYS_EAGER`
+    # 라 그 자리에서 동기로 돕니다. 논쟁점 예측은 모델을 여러 번 부르므로 불참
+    # 등록 응답이 60초를 넘겼습니다. 사용자는 버튼이 안 눌린 줄 알고 다시 누릅니다.
     try:
-        build_debate_points.delay(str(meeting.id))
+        run_soon(build_debate_points, str(meeting.id))
     except Exception:                                          # noqa: BLE001
         logger.exception("논쟁점 생성 호출 실패 meeting=%s", meeting.id)
 
