@@ -421,6 +421,7 @@ class Command(BaseCommand):
         self._seed_calendar(projects, users, meeting, now)
         self._seed_agent_chat(users, meeting, now)
         self._seed_debate(upcoming["디자인 리뷰"], users, owner, now)
+        self._seed_main_meeting_stances(meeting, owner, now)
         self._seed_briefing_cards(meeting, agendas, users, owner, now)
         self._seed_chat_rooms(team, users, owner, now)
         self._seed_away_handled(projects, users, owner, now)
@@ -1466,6 +1467,52 @@ class Command(BaseCommand):
                     {"key": "b", "title": "기존 일정 유지", "description": "다른 작업을 줄여서 맞춤"}],
             rationale="일정 수정 자동 승인 설정이 꺼져 있어 대리인이 스스로 정하지 않습니다.",
             evidence=[], created_by_agent=True)
+
+    def _seed_main_meeting_stances(self, meeting, owner, now):
+        """
+        /ask-bordo가 이 회의를 근거로 확실히 답하게 하는 입장 두 개.
+
+        회의 발언(Utterance)만으로는 근거가 약하다 — 실제 사실("8/18 확정",
+        "1주 연장 의견 모임")을 말한 사람이 유수인 본인이 아니라 임수연·
+        서재민이라, judge.py의 R2(본인 기록이 아닌 자료만 있음)에 걸려
+        유보로 빠지기 쉽다.
+
+        DebateStance는 owner_is_principal이 항상 True로 고정돼 있어(본인이
+        직접 적은 말이라 확실성이 가장 높다는 전제) 이 문제를 피해간다 —
+        회의에서 실제로 나온 두 쟁점(디자인 마감·개발 일정 연장)에 유수인이
+        확인 후 남긴 입장으로 채운다. 개발 일정 연장은 회의 중엔 대리인이
+        본인 확인이 필요하다며 유보했던 것을(#137 시드 발언 참고) 여기서
+        확인해 주는 것으로 이어진다.
+        """
+        from apps.meetings.models import DebatePoint, DebateStance
+
+        p1 = DebatePoint.objects.create(
+            meeting=meeting, source_key="design-deadline-confirm", order=1,
+            title="디자인 시안 마감을 8월 18일로 확정할까요?",
+            options=[{"key": "a", "title": "8/18 확정", "description": "회의에서 나온 대로 확정"}],
+            rationale="회의에서 임수연님이 8/18을 제안했고 참석자 전원이 동의했습니다.",
+            evidence=[{"kind": "utterance", "title": "임수연 발언",
+                      "body": "8월 18일까지 확정할게요. 그 전에 중간 리뷰도 한 번 잡겠습니다.",
+                      "at": (now - timedelta(hours=1)).isoformat(), "who": "임수연"}],
+            created_by_agent=True)
+        DebateStance.objects.create(
+            point=p1, user=owner, option_key="a",
+            body="8월 18일 마감 맞습니다. 중간 리뷰도 그 전에 한 번 더 볼게요.")
+
+        p2 = DebatePoint.objects.create(
+            meeting=meeting, source_key="dev-schedule-extend-approve", order=2,
+            title="개발 일정을 1주 연장할까요?",
+            options=[{"key": "a", "title": "1주 연장 승인", "description": "회의에서 나온 의견대로 진행"},
+                    {"key": "b", "title": "기존 일정 유지", "description": "연장 없이 진행"}],
+            rationale=("디자인 지연으로 개발 일정도 1주 미루자는 의견이 회의에서 모였고, "
+                      "최종 확정은 유수인님 확인이 필요합니다."),
+            evidence=[{"kind": "utterance", "title": "유수인의 Bordo 발언",
+                      "body": "최종 확정은 유수인님 확인 후에 다시 말씀드리겠습니다.",
+                      "at": (now - timedelta(minutes=50)).isoformat(), "who": "유수인의 Bordo"}],
+            created_by_agent=True)
+        DebateStance.objects.create(
+            point=p2, user=owner, option_key="a",
+            body="네, 1주 연장 승인합니다. 다음 마일스톤에 반영해주세요.")
 
     def _seed_briefing_cards(self, meeting, agendas, users, owner, now):
         """돌아온 사람이 보는 확인이 필요해요·나에게 요청한 내용 카드.
