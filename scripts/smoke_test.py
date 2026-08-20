@@ -130,10 +130,10 @@ call("GET", f"/meetings/{mid}/pending-questions")
 # 대리인 설정
 call("GET", "/me/agent/settings")
 r = call("PATCH", "/me/agent/settings", {"allow_midmeeting_question": True})
-print(f"     └ version {r['previous_version']} → {r['settings']['active_version']} · changed={list(r['changed'])}")
+print(f"     └ version {r['previous_version']} → {r['active_version']} · changed={list(r['changed'])}")
 r2 = call("PATCH", "/me/agent/settings", {"allow_midmeeting_question": True},
           headers={"Idempotency-Key": "idem-noop"}, label="PATCH settings (변화 없음)")
-print(f"     └ 변화 없으면 버전 유지: {r2['settings']['active_version']}")
+print(f"     └ 변화 없으면 버전 유지: {r2['active_version']}")
 call("GET", "/me/agent/settings/history")
 p = call("POST", "/me/agent/prompts", {"body": "간결하게 답하고 불확실하면 유보한다."}, expect=201)
 call("GET", "/me/agent/prompts")
