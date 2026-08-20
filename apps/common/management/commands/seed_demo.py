@@ -402,6 +402,7 @@ class Command(BaseCommand):
             body="8/18 마감이면 QA 기간이 3일뿐인데 괜찮을까요?")
 
         work_edges = self._seed_work_flow(main, users, now)
+        self._seed_work_summary(main)
 
         # 작업 플로우 화면을 시연에서 제일 많이 보여줄 예정이라, 나머지 두
         # 프로젝트도 비워두지 않는다. main 만큼 촘촘하지는 않지만(다섯 카테고리
@@ -733,6 +734,53 @@ class Command(BaseCommand):
             emit(days, ask)
 
         return drawn
+
+    def _seed_work_summary(self, project):
+        """
+        플로우 작업 모드 요약표 (#148). `_seed_work_flow()`가 만든 실제
+        FlowEdge를 라벨로 찾아서 문다 — 손으로 지어낸 id를 넣으면 판에 없는
+        화살표를 가리키게 되고, 눌러도 아무것도 강조 안 되는데 오류도 안 나서
+        알아챌 방법이 없다.
+        """
+        from apps.meetings.models import FlowCategory, FlowEdge, WorkSummary
+
+        def edge_id(label):
+            row = (FlowEdge.objects
+                   .filter(project=project, category=FlowCategory.WORK, label=label)
+                   .values_list("id", flat=True).first())
+            return str(row) if row else None
+
+        narrow_feedback = edge_id("우측 패널이 1280 이하에서 잘립니다. 너비를 다시 봐야 합니다.")
+        narrow_fix = edge_id("우측 패널 너비 수정")
+        api_change = edge_id("API 응답 구조 변경")
+        api_doc = edge_id("API 명세서 v2")
+        api_feedback = edge_id("응답 구조를 바꿨습니다. 기존 필드는 한 주만 같이 내려갑니다.")
+
+        WorkSummary.objects.update_or_create(project=project, defaults={
+            "one_line": ("이번 주는 회의 상세·플로우 화면 UI를 다듬고 API 응답 구조를 "
+                        "바꿨습니다. 모바일 레이아웃 문제는 아직 안 풀렸습니다."),
+            "discovered_issues": [
+                {"text": "우측 패널이 좁은 화면에서 잘리는 문제가 있었습니다.",
+                 "context": "1280px 이하에서 우측 패널이 잘린다는 피드백이 올라와 "
+                             "너비 값을 다시 잡았습니다.",
+                 "resolution": "우측 패널 너비 수정으로 반영했습니다.",
+                 "related_edge_ids": [i for i in (narrow_feedback, narrow_fix) if i]},
+                "로그인 실패 원인별 오류 메시지 구분이 아직 안 됐습니다.",
+                "회의 상세 화면은 모바일에서 좌우 스크롤이 남아 있습니다.",
+            ],
+            "changes": [
+                {"text": "API 응답 구조가 바뀌었습니다.",
+                 "context": "기존 필드는 한 주만 같이 내려가고, API 명세서 v2로 "
+                             "갱신됐습니다.",
+                 "related_edge_ids": [i for i in (api_change, api_doc, api_feedback) if i]},
+                "Discord 공지 문구에서 회의 시각이 두 번 들어가던 것을 확인했습니다.",
+            ],
+            "next_plans": [
+                "참여자 프로필 제작을 이어서 진행합니다.",
+                "검색 기능 구현을 마무리합니다.",
+                "Bordo 브리핑 개선 작업을 시작합니다.",
+            ],
+        })
 
     # ═══════════════════════════════════════════ 연합학술제 · 결제 모듈
 
