@@ -106,3 +106,63 @@ class AttachmentStorageTest(TestCase):
         r = self.upload(body=b"x" * 100)
         self.assertEqual(r.status_code, 400)
         self.assertFalse(ChatAttachment.objects.exists())
+
+
+@override_settings(MEDIA_ROOT=MEDIA)
+class AttachmentIdempotencyTest(TestCase):
+    """
+    같은 파일을 두 번 올리는 것 (「채팅에서 프론트가 못 붙이는 것들」 중 하나).
+
+    `Idempotency-Key` 는 계약에만 있고 동작하지 않습니다. 메시지는
+    `client_message_id` 로 막아 뒀는데 첨부에는 그런 키가 없어서, 같은 파일을
+    두 번 누르면 두 번 올라갔습니다.
+    """
+
+    def setUp(self):
+        self.me = User.objects.create_user(email="i@bordo.dev", password="x" * 10,
+                                           name="유수인")
+        self.mate = User.objects.create_user(email="j@bordo.dev", password="x" * 10,
+                                             name="최비성")
+        self.room = ChatRoom.objects.create(
+            type=RoomType.DIRECT, dedupe_key=direct_key(self.me.id, self.mate.id),
+            created_by=self.me)
+        for u in (self.me, self.mate):
+            RoomMember.objects.create(room=self.room, user=u)
+        self.client = APIClient()
+        self.client.force_authenticate(self.me)
+
+    def upload(self, key=None, body=b"hello"):
+        payload = {"file": SimpleUploadedFile("설계안.txt", body,
+                                              content_type="text/plain")}
+        if key:
+            payload["client_upload_id"] = key
+        return self.client.post(
+            f"/api/v1/chat/rooms/{self.room.id}/attachments", payload,
+            format="multipart")
+
+    def test_same_key_gives_the_first_one_back(self):
+        first = self.upload(key="up-1")
+        second = self.upload(key="up-1")
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.data["id"], first.data["id"])
+        self.assertEqual(ChatAttachment.objects.count(), 1)
+
+    def test_different_keys_upload_twice(self):
+        self.upload(key="up-1")
+        self.upload(key="up-2")
+        self.assertEqual(ChatAttachment.objects.count(), 2)
+
+    def test_no_key_still_uploads(self):
+        """이 키를 모르는 클라이언트가 업로드를 통째로 못 하게 되면 안 됩니다."""
+        self.assertEqual(self.upload().status_code, 201)
+        self.assertEqual(self.upload().status_code, 201)
+        self.assertEqual(ChatAttachment.objects.count(), 2)
+
+    def test_someone_elses_key_is_not_reused(self):
+        """전역으로 잠그면 두 사람이 같은 열쇠를 만들었을 때 남의 첨부가 돌아옵니다."""
+        mine = self.upload(key="up-1")
+        self.client.force_authenticate(self.mate)
+        theirs = self.upload(key="up-1")
+        self.assertEqual(theirs.status_code, 201)
+        self.assertNotEqual(theirs.data["id"], mine.data["id"])

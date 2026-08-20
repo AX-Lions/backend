@@ -250,6 +250,12 @@ def sidebar(request):
             project_nodes.append({
                 "project_id": str(p.id), "project_name": p.name,
                 "group_chat_room_id": str(proom.id) if proom else None,
+                # 방 요약을 함께 싣습니다. id 만 주면 「모두 채팅 바로가기」로
+                # 연 방의 제목을 대화창이 한 번 더 읽어야 하고, 이 노드의
+                # 미읽음 합계에서 단체방 몫을 뺄 수가 없어 사이드바를 통째로
+                # 다시 읽게 됩니다.
+                "group_chat_room": (RoomSummarySerializer(proom, context=ctx).data
+                                    if proom else None),
                 "unread_count": p_unread, "has_important": p_important,
                 "rooms": RoomSummarySerializer(sub, many=True, context=ctx).data,
             })
@@ -259,6 +265,8 @@ def sidebar(request):
         tree.append({
             "team_id": str(team_id), "team_name": team.name,
             "group_chat_room_id": str(team_room.id) if team_room else None,
+            "group_chat_room": (RoomSummarySerializer(team_room, context=ctx).data
+                                if team_room else None),
             "unread_count": team_unread, "has_important": team_important,
             "projects": project_nodes,
         })
@@ -852,6 +860,18 @@ def attachments(request, room_id):
     if not f:
         raise BordoError("VALIDATION_ERROR", "file 이 필요합니다.")
 
+    # 같은 파일을 두 번 올리지 않습니다.
+    #
+    # 화면이 만들어 보낸 열쇠로 이미 올라간 것을 찾으면 그것을 그대로
+    # 돌려줍니다. 없으면 400 을 내지 않고 그냥 새로 올립니다 — 이 키를
+    # 모르는 클라이언트가 업로드를 통째로 못 하게 되면 안 됩니다.
+    upload_key = str(request.data.get("client_upload_id") or "").strip()[:64]
+    if upload_key:
+        seen = ChatAttachment.objects.filter(uploader=request.user,
+                                             client_upload_id=upload_key).first()
+        if seen is not None:
+            return Response(AttachmentSerializer(seen).data, status=200)
+
     limit = dj_settings.CHAT_ATTACHMENT_MAX_BYTES
     if f.size > limit:
         # 상한이 없으면 실수로 올린 큰 파일 하나가 디스크를 채우고, 그때부터
@@ -866,6 +886,7 @@ def attachments(request, room_id):
         mime_type=mime,
         kind=(ChatAttachment.Kind.IMAGE if mime.startswith("image/")
               else ChatAttachment.Kind.FILE),
+        client_upload_id=upload_key,
         expires_at=timezone.now() + timedelta(hours=ATTACHMENT_TTL_HOURS))
 
     # 파일 이름을 저장 경로에 쓰지 않습니다.
