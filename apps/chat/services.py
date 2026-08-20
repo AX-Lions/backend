@@ -4,10 +4,16 @@
 단체방(TEAM · PROJECT)은 **없으면 그때 만듭니다.** 팀·프로젝트를 만드는 쪽에서
 같이 만들면 좋겠지만, 그러면 이미 만들어진 팀들에는 방이 영영 안 생깁니다.
 조회 시점에 채우면 기존 데이터도 자동으로 메워집니다.
+
+찾고-없으면-만드는 자리는 `apps/common/db.py` 의 `ensure_row()` 하나를 씁니다.
+세 함수가 각자 `try/IntegrityError` 를 손으로 적고 있었는데, 그 모양이 갈리면
+**어떤 방은 소프트 삭제된 행을 되살리고 어떤 방은 제약 위반으로 터집니다.**
+`ChatRoom` 은 지운 방이 유니크 제약을 그대로 차지하고 있어(1:1 방은 한쪽이
+지워도 상대 기록이 남아야 합니다) 이 차이가 실제로 드러납니다.
 """
-from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from apps.common.db import ensure_row
 from apps.orgs.models import Project, ProjectMember, Team, TeamMember
 
 from .models import ChatRoom, RoomMember, RoomType
@@ -34,30 +40,18 @@ def _sync_members(room, user_ids):
 
 
 def ensure_team_room(team):
-    room = ChatRoom.all_objects.filter(type=RoomType.TEAM, team=team).first()
-    if room is None:
-        try:
-            with transaction.atomic():
-                room = ChatRoom.objects.create(
-                    type=RoomType.TEAM, team=team, team_name=team.name,
-                    title=team.name)
-        except IntegrityError:                 # 동시에 두 번 들어온 경우
-            room = ChatRoom.all_objects.get(type=RoomType.TEAM, team=team)
+    room, _ = ensure_row(ChatRoom, type=RoomType.TEAM, team=team,
+                         defaults={"team_name": team.name, "title": team.name})
     member_ids = list(TeamMember.objects.filter(team=team).values_list("user_id", flat=True))
     return _sync_members(room, member_ids)
 
 
 def ensure_project_room(project):
-    room = ChatRoom.all_objects.filter(type=RoomType.PROJECT, project=project).first()
-    if room is None:
-        try:
-            with transaction.atomic():
-                room = ChatRoom.objects.create(
-                    type=RoomType.PROJECT, project=project, project_name=project.name,
-                    team_id=project.team_id, team_name=project.team_name,
-                    title=project.name)
-        except IntegrityError:
-            room = ChatRoom.all_objects.get(type=RoomType.PROJECT, project=project)
+    room, _ = ensure_row(ChatRoom, type=RoomType.PROJECT, project=project,
+                         defaults={"project_name": project.name,
+                                   "team_id": project.team_id,
+                                   "team_name": project.team_name,
+                                   "title": project.name})
 
     # 프로젝트 이름이 바뀌면 사이드바 표기도 따라가야 합니다.
     if room.project_name != project.name or room.team_name != project.team_name:
@@ -75,16 +69,9 @@ def ensure_project_room(project):
 
 def ensure_ai_room(user):
     """`나의 AI 대리인` 방. 사용자당 하나, 팀과 무관합니다."""
-    key = f"ai:{user.id}"
-    room = ChatRoom.all_objects.filter(type=RoomType.AI, dedupe_key=key).first()
-    if room is None:
-        try:
-            with transaction.atomic():
-                room = ChatRoom.objects.create(
-                    type=RoomType.AI, dedupe_key=key, title="나의 AI 대리인",
-                    agent_owner=user, created_by=user)
-        except IntegrityError:
-            room = ChatRoom.all_objects.get(type=RoomType.AI, dedupe_key=key)
+    room, _ = ensure_row(ChatRoom, type=RoomType.AI, dedupe_key=f"ai:{user.id}",
+                         defaults={"title": "나의 AI 대리인",
+                                   "agent_owner": user, "created_by": user})
     RoomMember.objects.get_or_create(room=room, user=user)
     return room
 
