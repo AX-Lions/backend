@@ -42,6 +42,7 @@ class AskDuplicateTest(TestCase):
         class Outcome:
             def __init__(self, run):
                 self.run, self.answered, self.reason, self.text = run, True, "", "네"
+                self.evidence = []
         return Outcome(run)
 
     def test_the_second_one_is_refused_while_the_first_runs(self):

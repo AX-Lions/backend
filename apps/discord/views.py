@@ -720,6 +720,14 @@ def discord_presence(request):
 #: 실행이 끝나면 코드가 바로 풀어 주므로 이 값은 **비정상 종료 대비**입니다.
 _ASK_LOCK_TTL_SEC = 150
 
+#: react.py의 evidence source_type → 화면에 보여줄 한국어 라벨.
+#: `stance` 는 회의 전에 미리 적어 둔 입장이라 다른 다섯과 성격이 다르지만,
+#: "무엇을 보고 답했는지" 를 보여주는 목적은 같아서 같은 목록에 둔다.
+_EVIDENCE_LABEL = {
+    "work": "작업", "plan": "계획", "thought": "생각",
+    "meeting": "회의", "document": "문서", "stance": "입장",
+}
+
 
 def _ask_lock_key(target, asker_id, question: str) -> str:
     """
@@ -801,6 +809,15 @@ def deputy_ask(request):
         "answered": outcome.answered,
         "reason": outcome.reason,
         "body": outcome.text,
+        # 무엇을 보고 답했는지. AgentRun.evidence에는 이미 있었는데
+        # /ask-bordo 응답에는 안 실려 있어서 Discord에서는 안 보였다.
+        # 화면 문자열은 서버가 완성해 내려준다는 원칙대로, source_type을
+        # 그대로 주지 않고 한국어 라벨로 바꿔서 준다.
+        "evidence": [
+            {"label": _EVIDENCE_LABEL.get(e.get("source_type"), e.get("source_type") or ""),
+             "title": e.get("title_snapshot") or ""}
+            for e in (outcome.evidence or [])
+        ],
     }, status=200 if outcome.answered else 202)
 
 
