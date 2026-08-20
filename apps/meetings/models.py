@@ -410,6 +410,30 @@ class MeetingSummary(models.Model):
         db_table = "meeting_summary"
 
 
+class WorkSummary(models.Model):
+    """
+    플로우 캔버스 가운데의 3열 표 — 작업 모드(#148).
+
+    `MeetingSummary` 와 응답 모양을 맞춘다(`discovered_issues` · `changes` ·
+    `next_plans` · `one_line`) — 화면의 `toSummaryColumns` 가 그 모양을
+    그대로 읽는다. 회의처럼 고정된 사건이 아니라 **기간이 스코프**라
+    `Meeting` 대신 `Project` 에 건다.
+
+    `main_opinions` 은 없다 — 그건 회의 발언 요약이고 작업 모드에는 발언이
+    없다.
+    """
+    project = models.OneToOneField("orgs.Project", on_delete=models.CASCADE,
+                                   primary_key=True, related_name="work_summary")
+    discovered_issues = models.JSONField(default=list, blank=True)
+    changes = models.JSONField(default=list, blank=True)
+    next_plans = models.JSONField(default=list, blank=True)
+    one_line = models.CharField(max_length=300, blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "work_summary"
+
+
 class AiBriefing(TimeStamped):
     """
     회의 × 사람.
