@@ -321,6 +321,16 @@ class Command(BaseCommand):
             defaults={"category": "backend", "priority": Priority.P2,
                       "status": WorkStatus.TODO,
                       "planned_start_at": now + timedelta(days=3)})
+        # 문도윤 몫. **대리인을 둘 돌릴 때 필요합니다** — 사람이 하나뿐인 촬영에서는
+        # 강태현이 두 부재자의 대리인에게 각각 묻습니다. 문도윤에게 근거가 작업
+        # 하나뿐이면 그 대리인은 진행률만 말하고 나머지는 유보로 흘러, 화면에
+        # 「관련 기록을 찾지 못해」가 두 번 뜹니다.
+        PlanItem.objects.get_or_create(
+            project=project, owner=member, title="명세 확정 다음 날 연동 시작",
+            defaults={"category": "frontend", "priority": Priority.P1,
+                      "status": WorkStatus.TODO,
+                      "planned_start_at": now + timedelta(days=1),
+                      "planned_end_at": now + timedelta(days=4)})
 
         # 확신이 높고 논의가 필요한 생각 — 회의 전 준비 화면에서 논쟁점 예측의
         # 재료가 됩니다.
