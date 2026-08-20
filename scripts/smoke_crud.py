@@ -59,6 +59,10 @@ def section(name):
     print(f"\n─── {name}")
 
 
+#: 실행마다 새로 만듭니다. 고정값이면 두 번째 실행부터 첫 전송이 중복으로
+#: 잡혀, 지난 실행이 남긴 메시지(중요 확인이 이미 끝난)를 돌려받습니다.
+CLIENT_MSG_ID = f"cli-{uuid.uuid4().hex[:8]}"
+
 # ═══════════════════════════════════════════ 준비
 section("로그인 · 스코프")
 login = call("POST", "/auth/login",
@@ -223,9 +227,9 @@ call("POST", "/chat/rooms", {"type": "DIRECT", "member_ids": [MY_ID]}, expect=40
 
 m1 = call("POST", f"/chat/rooms/{ROOM}/messages",
           {"body": "확인 부탁드립니다", "is_important": True,
-           "client_message_id": "cli-001"}, expect=201, label="메시지 전송")
+           "client_message_id": CLIENT_MSG_ID}, expect=201, label="메시지 전송")
 dupe = call("POST", f"/chat/rooms/{ROOM}/messages",
-            {"body": "확인 부탁드립니다", "client_message_id": "cli-001"},
+            {"body": "확인 부탁드립니다", "client_message_id": CLIENT_MSG_ID},
             expect=200, label="같은 client_message_id 재전송 → 기존 메시지")
 assert m1["id"] == dupe["id"], "중복 메시지가 생겼습니다"
 
@@ -287,9 +291,16 @@ if MTG:
     call("GET", f"/meetings/{MTG}/flow?content_types=SCHEDULE,CONCLUSION",
          label="일정+결론 필터")
 
-    br = call("GET", f"/meetings/{MTG}/ai-briefing", label="AI 브리핑 (B 담당 · 조회만)")
-    print(f"     활용 {len(br['used_answers'])} · 유보 {len(br['deferred_answers'])}"
-          f" · 답변필요 {len(br['needs_answer'])}")
+    # 브리핑은 **대리 참석한 회의에만** 있습니다. 프로젝트를 고르는 규칙이
+    # "회의가 있는 첫 프로젝트" 라, 대리 참석이 없던 회의가 잡히면 404 가 정상입니다 —
+    # 그때도 실패로 찍으면 스모크가 늘 빨간 줄을 하나 달고 다니게 됩니다.
+    br = call("GET", f"/meetings/{MTG}/ai-briefing", expect=(200, 404),
+              label="AI 브리핑 (B 담당 · 조회만)")
+    if "used_answers" in br:
+        print(f"     활용 {len(br['used_answers'])} · 유보 {len(br['deferred_answers'])}"
+              f" · 답변필요 {len(br['needs_answer'])}")
+    else:
+        print("     이 회의에는 대리 참석자가 없어 브리핑이 없습니다 (정상)")
 
 home = call("GET", "/home", label="홈")
 assert "shortcuts" in home, "shortcuts (Zero/Discord 바로가기) 가 없습니다"

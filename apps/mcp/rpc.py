@@ -43,6 +43,27 @@ HEADER_MISMATCH, UNSUPPORTED_VERSION = -32020, -32022
 INTERNAL_ERROR_TEXT = "서버 오류로 처리하지 못했습니다. 잠시 후 다시 시도하십시오."
 
 
+#: modern 결과 봉투에 붙는 캐시 메타.
+#:
+#: `2026-07-28` 은 결과마다 **얼마나 캐시해도 되는지**를 서버가 말하게 합니다.
+#: 빠뜨리면 클라이언트가 스키마 검증에서 응답을 통째로 버립니다 — 서버는
+#: `connected` 로 뜨는데 도구가 0개인 상태가 그것입니다.
+#:
+#: 둘 다 보수적으로 답합니다.
+#:
+#: - `ttlMs = 0` — 캐시하지 마십시오. 도구 목록은 고정이지만 `tools/call` 은
+#:   **쓰기**라 한 번이라도 재사용되면 기록이 어긋납니다. 목록만 따로 늘려 봐야
+#:   아낄 왕복이 연결당 한 번뿐입니다.
+#: - `cacheScope = "private"` — 응답이 Bearer 토큰의 주인 기준입니다.
+#:   `public` 으로 주면 중간 캐시가 **남의 결과를 나에게** 줄 수 있습니다.
+CACHE_META = {"ttlMs": 0, "cacheScope": "private"}
+
+
+def _modern_result(body: dict) -> dict:
+    """modern 결과 봉투. 한 곳에서만 만듭니다 — 나눠 쓰면 한쪽만 고쳐집니다."""
+    return {"resultType": "complete", **CACHE_META, **body}
+
+
 @dataclass
 class RpcResponse:
     status: int
@@ -109,19 +130,27 @@ def _modern(request, id_, method, params, body_version, ctx) -> RpcResponse:
                                  status=400, data=mismatch)
 
     if method == "server/discover":
-        return RpcResponse.ok(id_, {
-            "resultType": "complete",
+        return RpcResponse.ok(id_, _modern_result({
             "supportedVersions": SUPPORTED_VERSIONS,
             "capabilities": {"tools": {}},
             "instructions": instructions_for(ctx.user),
             "_meta": {"io.modelcontextprotocol/serverInfo": SERVER_INFO},
-        })
+        }))
     if method == "ping":
         return RpcResponse.ok(id_, {})
     if method == "tools/list":
-        return RpcResponse.ok(id_, {"tools": registry.catalog()})
+        # `resultType` 은 **modern 에서 필수**입니다.
+        #
+        # 이걸 빠뜨리면 Claude Code 가 목록을 통째로 거부해 `/mcp` 에 서버는
+        # `connected` 로 뜨는데 **도구가 0개**입니다. 붙은 것처럼 보여서 원인을
+        # 찾기가 더 어렵습니다. `server/discover` 에만 넣어 뒀던 것이 문제였습니다.
+        #
+        # 페이지를 나누지 않으므로 언제나 `complete` 입니다 — 도구가 셋이라
+        # 나눌 이유가 없고, `partial` 로 주면 클라이언트가 커서를 들고 한 번 더
+        # 묻는데 줄 것이 없습니다.
+        return RpcResponse.ok(id_, _modern_result({"tools": registry.catalog()}))
     if method == "tools/call":
-        return _call(id_, params, ctx)
+        return _call(id_, params, ctx, modern=True)
     if method.startswith("notifications/"):
         return RpcResponse.accepted()
     # modern 에서는 모르는 method 가 HTTP 404 입니다 — 구현 안 된 서버와 구별하는 규칙.
@@ -164,7 +193,7 @@ def _legacy(id_, method, params, ctx) -> RpcResponse:
 
 
 # ─────────────────────────────────────────── tools/call
-def _call(id_, params, ctx) -> RpcResponse:
+def _call(id_, params, ctx, *, modern=False) -> RpcResponse:
     name = params.get("name")
     tool = registry.get(name) if isinstance(name, str) else None
     if tool is None:
@@ -184,4 +213,8 @@ def _call(id_, params, ctx) -> RpcResponse:
     except Exception:                                  # noqa: BLE001
         logger.exception("MCP 도구 실패: %s user=%s", name, ctx.user.id)
         result = ToolResult.fail(INTERNAL_ERROR_TEXT)
-    return RpcResponse.ok(id_, result.to_rpc())
+
+    body = result.to_rpc()
+    if modern:
+        body = _modern_result(body)
+    return RpcResponse.ok(id_, body)

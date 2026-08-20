@@ -116,7 +116,43 @@ def record(*, run, question: str, reason_message: str,
             question_obj.chat_room_id = room_id
             question_obj.save(update_fields=["chat_room_id", "updated_at"])
 
+    if created:
+        _post_to_room(question_obj, run.user)
     return question_obj
+
+
+def _post_to_room(question, owner) -> None:
+    """
+    유보한 질문을 답변할 방에 **한 줄로 남깁니다.**
+
+    ## 방만 만들어 두면 아무도 못 찾습니다
+
+    전에는 방만 잡아 두고 메시지를 안 남겼습니다. 그런데 채팅 목록은 **말이 오간
+    방**을 그리므로, 비어 있는 방은 사이드바에 뜨지 않습니다 — 돌아온 사람은
+    브리핑에서 「답변이 필요해요」를 보고도 **답을 쓸 자리를 찾지 못합니다.**
+
+    보낸 이는 대리인입니다(`is_agent`). 자리를 비운 사이 대신 받아 둔 말이라
+    `answered_while_away` 도 함께 답니다 — 「자리 비운 사이 Bordo가 나눈 대화」
+    묶음이 이 값으로 갈립니다.
+    """
+    if question.chat_room_id is None:
+        return
+    try:
+        from apps.chat.models import ChatMessage
+        from apps.chat.services import touch
+
+        from .flow import agent_display_name
+
+        msg = ChatMessage.objects.create(
+            room_id=question.chat_room_id, sender=owner,
+            sender_name=agent_display_name(owner),
+            is_agent=True, answered_while_away=True,
+            body=question.body, pending_question=question)
+        # 목록의 최근 시각을 올려 줘야 사이드바 위쪽으로 올라옵니다.
+        touch(msg.room, msg.sent_at)
+    except Exception:                                          # noqa: BLE001
+        # 유보 기록이 먼저입니다. 방에 못 남겨도 질문은 브리핑에 남습니다.
+        logger.exception("유보 질문 전달 실패 question=%s", question.id)
 
 
 def _answer_room_id(owner, asker):

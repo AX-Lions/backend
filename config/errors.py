@@ -54,6 +54,7 @@ ERROR_CODES = {
     "MEETING_ALREADY_STARTED":       (409, "이미 시작된 회의입니다.", False),
     "MEETING_ALREADY_ENDED":         (409, "이미 종료된 회의입니다.", False),
     "MEETING_LOCKED":                (409, "진행 중이거나 종료된 회의는 수정할 수 없습니다.", False),
+    "MEETING_NOT_DELEGATED":         (409, "대리 참석을 먼저 등록하십시오.", False),
     # 태스크 / 승인
     "APPROVAL_REQUIRED":             (409, "먼저 처리해야 할 것이 있습니다.", False),
     "REFERENCED_BY_OTHERS":          (409, "다른 자원이 참조하고 있어 삭제할 수 없습니다.", False),

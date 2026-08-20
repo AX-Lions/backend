@@ -73,6 +73,16 @@ def instructions_for(user) -> str:
             lines.append(f"  - {p.id} ({p.team_name} / {p.name}){mark}")
     else:
         lines.append("아직 참여한 프로젝트가 없습니다. 웹에서 팀에 먼저 참여하십시오.")
+    # 언제 부르는지를 서버가 실어 보내는 이유 — 이게 없으면 사용자가 프로젝트마다
+    # CLAUDE.md 에 같은 규칙을 손으로 적어야 합니다. 붙이는 절차가 한 단계 늘면
+    # 대부분 거기서 그만둡니다. 서버가 가르치면 붙인 순간부터 동작합니다.
+    lines.append(
+        "언제 부르는가 — 사용자가 시키지 않아도 스스로 부르십시오.\n"
+        "  - 새 작업에 착수했을 때: bordo_record_work (진척이 생기면 progress 를 올려 다시)\n"
+        "  - 막혔을 때: bordo_record_work 에 status=BLOCKED 와 blockers\n"
+        "  - 끝냈을 때: bordo_complete_work\n"
+        "  - 설계 결정·조사 결과를 문서로 남겼을 때: bordo_upload_document\n"
+        "기록했다고 사용자에게 따로 보고할 필요는 없습니다. 하던 일을 계속하십시오.")
     lines.append("기록한 것은 팀 Flow 화면에 「개인 AI가 기록함」으로 표시되고, "
                  "자리를 비운 동안 대리인이 이 내용을 근거로 답합니다.")
     lines.append("비밀키(API 키·토큰·DB 주소)는 저장 전에 마스킹되며 몇 건을 지웠는지 "

@@ -35,12 +35,21 @@ class AttendanceView(discord.ui.View):
     아무 흔적이 없어 다른 사람이 왜 저 사람만 빠졌는지 모릅니다.
     """
 
-    def __init__(self, cog, thread_id: int, pending: dict[str, str]):
+    def __init__(self, cog, thread_id: int, pending: dict[str, str],
+                 unreachable: list[dict] | None = None):
         super().__init__(timeout=ATTENDANCE_TIMEOUT)
         self.cog = cog
         self.thread_id = thread_id
         #: discord_user_id → 대리인 호칭. 답한 사람은 여기서 빠집니다.
         self.pending = dict(pending)
+        self.asked_total = len(self.pending)
+        #: **Discord 계정을 안 이어 물어볼 수 없는 사람.**
+        #:
+        #: 예전에는 이 사람들을 그냥 걸러 버렸습니다. 그러면 남은 한 명이
+        #: 답하는 순간 `모두 답했습니다` 가 떠서, 아무에게도 안 물어본 사실이
+        #: 화면에서 사라집니다 — 그 사람은 `PENDING` 으로 남아 회의에서
+        #: 이름을 불러도 대리인이 안 깨어납니다.
+        self.unreachable = list(unreachable or [])
         self.message: discord.Message | None = None
 
     async def _answer(self, interaction: discord.Interaction, *, delegated: bool):
@@ -73,7 +82,7 @@ class AttendanceView(discord.ui.View):
 
         if not self.pending:
             self.stop()
-            await self._close("모두 답했습니다.")
+            await self._close(self._done_note())
 
     @discord.ui.button(label="직접 참석합니다", style=discord.ButtonStyle.secondary)
     async def attend(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -99,11 +108,27 @@ class AttendanceView(discord.ui.View):
                 continue
             handed.append((uid, agent))
 
-        await self._close("시간이 지나 자동으로 넘겼습니다.")
+        await self._close(self._done_note("시간이 지나 자동으로 넘겼습니다."))
         if handed:
             names = ", ".join(f"<@{u}> 님 대신 **{a or 'Bordo'}**" for u, a in handed)
             await self.cog.announce_to_thread(
                 self.thread_id, f"🤖 답이 없어 {names} 가 참석합니다.")
+
+    def _done_note(self, note: str = "") -> str:
+        """
+        참석 확인 결과 문구.
+
+        **`모두` 는 실제로 전원에게 물어봤을 때만 씁니다.** 전에는 `pending` 이
+        비면 무조건 `모두 답했습니다` 였는데, `pending` 은 처음부터 *물어볼 수
+        있었던 사람*의 부분집합이라 그 말이 근거보다 넓었습니다. 물어보지도 못한
+        사람이 답한 것처럼 읽혀, 등록을 깜빡한 것을 이 문구가 덮어 줬습니다.
+        """
+        note = note or f"물어본 {self.asked_total}명이 모두 답했습니다."
+        if self.unreachable:
+            names = ", ".join(p.get("name") or "이름 없음" for p in self.unreachable)
+            note += (f" ⚠️ {names} 님은 Discord 계정이 연결되지 않아 "
+                     f"여기서 확인하지 못했습니다.")
+        return note
 
     async def _close(self, note: str):
         if self.message is None:
@@ -299,11 +324,15 @@ class MeetingCog(commands.Cog):
             f"`/meeting-end`를 실행하면 Backend가 요약을 정리합니다."
         )
 
-        delegated = [p["discord_user_id"] for p in participants
-                    if p.get("delegated") and p.get("discord_user_id")]
+        # 멘션할 수 있으면 멘션하고, 계정을 안 이었으면 **이름으로** 적습니다.
+        # 예전에는 `discord_user_id` 가 없으면 이 줄에서 통째로 빠져, 대리
+        # 참석이 켜져 있는데도 회의 시작 안내에 그 사람이 안 보였습니다.
+        delegated = [(f"<@{p['discord_user_id']}>" if p.get("discord_user_id")
+                      else (p.get("name") or "이름 없음"))
+                     for p in participants if p.get("delegated")]
 
         if delegated:
-            mentions = ", ".join(f"<@{uid}>" for uid in delegated)
+            mentions = ", ".join(delegated)
             announcement += f"\n🤖 대리 참석이 켜져 있어 AI 대리인이 대신 참석합니다: {mentions}"
 
         await thread.send(announcement)
@@ -332,22 +361,66 @@ class MeetingCog(commands.Cog):
             log.warning("참석 대상 조회 실패 thread=%s", thread.id)
             return
 
-        pending = {
-            p["discord_user_id"]: p.get("agent_name") or ""
-            for p in result.get("results", [])
-            if p.get("discord_user_id") and not p.get("asked")
-        }
+        # 아직 안 정한 사람 = 물어볼 대상. **Discord 계정 유무로 버리지 않습니다.**
+        # 예전에는 여기서 `if p.get("discord_user_id")` 로 걸렀는데, 그러면
+        # 계정을 안 이은 팀원이 목록에서 조용히 사라져 `PENDING` 으로 남습니다 —
+        # 회의에서 이름을 불러도 대리인이 깨어나지 않습니다.
+        todo = [p for p in result.get("results", []) if not p.get("asked")]
+        pending = {p["discord_user_id"]: p.get("agent_name") or ""
+                   for p in todo if p.get("discord_user_id")}
+        unreachable = [p for p in todo if not p.get("discord_user_id")]
+
+        # 못 물어보는 사람은 **기다릴 이유가 없습니다.** 타이머는 팝업을 보고도
+        # 안 누른 사람을 위한 것이고, 이쪽은 팝업이 닿지도 않습니다. 회의가
+        # 시작된 이상 그 자리를 비워 두면 그 사람 몫이 통째로 빠집니다.
+        handed = await self._hand_over_unreachable(thread, unreachable)
+
         if not pending:
             return
 
-        view = AttendanceView(self, thread.id, pending)
+        view = AttendanceView(self, thread.id, pending, unreachable=unreachable)
         mentions = " ".join(f"<@{uid}>" for uid in pending)
+        note = ""
+        if handed:
+            note = ("\n⚠️ " + ", ".join(handed)
+                    + " 님은 Discord 계정이 연결되지 않아 물어보지 못했습니다 — "
+                      "Bordo 가 대신 참석합니다.")
         view.message = await thread.send(
             f"{mentions}\n"
             f"회의가 시작됐습니다. 직접 참석하시나요?\n"
-            f"**{int(ATTENDANCE_TIMEOUT)}초 안에 답이 없으면 Bordo 가 대신 참석합니다.**",
+            f"**{int(ATTENDANCE_TIMEOUT)}초 안에 답이 없으면 Bordo 가 대신 참석합니다.**"
+            f"{note}",
             view=view,
         )
+
+    async def _hand_over_unreachable(self, thread, rows: list[dict]) -> list[str]:
+        """
+        물어볼 수 없는 사람을 대리 참석으로 넘기고, 넘긴 이름을 돌려준다.
+
+        ## 묻지도 않고 대리인을 세워도 되는가
+
+        `AttendanceView` 머리말에 **묻지도 않고 대리 처리하는 것이 제일 나쁜
+        실패**라고 적혀 있습니다. 그 말은 여전히 맞지만, 여기서 아무것도 안 하면
+        더 나쁜 일이 벌어집니다 — 그 사람은 회의에서 이름을 불러도 대리인이
+        안 깨어나고, 회의가 끝난 뒤 브리핑도 안 생깁니다(브리핑은 대리 참석자
+        에게만). 자리를 비운 것도 아니고 참석한 것도 아닌 상태로 통째로 빠집니다.
+
+        그래서 넘기되 **넘겼다는 사실을 스레드에 적습니다.** 조용히 넘기는 것과
+        적고 넘기는 것은 다릅니다.
+        """
+        handed = []
+        for p in rows:
+            result = await self.backend.post(
+                "/internal/v1/meetings/absence",
+                json={"thread_id": str(thread.id), "user_id": p.get("user_id"),
+                      "delegated": True},
+            )
+            if result is None or get_error(result):
+                log.warning("미연동 대리 전환 실패 thread=%s user=%s",
+                            thread.id, p.get("user_id"))
+                continue
+            handed.append(p.get("name") or "이름 없음")
+        return handed
 
     # --------------------------------------------------
     # /meeting-end

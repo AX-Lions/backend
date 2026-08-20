@@ -467,7 +467,9 @@ class BriefingFlowTest(Base):
         briefing.build_for_user(self.meeting, self.absent,
                                 client=FakeLLM(LLMResponse(text="정리했습니다")))
         e = FlowEdge.objects.get(label="부재중 브리핑")
-        self.assertEqual(e.content_type, FlowContentType.CONCLUSION)
+        # `결론` 이 아닙니다. 브리핑은 대리 참석자가 있으면 늘 나가므로,
+        # 결론으로 두면 **아무것도 정해지지 않은 회의에도 `결론 1`** 이 뜹니다.
+        self.assertEqual(e.content_type, FlowContentType.ETC)
         self.assertEqual(e.surface, Surface.SERVICE)
         self.assertEqual(e.to_nodes[0]["name"], "서재민")
 

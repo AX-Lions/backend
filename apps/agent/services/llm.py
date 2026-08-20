@@ -41,7 +41,17 @@ _BACKOFF_BASE = 1.0     # 1초 → 2초
 #:
 #: 회의는 사람이 말하는 속도로 흘러갑니다. 20초를 넘겨 온 답은 이미 늦어서
 #: 쓸 데가 없습니다. 늦게 오느니 빨리 실패하고 다음 발언을 받는 편이 낫습니다.
-_TIMEOUT_SEC = float(os.environ.get("OPENAI_TIMEOUT_SEC", "20"))
+_TIMEOUT_SEC = float(os.environ.get("OPENAI_TIMEOUT_SEC", "45"))
+
+#: 추론 모델(gpt-5 계열)의 생각 깊이.
+#:
+#: 기본값이 `medium` 인데, 논쟁점 예측처럼 프롬프트가 긴 호출은 **22초**가 걸려
+#: 위 제한을 그대로 넘겼습니다(세 번 다 실패 → 예측이 통째로 빕니다).
+#: `low` 로 두면 같은 프롬프트가 10초에 끝나고 답의 모양은 그대로입니다.
+#:
+#: 회의는 사람이 말하는 속도로 흘러갑니다. 더 깊이 생각한 답이 20초 늦게 오면
+#: 그 사이 대화가 넘어가 쓸 데가 없습니다.
+_REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "low")
 
 
 @dataclass
@@ -141,6 +151,10 @@ class LLMClient:
             payload = [{"role": "system", "content": system}] + payload
 
         kwargs = {"model": self._model, "messages": payload}
+        # `reasoning_effort` 는 추론 모델만 받습니다. gpt-4 계열에 실어 보내면
+        # 400 으로 통째로 실패합니다.
+        if _REASONING_EFFORT and self._model.startswith("gpt-5"):
+            kwargs["reasoning_effort"] = _REASONING_EFFORT
         oa_tools = _to_openai_tools(tools)
         if oa_tools:
             kwargs["tools"] = oa_tools

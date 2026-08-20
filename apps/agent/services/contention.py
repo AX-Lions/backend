@@ -101,6 +101,18 @@ def _meeting_facts(meeting, tz, since) -> list[dict]:
             .select_related("meeting")
             .order_by("-spoken_at", "-id")[:MAX_FACTS])
 
+    # **갈 곳이 있는 회의에만 링크를 답니다.**
+    #
+    # 전에는 근거 카드마다 무조건 `회의에서 보기` 가 붙었습니다. 그런데 눌러서
+    # 여는 곳은 그 회의의 플로우 판이고, 화살표가 하나도 없는 회의는 빈 판만
+    # 뜹니다 — 카드마다 단추가 있는데 절반은 아무것도 없는 데로 갑니다.
+    #
+    # 한 번에 모읍니다. 발언마다 확인하면 근거 20건에 조회가 20번 더 나갑니다.
+    from apps.meetings.models import FlowEdge
+    with_flow = set(FlowEdge.objects
+                    .filter(meeting__in=list(prev))
+                    .values_list("meeting_id", flat=True))
+
     out = []
     for u in rows:
         body = (u.body or "").strip()
@@ -114,7 +126,8 @@ def _meeting_facts(meeting, tz, since) -> list[dict]:
             "who": u.participant_name or "",
             "at": at,
             "body": body[:300],
-            "link": {"label": "회의에서 보기", "meeting_id": str(u.meeting_id)},
+            "link": ({"label": "회의에서 보기", "meeting_id": str(u.meeting_id)}
+                     if u.meeting_id in with_flow else None),
         })
     return out
 
@@ -163,7 +176,10 @@ def _work_facts(meeting, tz, since) -> list[dict]:
             "who": f"{who}의 작업",
             "at": e.occurred_at,
             "body": line,
-            "link": {"label": "작업에서 보기", "work_item_id": str(e.target_id)},
+            # **작업에는 링크를 안 답니다.** 작업 기록 하나를 여는 화면이 없어
+            # 눌러도 아무 데도 못 갑니다. 「현재 상태」 화면이 생기면 여기에
+            # 다시 답니다.
+            "link": None,
         })
     return out
 

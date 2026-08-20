@@ -619,6 +619,7 @@ def discord_messages(request):
     **원문을 그대로 둡니다.** 요약·해석은 뒤에서 합니다.
     """
     from apps.agent.tasks import run_agent_for_utterance
+    from apps.common.background import run_soon
     from apps.meetings.models import Meeting, MeetingStatus, Utterance
 
     # 스레드가 아닌 채널의 메시지는 조용히 흘려보냅니다.
@@ -660,13 +661,44 @@ def discord_messages(request):
     )
 
     # 대리인은 비동기로 깨웁니다. 봇은 기다리지 않습니다.
+    #
+    # `delay()` 를 직접 부르면 개발·시연 설정(`CELERY_TASK_ALWAYS_EAGER`)에서
+    # 이 요청 안에서 대리인이 통째로 돕니다. 봇의 HTTP 호출이 그동안 붙잡혀,
+    # 회의에서 다음 발언이 밀려 들어옵니다.
+    # **누가 이 말을 듣고 있는지를 응답에 실어 보냅니다.**
+    #
+    # 대리인 답변은 LLM 여러 단계를 거치고 Outbox 폴링(3초)까지 지나야 스레드에
+    # 뜹니다. 그동안 회의는 완전히 조용해서, 사람은 **대리인이 생각 중인지
+    # 아무도 안 불린 것인지 구별할 수 없습니다.** 봇은 이 목록으로 발언에 곧바로
+    # 반응을 붙입니다.
+    #
+    # 여기서 `targeting.pick()` 을 부르지 않습니다 — 그건 LLM 호출이라 봇의
+    # 요청이 그동안 붙잡힙니다. `candidates()` 는 `MeetingParticipant` 조회
+    # 하나뿐이라 이 자리에서 불러도 안전합니다.
+    #
+    # 「답할 사람이 하나도 없다」를 정직하게 빈 배열로 내려주는 것이 요점입니다.
+    # 이 회의에 대리 참석자가 없으면 아무 반응도 안 붙고, 사람은 이름을 불러도
+    # 조용할 것임을 **그 자리에서** 압니다.
+    listening = []
     try:
-        run_agent_for_utterance.delay(str(utterance.id))
+        from apps.agent.services import targeting
+        from apps.agent.services.flow import agent_display_name
+        if not utterance.is_agent:
+            listening = [{"user_id": str(p.user_id),
+                          "agent_name": agent_display_name(p.user)}
+                         for p in targeting.candidates(utterance)]
+    except Exception:                                          # noqa: BLE001
+        # 표시용입니다. 여기서 터져도 발언 저장과 대리인 기동은 그대로 갑니다.
+        logger.exception("청취 대리인 조회 실패 utterance=%s", utterance.id)
+
+    try:
+        run_soon(run_agent_for_utterance, str(utterance.id))
     except Exception:                                          # noqa: BLE001
         # 브로커가 없어도 발언은 이미 저장됐습니다. 회의록이 남는 것이 먼저입니다.
         logger.exception("대리인 기동 실패 utterance=%s", utterance.id)
 
-    return Response({"utterance_id": str(utterance.id)}, status=201)
+    return Response({"utterance_id": str(utterance.id),
+                     "listening": listening}, status=201)
 
 
 @internal(["POST"])
@@ -1035,11 +1067,33 @@ def meeting_absence(request):
 
     웹의 `POST /api/v1/meetings/{id}/absence` 와 같은 일을 하며, 같은 함수를
     지납니다. 봇으로 들어왔다고 다른 상태가 되면 뱃지 문구가 경로에 따라 갈립니다.
+
+    ## `user_id` 도 받습니다
+
+    전에는 `discord_user_id` 만 받았습니다. 그래서 **Discord 계정을 안 이은
+    팀원은 봇 경로로 대리 전환할 방법이 아예 없었습니다** — 봇이 참석 확인
+    팝업에서 그런 사람을 조용히 빼 버렸고, 남은 한 명이 답하는 순간 `모두
+    답했습니다` 가 떴습니다. 그 사람은 `PENDING` 으로 남아 이름을 불러도
+    대리인이 안 깨어납니다(`targeting.candidates()` 가 `delegated=True` 만 봄).
+
+    `user_id` 로 올 때는 **그 회의의 참석자인지** 반드시 확인합니다. 안 하면
+    서비스 토큰 하나로 남의 회의 참석 상태를 뒤집을 수 있습니다.
     """
+    from apps.meetings.models import MeetingParticipant
     from apps.meetings.prep import cancel_absence, register_absence
 
     meeting = _meeting_by_thread(request.data.get("thread_id"))
-    user = _user_of(request.data.get("discord_user_id"))
+    raw_user_id = str(request.data.get("user_id") or "").strip()
+    if raw_user_id:
+        p = (MeetingParticipant.objects
+             .filter(meeting=meeting, user_id=raw_user_id)
+             .select_related("user").first())
+        if p is None:
+            raise BordoError("STATE_NOT_FOUND", "이 회의의 참석자가 아닙니다.",
+                             details={"user_id": raw_user_id})
+        user = p.user
+    else:
+        user = _user_of(request.data.get("discord_user_id"))
     delegated = bool(request.data.get("delegated", True))
 
     if delegated:

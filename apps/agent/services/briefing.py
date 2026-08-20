@@ -227,22 +227,46 @@ def build_summary(meeting, client=None):
     """
     from apps.meetings.models import MeetingSummary, Utterance
 
-    lines = list(Utterance.objects.filter(meeting=meeting)
-                 .order_by("id").values_list("participant_name", "body")[:200])
-    if not lines:
+    # **말한 순서대로 넣습니다.**
+    #
+    # 전에는 `.order_by("id")` 였습니다. `Utterance` 의 PK 는 랜덤 UUID4 라
+    # (`apps/common/models.py` `UUIDModel`) 이건 사실상 **무작위 정렬**입니다.
+    # 질문과 그 답이 뒤바뀌어 들어가면 모델은 답을 못 받은 질문을 "정해진 것"
+    # 으로 읽습니다. `[:200]` 도 앞의 200줄이 아니라 아무 200줄이 됐습니다.
+    #
+    # `Meta.ordering` 이 이미 `["spoken_at", "id"]` 라 그냥 지웁니다.
+    rows = list(Utterance.objects.filter(meeting=meeting)
+                .values_list("participant_name", "body", "is_agent")[:200])
+    if not rows:
         return None
 
     from .llm import client as default_client
     client = client or default_client
 
-    body = "\n".join(f"{who}: {what}" for who, what in lines)
+    # 누가 사람이고 누가 대리인인지 표시합니다. 안 적으면 모델은 대리인이
+    # 대신 전한 말을 본인이 회의에서 확정한 것으로 읽습니다.
+    body = "\n".join(f"{who}{' (AI 대리인)' if is_agent else ''}: {what}"
+                     for who, what, is_agent in rows)
     r = client.chat(
         [{"role": "user", "content": body}],
         system=("회의 발언을 읽고 아래 세 갈래로 나눠 JSON 으로만 답하십시오.\n"
                 '{"discovered_issues": [], "changes": [], "next_plans": [],'
                 ' "one_line": ""}\n'
                 "각 항목은 한 줄짜리 한국어 문장입니다. "
-                "발언에 없는 내용을 만들지 마십시오. 해당 없으면 빈 배열로 두십시오."),
+                "발언에 없는 내용을 만들지 마십시오. 해당 없으면 빈 배열로 두십시오.\n"
+                "\n"
+                # 이 셋이 없으면 「아무것도 안 정하고 끊긴 회의」의 요약에
+                # `~할 예정` 이 줄줄이 생깁니다. 실제로 그런 일이 있었습니다 —
+                # 질문 둘을 던지고 답을 못 받은 채 끝난 회의에 `변동 사항` 과
+                # `다음 계획` 이 채워졌습니다.
+                "지켜야 할 것:\n"
+                "1. **묻기만 하고 답을 못 받은 것은 결정이 아닙니다.** "
+                "`changes` 나 `next_plans` 에 넣지 말고, 필요하면 "
+                "`discovered_issues` 에 「~가 아직 정해지지 않았습니다」로 적으십시오.\n"
+                "2. 누군가 제안했을 뿐 동의가 없으면 확정으로 쓰지 마십시오. "
+                "`~하기로 했다` 는 실제로 그렇게 말한 발언이 있을 때만 씁니다.\n"
+                "3. 아무것도 정해지지 않은 회의라면 `changes` 와 `next_plans` 를 "
+                "**빈 배열로 두는 것이 맞습니다.** 칸을 채우려고 만들지 마십시오."),
     )
     if not r.ok:
         return None

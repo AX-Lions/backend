@@ -8,7 +8,8 @@ from rest_framework import serializers
 
 from apps.common.display import avatar_of
 
-from .models import ChatAttachment, ChatMessage, ChatRoom, DailyChatSummary
+from .models import (ChatAttachment, ChatMessage, ChatRoom, DailyChatSummary,
+                     RoomType)
 
 
 class AttachmentSerializer(serializers.ModelSerializer):
@@ -94,7 +95,23 @@ class RoomSummarySerializer(serializers.ModelSerializer):
         맞춥니다 — 뷰가 `agent_name_map` 으로 한 번에 모아 넘깁니다.
         """
         named = (self.context.get("agent_name_map") or {}).get(obj.agent_owner_id)
-        return named or obj.title
+        if named:
+            return named
+        if obj.title:
+            return obj.title
+
+        # 제목이 빈 1:1 방은 **상대 이름**으로 부릅니다.
+        #
+        # 1:1 방에는 이름을 안 붙이고 만드는 경로가 있습니다(시드 · 유보 답변
+        # 방). 그대로 두면 사이드바 「개인 대화」에 **글자 없는 줄**이 서서,
+        # 누구와의 대화인지 열어 봐야 압니다. 저장값으로는 못 고칩니다 —
+        # 같은 방을 두 사람이 서로 다른 이름으로 봐야 하기 때문입니다.
+        if obj.type == RoomType.DIRECT:
+            members = (self.context.get("member_map") or {}).get(obj.id, [])
+            other = next((m for m in members if not m.get("is_me")), None)
+            if other:
+                return other.get("name") or ""
+        return obj.title
 
     def get_avatar_urls(self, obj):
         # 단체방 4분할 썸네일. 4개를 넘기면 화면에서 못 씁니다.
