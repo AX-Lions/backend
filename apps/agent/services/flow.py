@@ -317,6 +317,38 @@ _SPEECH_RULES = (
      ("?", "주세요", "부탁", "요청", "해주", "해 주", "가능할까", "될까요", "여쭤")),
 )
 
+#: 의문문 어미. 물음표를 안 찍는 사람이 많아 낱말로도 봅니다.
+_QUESTION_TAILS = ("나요", "까요", "습니까", "ㅂ니까", "인가요", "은가요", "는가요",
+                   "된대", "어때요", "어떤가", "맞나", "맞죠", "죠?", "지요")
+
+#: 일정으로 보려면 **때를 가리키는 표현**이 같이 있어야 합니다.
+#:
+#: `일정` 이라는 낱말만으로 가르면 `남은 일정을 정리하겠습니다` 같은 개회 인사가
+#: 일정 화살표가 됩니다. 화면의 `일정` 칸은 "언제로 바뀌었나" 를 보는 자리라,
+#: 날짜도 기간도 없는 문장이 거기 들어가면 그 칸이 못 쓰게 됩니다.
+_WHEN_MARKS = ("마감", "데드라인", "언제까지", "월", "일", "주", "요일", "내일", "모레",
+               "다음 주", "이번 주", "기한")
+_DIGITS = tuple("0123456789")
+
+
+def _is_question(text: str) -> bool:
+    """
+    이 발언이 **묻는 말**인가.
+
+    묻는 말은 결론일 수 없습니다. 이걸 먼저 안 보면
+    `1주 연장으로 확정해도 될까요?` 가 `확정` 이라는 낱말 하나 때문에
+    **결론**으로 들어갑니다 — 아무도 답하지 않은 질문이 화면에서는
+    회의에서 정해진 것으로 보입니다.
+    """
+    tail = text.rstrip()
+    if tail.endswith("?"):
+        return True
+    # 마지막 문장만 봅니다. `시작하겠습니다. ... 될까요?` 처럼 앞에 평서문이
+    # 붙어 있어도 묻는 말이고, 반대로 앞쪽에 물음표가 있고 뒤가 단정이면
+    # 그건 스스로 답한 것이라 질문으로 보지 않습니다.
+    last = tail.rsplit(".", 1)[-1].strip() or tail
+    return any(last.endswith(t) or t in last[-6:] for t in _QUESTION_TAILS)
+
 #: 이보다 짧으면 화살표를 그리지 않습니다.
 #:
 #: `넵` · `ㅇㅋ` 까지 그리면 회의 하나에 화살표가 수십 개가 되고, 정작 무엇이
@@ -325,14 +357,35 @@ _MIN_SPEECH = 12
 
 
 def classify_speech(body: str) -> tuple[str, str] | None:
-    """발언 하나를 화면 필터 여섯 칸 중 하나로 넣습니다. 너무 짧으면 `None`."""
+    """
+    발언 하나를 화면 필터 여섯 칸 중 하나로 넣습니다. 너무 짧으면 `None`.
+
+    **묻는 말이 가장 먼저입니다.** 낱말만 보면 질문 안에 든 `확정`·`일정` 이
+    그 문장을 결론이나 일정으로 만들어 버립니다. 회의에서 답을 못 받고 끝난
+    질문이 화면에서 「정해진 것」으로 보이는 것이 이 화면에서 가장 나쁜 오류입니다.
+    """
     text = (body or "").strip()
     if len(text) < _MIN_SPEECH:
         return None
+    if _is_question(text):
+        return FlowContentType.REQUEST, "요청사항"
     for content_type, label, keywords in _SPEECH_RULES:
-        if any(k in text for k in keywords):
-            return content_type, label
+        if not any(k in text for k in keywords):
+            continue
+        # `일정` 은 낱말 하나로는 약합니다. 때를 가리키는 것이 같이 있어야
+        # 일정입니다 — 없으면 다음 규칙으로 넘겨 의견이 되게 둡니다.
+        if content_type == FlowContentType.SCHEDULE and not _has_when(text):
+            continue
+        return content_type, label
     return FlowContentType.OPINION, "의견"
+
+
+def _has_when(text: str) -> bool:
+    """때를 가리키는 표현이 있는가. 숫자가 붙은 날짜·기간이면 확실합니다."""
+    if any(d in text for d in _DIGITS):
+        return any(m in text for m in _WHEN_MARKS)
+    return any(m in text for m in ("마감", "데드라인", "언제까지", "내일", "모레",
+                                   "다음 주", "이번 주", "기한"))
 
 
 def utterance_recorded(meeting, utterance, *, agenda=None) -> FlowEdge | None:
@@ -381,10 +434,30 @@ def utterance_recorded(meeting, utterance, *, agenda=None) -> FlowEdge | None:
 
 
 def question_routed(meeting, *, asker, target, agenda=None,
-                    surface=Surface.DISCORD, quote=""):
-    """회의 중 — 질문이 누구의 대리인에게 향했는지."""
+                    surface=Surface.DISCORD, quote="", existing=None):
+    """
+    회의 중 — 질문이 누구의 대리인에게 향했는지.
+
+    ## `existing` 이 있으면 새로 그리지 않습니다
+
+    같은 발언은 이미 `utterance_recorded()` 가 화살표로 남겼습니다. 여기서 또
+    만들면 **같은 문장이 판에 두 번** 뜹니다 — 좌측 시간순 인덱스에
+
+        4  요청사항  "민님 플로우 화면 연결 작업은 어디까지 됐나요?"
+        5  질문      "민님 플로우 화면 연결 작업은 어디까지 됐나요?"
+
+    처럼 한 말이 두 줄로 서고, 우측 패널의 개수 뱃지도 두 배로 셉니다.
+
+    그래서 이미 그린 화살표에 **표시만** 합니다. 받는 쪽은 그대로 둡니다 —
+    회의 발언은 특정인에게 건 말이라도 그 자리의 모두가 듣고, 대리 참석자는
+    이미 대리인 노드로 그려져 있습니다.
+    """
     if asker is None:
         return None
+    if existing is not None:
+        existing.label = "질문"
+        existing.save(update_fields=["label"])
+        return existing
     return record(meeting,
                   from_node=user_node(asker), to_nodes=[agent_node(target)],
                   label="질문", content_type=FlowContentType.REQUEST,
@@ -459,7 +532,19 @@ def artifact_proposed(meeting, *, principal, kind: str, title: str):
 
 
 def briefing_delivered(meeting, *, principal):
-    """회의 후 — 불참자에게 브리핑이 전달됐습니다."""
+    """
+    회의 후 — 불참자에게 브리핑이 전달됐습니다.
+
+    ## `결론` 이 아니라 `기타` 입니다
+
+    전에는 `CONCLUSION` 이었습니다. 그러면 **아무것도 정해지지 않은 회의에도
+    `결론` 뱃지가 반드시 하나 붙습니다** — 대리 참석자가 있으면 브리핑은 늘
+    나가기 때문입니다. 실제로 답을 못 받은 질문 두 개로 끝난 회의에서 화면에
+    `결론 1` 이 떴습니다.
+
+    브리핑을 보냈다는 것은 회의에서 무엇이 정해졌는가와 아무 상관이 없습니다.
+    회의가 만든 사실이 아니라 서비스가 한 일이라 `기타` 가 맞습니다.
+    """
     return record(meeting,
                   from_node=agent_node(principal), to_nodes=[user_node(principal)],
-                  label="부재중 브리핑", content_type=FlowContentType.CONCLUSION)
+                  label="부재중 브리핑", content_type=FlowContentType.ETC)

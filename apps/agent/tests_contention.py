@@ -12,8 +12,9 @@ from django.utils import timezone
 from apps.accounts.models import User
 from apps.agent.services import contention
 from apps.agent.services.llm import LLMResponse
-from apps.meetings.models import (Agenda, DebatePoint, DebateStance, Meeting,
-                                  MeetingStatus, Utterance)
+from apps.meetings.models import (Agenda, DebatePoint, DebateStance, FlowCategory,
+                                  FlowContentType, FlowEdge, Meeting, MeetingStatus,
+                                  Utterance)
 from apps.orgs.models import Project, ProjectMember, Team, TeamMember
 from apps.states.models import ActivityEvent, WorkItem
 
@@ -78,7 +79,20 @@ class FactsTest(Base):
         self.assertEqual(facts[0]["kind"], "meeting")
         self.assertEqual(facts[0]["who"], "최비성")
         self.assertIn("기능 구현 범위 논의", facts[0]["title"])
+        # 그 회의에 화살표가 하나도 없으면 갈 곳이 없습니다. 링크를 달면
+        # 근거 카드마다 단추가 붙는데 절반은 빈 판으로 갑니다.
+        self.assertIsNone(facts[0]["link"])
+
+    def test_link_appears_only_when_the_meeting_has_a_flow(self):
+        u = self.past_utterance()
+        FlowEdge.objects.create(
+            meeting=u.meeting, project=self.project,
+            category=FlowCategory.MEETING, content_type=FlowContentType.OPINION,
+            from_node={"id": str(self.me.id), "kind": "USER", "name": "최비성"},
+            to_nodes=[], label="의견", occurred_at=timezone.now())
+        facts = contention.gather_facts(self.meeting())
         self.assertEqual(facts[0]["link"]["label"], "회의에서 보기")
+        self.assertEqual(facts[0]["link"]["meeting_id"], str(u.meeting_id))
 
     def test_this_meeting_is_not_a_fact(self):
         """아직 열리지도 않은 회의의 발언을 근거로 쓸 수는 없습니다."""
@@ -102,7 +116,8 @@ class FactsTest(Base):
         self.assertEqual(facts[0]["who"], "최비성의 작업")
         self.assertIn("완료 예정일", facts[0]["body"])
         self.assertIn("8월 17일 → 8월 18일", facts[0]["body"])
-        self.assertEqual(facts[0]["link"]["label"], "작업에서 보기")
+        # 작업 기록 하나를 여는 화면이 없어 링크를 안 답니다.
+        self.assertIsNone(facts[0]["link"])
 
     def test_unknown_field_change_is_ignored(self):
         w = WorkItem.objects.create(project=self.project, owner=self.me, title="개발")

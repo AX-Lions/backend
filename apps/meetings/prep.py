@@ -533,3 +533,53 @@ def absence(request, meeting_id):
     body["prep_url"] = f"/api/v1/meetings/{meeting.id}/prep"
     body["created"] = changed
     return Response(body, status=201 if changed else 200)
+
+
+@api_view(["POST"])
+def predict_debate_points(request, meeting_id):
+    """
+    예상 논쟁점을 **지금 만듭니다.**
+
+    ## 왜 따로 뒀는가
+
+    전에는 생성 트리거가 `register_absence` 하나뿐이었습니다. 그래서 준비 화면의
+    `적용하기` 가 몰래 불참을 등록해야만 논쟁점이 생겼고, 사용자는 **설정만
+    저장하려던 것이 회의 불참으로 바뀌는** 것을 겪었습니다.
+
+    등록은 등록대로 두고, 예측은 예측대로 부를 수 있게 나눕니다.
+
+    ## 대리 참석자만 부를 수 있습니다
+
+    이 화면은 「내가 없는 사이 대리인이 무엇을 마주할까」를 준비하는 자리입니다.
+    참석하는 사람에게까지 열면 회의마다 모델이 참석자 수만큼 돌면서, 정작 그
+    결과를 쓸 사람이 없습니다.
+
+    ## `force`
+
+    본문 없이 부르면 대리인이 만든 쟁점이 이미 있을 때 그냥 돌아옵니다
+    (`build_debate_points` 의 기본). `{"force": true}` 면 다시 예측합니다 —
+    **이미 답을 단 쟁점과 그 입장은 지워지지 않습니다**(`contention.build_for`).
+    """
+    meeting, p = participant_of(request.user, meeting_id)
+    require_open(meeting)
+    if not p.delegated:
+        raise BordoError(
+            "MEETING_NOT_DELEGATED",
+            "먼저 이 회의를 Bordo에게 맡기십시오. 대리 참석을 등록해야 "
+            "무엇이 갈릴지 예상해 드립니다.",
+            details={"meeting_id": str(meeting.id)})
+
+    # 이미 돌고 있으면 한 번 더 부르지 않습니다. `build_debate_points` 안에서도
+    # 열쇠로 막히지만, 여기서 걸러야 화면이 `또 눌러도 된다`고 오해하지 않습니다.
+    building = is_building_debate(meeting.id)
+    if not building:
+        # 기다리지 않습니다 — 모델을 여러 번 부르므로 응답이 수십 초를 넘깁니다.
+        # 화면은 `GENERATING` 을 받고 몇 초마다 `prep` 을 다시 읽습니다.
+        run_soon(build_debate_points, str(meeting.id),
+                 force=bool(request.data.get("force")))
+
+    return Response({
+        "meeting_id": str(meeting.id),
+        "status": "GENERATING",
+        "already_running": building,
+    }, status=202)

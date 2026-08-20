@@ -80,7 +80,9 @@ def run_agent_for_utterance(utterance_id: str) -> None:
     # 사람이 한 말부터 판에 남깁니다. **대리인을 부르지 않는 발언이 회의의
     # 대부분**이라, 이걸 대상 판정 뒤에 두면 아래 `return` 에 걸려 판에는
     # 대리인 화살표만 남습니다.
-    flow.utterance_recorded(utterance.meeting, utterance, agenda=agenda)
+    # 돌려받은 화살표를 들고 있습니다. 아래 `question_routed` 가 이걸 다시 쓰지
+    # 않으면 같은 발언이 판에 두 번 그려집니다.
+    speech_edge = flow.utterance_recorded(utterance.meeting, utterance, agenda=agenda)
 
     try:
         target = targeting.pick(utterance)
@@ -90,6 +92,15 @@ def run_agent_for_utterance(utterance_id: str) -> None:
 
     if target is None:
         # 회의 발언 대부분은 질문이 아닙니다. 아무도 안 부르는 것이 정상입니다.
+        #
+        # 다만 **후보가 아예 없었던 것**은 다릅니다. 대리 참석을 등록한 사람이
+        # 하나도 없으면 누구를 불러도 조용합니다. 그 둘을 로그로 갈라 놓지
+        # 않으면, 이름을 두 번 부르고도 답이 없는 이유를 아무 데서도 알 수
+        # 없습니다 — 실제로 그 일이 있었습니다(에밀리 한, delegated=False).
+        if not targeting.candidates(utterance):
+            logger.info("답할 대리인이 없습니다 meeting=%s utterance=%s "
+                        "— 이 회의에 대리 참석을 등록한 사람이 없습니다",
+                        utterance.meeting_id, utterance_id)
         return
 
     # 화면에 남기는 것은 여기서 시작합니다. 대리인이 실패하더라도 "이 질문이 저
@@ -99,7 +110,7 @@ def run_agent_for_utterance(utterance_id: str) -> None:
                                target.delegate_prompt or "")
     flow.question_routed(utterance.meeting, asker=utterance.participant,
                          target=target.user, agenda=agenda,
-                         quote=utterance.body)
+                         quote=utterance.body, existing=speech_edge)
 
     try:
         outcome = react.run(

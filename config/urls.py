@@ -87,6 +87,8 @@ urlpatterns = [
     path(f"{API}/meetings/<uuid:meeting_id>/absence", meetings_prep.absence),
     path(f"{API}/meetings/<uuid:meeting_id>/prep", meetings_prep.prep),
     path(f"{API}/meetings/<uuid:meeting_id>/agent-setup", meetings_prep.agent_setup),
+    path(f"{API}/meetings/<uuid:meeting_id>/debate-points/predict",
+         meetings_prep.predict_debate_points),
     path(f"{API}/debate-points/<uuid:point_id>/stance", meetings_prep.stance),
     path(f"{API}/meetings/<uuid:meeting_id>/flow", meetings.flow),
     # 작업 플로우는 기간이 스코프라 회의 경로를 쓸 수 없습니다 (이슈 #54)
