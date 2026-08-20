@@ -102,6 +102,12 @@ def events(request, project_id):
             raise BordoError("PROJECT_ACCESS_DENIED",
                              "프로젝트 참여자만 일정에 넣을 수 있습니다.",
                              details={"not_in_project": outsiders})
+        # 만든 사람은 언제나 들어갑니다.
+        #
+        # 화면의 참여자 피커는 **나를 뺀 사람들**을 고르는 자리라, 고른 대로만
+        # 넣으면 회의를 만든 사람이 그 회의의 참석자가 아니게 됩니다. 회의를
+        # 열지도, 불참 등록을 하지도 못하고 `참석자가 아닙니다` 만 돌아옵니다.
+        valid.add(str(request.user.id))
     else:
         valid = set(map(str, ProjectMember.objects.filter(project=project)
                         .values_list("user_id", flat=True)))
