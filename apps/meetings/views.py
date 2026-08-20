@@ -734,6 +734,21 @@ def flow_participant(request, project_id, user_id):
         })
 
     label = {c.value: c.label for c in FlowContentType}
+    count_chips = [{"content_type": k, "label": label.get(k, k), "count": v}
+                   for k, v in sorted(counts.items(), key=lambda kv: -kv[1])]
+
+    # `발언` 은 화살표가 아니라 화살표 **안에서** 입을 연 횟수라 거를 묶음이
+    # 없다. `content_type` 을 안 넣는 이유가 그것이다 — 넣으면 화면이 필터
+    # 버튼으로 그리는데, 누르면 걸리는 게 하나도 없어 패널이 통째로 빈다
+    # (이슈 #139). 대리인이 대신 한 발언도 본인 몫으로 센다 — 이 패널이
+    # 이미 본인 노드·대리인 노드를 같은 사람으로 묶어 보여 주고 있어서,
+    # 화살표 집계와 같은 기준을 따른다.
+    utterance_count = Utterance.objects.filter(
+        meeting__project=project, participant_id=user_id,
+        spoken_at__gte=from_at, spoken_at__lte=to_at).count()
+    if utterance_count:
+        count_chips.insert(0, {"key": "utterance", "label": "발언", "count": utterance_count})
+
     return Response({
         "project_id": str(project.id),
         "user": {
@@ -746,8 +761,7 @@ def flow_participant(request, project_id, user_id):
             "agent_name": agent_display_name(user),
         },
         "period_label": f"{day_label(from_at, tz)} - {day_label(to_at, tz)}",
-        "counts": [{"content_type": k, "label": label.get(k, k), "count": v}
-                   for k, v in sorted(counts.items(), key=lambda kv: -kv[1])],
+        "counts": count_chips,
         "summary": _participant_summary(user.name, counts, label),
         "groups": [{"content_type": k, "label": label.get(k, k), "items": v}
                    for k, v in groups.items()],
