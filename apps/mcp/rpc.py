@@ -119,9 +119,19 @@ def _modern(request, id_, method, params, body_version, ctx) -> RpcResponse:
     if method == "ping":
         return RpcResponse.ok(id_, {})
     if method == "tools/list":
-        return RpcResponse.ok(id_, {"tools": registry.catalog()})
+        # `resultType` 은 **modern 에서 필수**입니다.
+        #
+        # 이걸 빠뜨리면 Claude Code 가 목록을 통째로 거부해 `/mcp` 에 서버는
+        # `connected` 로 뜨는데 **도구가 0개**입니다. 붙은 것처럼 보여서 원인을
+        # 찾기가 더 어렵습니다. `server/discover` 에만 넣어 뒀던 것이 문제였습니다.
+        #
+        # 페이지를 나누지 않으므로 언제나 `complete` 입니다 — 도구가 셋이라
+        # 나눌 이유가 없고, `partial` 로 주면 클라이언트가 커서를 들고 한 번 더
+        # 묻는데 줄 것이 없습니다.
+        return RpcResponse.ok(id_, {"resultType": "complete",
+                                    "tools": registry.catalog()})
     if method == "tools/call":
-        return _call(id_, params, ctx)
+        return _call(id_, params, ctx, modern=True)
     if method.startswith("notifications/"):
         return RpcResponse.accepted()
     # modern 에서는 모르는 method 가 HTTP 404 입니다 — 구현 안 된 서버와 구별하는 규칙.
@@ -164,7 +174,7 @@ def _legacy(id_, method, params, ctx) -> RpcResponse:
 
 
 # ─────────────────────────────────────────── tools/call
-def _call(id_, params, ctx) -> RpcResponse:
+def _call(id_, params, ctx, *, modern=False) -> RpcResponse:
     name = params.get("name")
     tool = registry.get(name) if isinstance(name, str) else None
     if tool is None:
@@ -184,4 +194,9 @@ def _call(id_, params, ctx) -> RpcResponse:
     except Exception:                                  # noqa: BLE001
         logger.exception("MCP 도구 실패: %s user=%s", name, ctx.user.id)
         result = ToolResult.fail(INTERNAL_ERROR_TEXT)
-    return RpcResponse.ok(id_, result.to_rpc())
+
+    body = result.to_rpc()
+    if modern:
+        # tools/list 와 같은 이유입니다. 도구 하나의 결과를 나눠 보내지 않습니다.
+        body = {"resultType": "complete", **body}
+    return RpcResponse.ok(id_, body)
