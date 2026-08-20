@@ -27,7 +27,7 @@ from config.errors import BordoError
 from .models import (Agenda, AiBriefing, Attendance, BriefingConfirmation,
                      BriefingRequest, FlowCategory, FlowContentType, FlowEdge,
                      FlowFilterPreset, FlowSource, Meeting, MeetingParticipant,
-                     MeetingStatus, MeetingSummary, Surface, Utterance)
+                     MeetingStatus, MeetingSummary, Surface, Utterance, WorkSummary)
 from .serializers import (AgendaSerializer, AiBriefingSerializer,
                           BriefingConfirmationSerializer, BriefingRequestSerializer,
                           DocumentRefSerializer, FlowEdgeSerializer,
@@ -577,6 +577,48 @@ def summary_table(request, meeting_id):
     meeting = meeting_access(request.user, meeting_id)
     summary, _ = MeetingSummary.objects.get_or_create(meeting=meeting)
     return Response(MeetingSummarySerializer(summary).data)
+
+
+@api_view(["GET"])
+def project_summary_table(request, project_id):
+    """
+    플로우 캔버스 가운데 3열 표 — 작업 모드(#148).
+
+    회의 모드(`summary_table`)와 응답 모양을 맞춘다. 화면의 `toSummaryColumns`
+    가 그 모양을 그대로 읽어서, 칸 이름을 바꾸면 화면도 같이 고쳐야 한다.
+
+    ## 기간은 판(`project_flow`)과 같은 규칙을 쓴다
+
+    요약표가 판과 다른 기간을 보면 상자에 적힌 이야기가 판에 없는 화살표를
+    가리킨다. `related_edge_ids` 를 **이 기간에 실제로 있는 화살표로 좁힌다**
+    — 판에 없는 id 를 그대로 내려주면 눌러도 아무것도 강조되지 않는데
+    화면에는 오류가 안 난다(회의 모드에서 한 번 어긋났던 자리).
+    """
+    project, _ = project_membership(request.user, project_id)
+    from_at, to_at = _work_period(request.query_params)
+
+    summary, _ = WorkSummary.objects.get_or_create(project=project)
+
+    visible_ids = set(str(i) for i in FlowEdge.objects.filter(
+        project=project, category=FlowCategory.WORK,
+        occurred_at__gte=from_at, occurred_at__lte=to_at,
+    ).values_list("id", flat=True))
+
+    def clip(items):
+        out = []
+        for item in items:
+            if isinstance(item, dict) and item.get("related_edge_ids"):
+                item = {**item, "related_edge_ids":
+                        [i for i in item["related_edge_ids"] if i in visible_ids]}
+            out.append(item)
+        return out
+
+    return Response({
+        "one_line": summary.one_line,
+        "discovered_issues": clip(summary.discovered_issues),
+        "changes": clip(summary.changes),
+        "next_plans": clip(summary.next_plans),
+    })
 
 
 @api_view(["GET"])
