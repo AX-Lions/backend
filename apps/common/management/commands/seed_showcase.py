@@ -652,38 +652,61 @@ class Command(BaseCommand):
                     "avatar_url": u.avatar_url or None}
 
         F = FlowContentType
+        agent_name = f"{away.name}의 Bordo"
         rows = [
             # 회의 전 사전 지시 - 본인이 자기 대리인에게.
             (F.REQUEST, "요청사항", node(away), [node(away, agent=True)],
-             agendas[1], None, Surface.SERVICE, 55),
+             agendas[1], None, Surface.SERVICE, 55,
+             [(away.name, "시안 진행률과 마감일은 저장해 둔 기록대로 답해 주세요. "
+                          "일정을 미루는 결정은 제 확인 없이 하지 마시고요.")]),
 
             (F.OPINION, "의견", node(member), [node(lead)], agendas[0], None,
-             Surface.DISCORD, 47),
+             Surface.DISCORD, 47,
+             [(member.name, "응답 구조부터요. 지금은 표시 문자열을 저희가 조립하는데, "
+                            "브라우저 시간대로 찍혀서 사람마다 다른 시각이 보입니다.")]),
             (F.OPINION, "의견", node(member), [node(lead)], agendas[0], None,
-             Surface.DISCORD, 45),
+             Surface.DISCORD, 45,
+             [(member.name, "그게 낫습니다. 저희 보정 로직은 걷어내겠습니다.")]),
             (F.CHANGE, "변동사항", node(lead), [node(member)], agendas[0], doc,
-             Surface.DISCORD, 41),
+             Surface.DISCORD, 41,
+             [(lead.name, "그럼 displayed_at 같은 완성형 필드를 서버가 내려주는 걸로 바꾸죠."),
+              (member.name, "프론트에서 만들던 문자열은 지우겠습니다.")]),
             (F.CONCLUSION, "결론", node(lead), [node(member), node(away, agent=True)],
-             agendas[0], None, Surface.DISCORD, 39),
+             agendas[0], None, Surface.DISCORD, 39,
+             [(lead.name, "정리하면 표시 문자열은 서버가 완성해 내려줍니다.")]),
 
             (F.REQUEST, "요청사항", node(lead), [node(away, agent=True)],
-             agendas[1], None, Surface.DISCORD, 34),
+             agendas[1], None, Surface.DISCORD, 34,
+             [(lead.name, "다음, 디자인 시안 마감인데 윤서아님 쪽 일정이 어떻게 되나요?")]),
             (F.OPINION, "의견", node(away, agent=True), [node(lead)],
-             agendas[1], None, Surface.DISCORD, 33),
+             agendas[1], None, Surface.DISCORD, 33,
+             [(agent_name, "윤서아님이 저장해 두신 기준으로는 8월 18일입니다. "
+                           "현재 시안 작업은 70% 진행돼 있고, 남은 것은 브리핑 패널입니다.")]),
             (F.SCHEDULE, "일정", node(away, agent=True), [node(lead), node(member)],
-             agendas[1], None, Surface.DISCORD, 31),
+             agendas[1], None, Surface.DISCORD, 31,
+             [(agent_name, "마감일은 8월 18일로 잡혀 있습니다. 그 뒤 일정을 바꾸는 것은 "
+                           "윤서아님 확인이 필요합니다."),
+              (member.name, "그 날짜면 저희 연동 일정도 맞출 수 있습니다.")]),
             (F.CONCLUSION, "결론", node(lead), [node(member), node(away, agent=True)],
-             agendas[1], None, Surface.DISCORD, 29),
+             agendas[1], None, Surface.DISCORD, 29,
+             [(lead.name, "좋습니다. 시안 마감은 8월 18일로 확정하겠습니다.")]),
 
             (F.REQUEST, "요청사항", node(member), [node(away, agent=True)],
-             agendas[2], None, Surface.DISCORD, 20),
+             agendas[2], None, Surface.DISCORD, 20,
+             [(member.name, "디자인이 밀리면 개발도 1주 정도 미뤄야 할 것 같습니다. "
+                            "윤서아님 대리인께 여쭤봐도 될까요?")]),
             (F.SCHEDULE, "일정", node(away, agent=True), [node(member), node(lead)],
-             agendas[2], None, Surface.DISCORD, 18),
+             agendas[2], None, Surface.DISCORD, 18,
+             [(agent_name, "개발 1주 연장 건은 회의에서 나온 의견으로 정리해 "
+                           "윤서아님께 전달드리겠습니다.")]),
             # 유보를 남긴 자리. 화면 필터에 `유보` 칸이 없어 `기타` 로 들어갑니다.
             (F.ETC, "기타", node(away, agent=True), [node(lead)],
-             agendas[2], None, Surface.SERVICE, 16),
+             agendas[2], None, Surface.SERVICE, 16,
+             [(agent_name, "일정을 미루는 결정은 제가 정할 수 있는 항목이 아닙니다. "
+                           "최종 확정은 윤서아님 확인 후에 다시 말씀드리겠습니다."),
+              (lead.name, "알겠습니다. 그럼 연장은 확인 대기로 두겠습니다.")]),
         ]
-        for ctype, label, src, dsts, agenda, document, surface, mins_ago in rows:
+        for ctype, label, src, dsts, agenda, document, surface, mins_ago, says in rows:
             e = FlowEdge.objects.create(
                 meeting=meeting, project=meeting.project,
                 category=FlowCategory.MEETING, content_type=ctype, surface=surface,
@@ -691,6 +714,11 @@ class Command(BaseCommand):
                 direction_label=f"{src['name']} → {', '.join(d['name'] for d in dsts)}",
                 participant_ids=[src["user_id"]] + [d["user_id"] for d in dsts],
                 agenda=agenda, document=document,
+                # 카드 본문에 찍히는 실제 대사입니다. 이게 없으면 우측 패널이
+                # 제목과 `Discord` 만 남아, 회의록 열네 줄이 옆에 있는데도
+                # 화면에서는 무슨 말이 오갔는지 볼 수 없습니다.
+                delivery_context=[{"participant_name": who, "utterance": what}
+                                  for who, what in says],
                 occurred_at=ended_at - timedelta(minutes=mins_ago))
             e.opacity = e.compute_opacity()
             e.save(update_fields=["opacity"])
