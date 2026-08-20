@@ -45,16 +45,33 @@ DOMAIN = "@demo.bordo.dev"
 #: 시연 팀은 셋입니다. 다섯을 넘기면 플로우 노드가 화면에서 겹치고, 둘이면
 #: "한 명이 빠져도 회의가 굴러간다" 는 이 서비스의 전제가 안 보입니다.
 #:
-#: `(키, 이메일, 이름, 직무, 아바타)`
+#: `(키, 이메일, 이름, 직무, 시간대, 아바타)`
 #:
 #: `discord_user_id` 는 여기 없습니다 — 실제 사람의 Discord 계정 번호라
 #: 상수로 박아 두면 **서버에서 이 파일을 고쳐야** 합니다. 배포한 코드를
 #: 서버에서 손대면 다음 배포가 `git reset --hard` 로 되돌려 버립니다.
 #: `--discord` 나 환경변수로 받습니다.
+#:
+#: ## 시간대를 셋으로 벌립니다
+#:
+#: 영상 첫 장면이 국기 셋(🇺🇸 🇻🇳 🇰🇷)입니다. 거기서 시차를 말해 놓고 화면에
+#: 찍히는 시각이 전부 한국 시각이면 **인트로가 그림일 뿐**이 됩니다. 참여자별
+#: 현지 시각은 서버가 사람마다 환산해 내려주는 값이라(회의 카드·채팅방 머리)
+#: 시간대를 벌려 두면 그 계산이 화면에서 그대로 보입니다.
+#:
+#: 배치는 문제 서술과 맞춥니다 — **자리를 비우는 사람이 미국**입니다.
+#: "미국 개발자 퇴근 → 한국·베트남 회의" 가 곧 이 시연의 상황입니다.
+#:
+#: **회의를 만드는 진행자만 한국**입니다. 홈의 「오늘 일정」은 보는 사람의
+#: 시간대로 하루를 자르는데, 회의를 만드는 사람이 다른 시간대에 있으면
+#: 촬영자가 "오늘" 을 잘못 잡기 쉽습니다.
 PEOPLE = [
-    ("lead", f"taehyun{DOMAIN}", "강태현", "backend", "/flowchart/profile-1.jpeg"),
-    ("away", f"seoa{DOMAIN}", "윤서아", "design", "/flowchart/profile-2.jpeg"),
-    ("member", f"doyun{DOMAIN}", "문도윤", "frontend", "/flowchart/profile-3.jpeg"),
+    ("lead", f"taehyun{DOMAIN}", "강태현", "backend",
+     "Asia/Seoul", "/flowchart/profile-1.jpeg"),
+    ("away", f"seoa{DOMAIN}", "윤서아", "design",
+     "America/Los_Angeles", "/flowchart/profile-2.jpeg"),
+    ("member", f"doyun{DOMAIN}", "문도윤", "frontend",
+     "Asia/Ho_Chi_Minh", "/flowchart/profile-3.jpeg"),
 ]
 
 TEAM_NAME = "Bordo 시연팀"
@@ -120,17 +137,17 @@ class Command(BaseCommand):
         """
         시연 계정 셋.
 
-        시간대는 전부 `Asia/Seoul` 입니다. 개발용 시드는 시차를 일부러 벌려
-        두지만, 시연에서는 화면에 찍히는 시각이 사람마다 다르면 보는 사람이
-        "지금 몇 시 얘기인지" 를 따라오지 못합니다.
+        시간대는 `PEOPLE` 에 적힌 대로 셋으로 갈립니다 — 한국·미국·베트남.
+        영상 첫 장면의 국기 셋과 화면에 찍히는 시각이 어긋나면 안 됩니다.
         """
         people = {}
-        for key, email, name, role, avatar in PEOPLE:
+        for key, email, name, role, tz, avatar in PEOPLE:
             u = User.all_objects.filter(email=email).first()
             if not u:
                 u = User.objects.create_user(email=email, password=PASSWORD, name=name,
-                                             project_role=role, timezone="Asia/Seoul")
+                                             project_role=role, timezone=tz)
             u.avatar_url = avatar
+            u.timezone = tz
             # 값을 안 받았으면 **비워 둡니다.** 가짜 번호를 채워 두면 봇이
             # 보낸 발언의 주인을 못 찾고, 그때 서버는 조용히 아무도
             # 대리하지 않습니다 - 시연 중에 알아채기 가장 어려운 실패입니다.
@@ -138,7 +155,8 @@ class Command(BaseCommand):
             # 시작은 전원 `ACTIVE` 입니다. 자리를 비우는 것은 시연 중에 하는
             # 행위라, 미리 AWAY 로 두면 그 장면이 이미 지나간 것이 됩니다.
             u.presence = "ACTIVE"
-            u.save(update_fields=["avatar_url", "discord_user_id", "presence"])
+            u.save(update_fields=["avatar_url", "timezone", "discord_user_id",
+                                  "presence"])
             AgentSettings.objects.get_or_create(user=u)
             people[key] = u
         return people
@@ -150,7 +168,7 @@ class Command(BaseCommand):
             defaults={"created_by": lead, "description": "Bordo 시연용 팀",
                       "category_keys": ["backend", "frontend", "design"],
                       "timezone": "Asia/Seoul"})
-        for key, _e, name, _r, _a in PEOPLE:
+        for key, _e, name, _r, _tz, _a in PEOPLE:
             TeamMember.objects.get_or_create(
                 team=team, user=people[key],
                 defaults={"team_role": TeamRole.OWNER if key == "lead"
@@ -804,11 +822,12 @@ class Command(BaseCommand):
             f"  프로젝트  : {project.name} ({project.id})\n"
             f"  Guild     : {self.guild_id or '(없음 - Discord 연결을 안 만들었습니다)'}\n"
             f"\n  계정 (비밀번호 전부 {PASSWORD})\n"
-            f"    진행자   {lead.email}   {lead.name} · 팀 OWNER"
+            f"    진행자   {lead.email}   {lead.name} · 팀 OWNER · {lead.timezone}"
             f"{self._did(lead)}\n"
-            f"    불참자   {away.email}   {away.name} · 대리 참석 · 복귀 브리핑"
+            f"    불참자   {away.email}   {away.name} · 대리 참석 · {away.timezone}"
             f"{self._did(away)}\n"
-            f"    참석자   {member.email}   {member.name}{self._did(member)}\n"
+            f"    참석자   {member.email}   {member.name} · {member.timezone}"
+            f"{self._did(member)}\n"
             f"{self._discord_warning()}"
             f"\n  촬영 순서 (자세한 것은 docs/시연-시나리오.md)\n"
             f"    1. {lead.name} → 회의 `API 명세 리뷰` 를 만든다\n"
