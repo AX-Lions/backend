@@ -279,7 +279,10 @@ def _filtered_edges(scope, params, period=None):
     화면이 느려집니다.
     """
     cat = _resolve_category(params.get("category"))
-    qs = FlowEdge.objects.filter(**scope, category=cat)
+    # 안건·문서를 함께 끌어옵니다. 시간순 인덱스가 줄마다 제목을 만드는데,
+    # 안 걸어 두면 목록 19건에 조회가 38번 더 나갑니다.
+    qs = (FlowEdge.objects.filter(**scope, category=cat)
+          .select_related("agenda", "document", "work_document"))
 
     types = params.get("content_types")
     if types:
@@ -1049,3 +1052,75 @@ def flow_filter_detail(request, preset_id):
     s.is_valid(raise_exception=True)
     s.save()
     return Response(s.data)
+
+
+# ─────────────────────────────────────────── 시간순 인덱스
+
+def _timeline_rows(edges, tz) -> list:
+    """
+    판에 올라간 화살표를 **오간 순서대로** 한 줄씩 세웁니다.
+
+    판은 "누가 누구에게" 는 한눈에 보여 주는데 "언제, 몇 번째로" 는 말하지
+    못했습니다. 이 목록이 그 자리를 채우고, 맥락 재생의 대본이 됩니다.
+
+    ## 정렬을 두 단계로 하는 이유
+
+    `occurred_at` 만으로 세우면 같은 시각인 두 화살표의 앞뒤가 조회할 때마다
+    바뀝니다. 재생이 매번 다른 이야기를 하게 되므로 `edge_id` 로 한 번 더
+    고정합니다.
+
+    ## `title` 은 엣지 상세 카드와 같은 규칙
+
+    안건 제목 → 문서 제목 → 종류 라벨 순입니다. 좌측 목록과 우측 패널이 같은
+    화살표를 다른 이름으로 부르면 순번을 매겨도 두 화면이 안 이어집니다.
+
+    ## `at_label` 을 서버가 만드는 이유
+
+    클라이언트가 찍으면 브라우저 시간대로 나가 **같은 발언을 사람마다 다른
+    시각으로** 봅니다. `direction_label` 과 같은 이유입니다.
+    """
+    rows = sorted(edges, key=lambda e: (e.occurred_at, str(e.id)))
+    out = []
+    for i, e in enumerate(rows, start=1):
+        agenda_title = e.agenda.title if e.agenda_id else ""
+        doc = e.work_document or e.document
+        out.append({
+            "seq": i,
+            "edge_id": str(e.id),
+            "title": (agenda_title or (doc.title if doc else "")
+                      or FlowContentType(e.content_type).label),
+            "content_type": e.content_type,
+            "label": FlowContentType(e.content_type).label,
+            "direction_label": e.direction_label,
+            "from_node_id": (e.from_node or {}).get("id"),
+            "to_node_ids": sorted(n.get("id") for n in (e.to_nodes or [])
+                                  if n.get("id")),
+            "surface": e.surface,
+            "occurred_at": e.occurred_at,
+            "at_label": f"{timezone.localtime(e.occurred_at, tz):%H:%M}",
+            # 지금은 전달 한 건이 화살표 한 개라 자기 자신뿐입니다. 그래도
+            # 배열로 둡니다 — 안건 인덱스와 모양이 같으면 화면이 강조 로직을
+            # 하나로 씁니다.
+            "related_edge_ids": [str(e.id)],
+        })
+    return out
+
+
+@api_view(["GET"])
+def meeting_timeline(request, meeting_id):
+    """회의에서 오간 것을 시간 순서로. 판과 **같은 엣지 집합**입니다."""
+    meeting = meeting_access(request.user, meeting_id)
+    _, edges = _filtered_edges({"meeting": meeting}, request.query_params)
+    rows = list(edges)
+    return Response(listing(_timeline_rows(rows, user_tz(request.user))))
+
+
+@api_view(["GET"])
+def project_timeline(request, project_id):
+    """작업 플로우를 시간 순서로. 스코프는 회의가 아니라 **기간**입니다."""
+    project, _ = project_membership(request.user, project_id)
+    params = request.query_params
+    from_at, to_at = _work_period(params)
+    _, edges = _filtered_edges({"project": project}, params,
+                               period=(from_at, to_at))
+    return Response(listing(_timeline_rows(list(edges), user_tz(request.user))))
