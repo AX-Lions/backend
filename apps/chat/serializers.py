@@ -15,7 +15,7 @@ class AttachmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = ChatAttachment
         fields = ("id", "kind", "name", "size_bytes", "mime_type", "url",
-                  "status", "expires_at")
+                  "status", "expires_at", "client_upload_id")
 
 
 class MessageSerializer(serializers.ModelSerializer):
