@@ -34,6 +34,12 @@ PEOPLE = [
 ]
 PASSWORD = "Bordo!2026"
 
+#: 자리 상태·시간대를 기본값과 다르게 줄 사람 (#137 6번). presence=AWAY가
+#: 2명 이상 있어야 방 머리의 "{이름}의 Bordo 응답 중"이 한 방에서만 안 보이고,
+#: 시간대가 다른 사람이 1명 있어야 방 머리 시계가 그려진다.
+PRESENCE_OVERRIDES = {"강다은": "AWAY", "서재민": "AWAY"}
+TIMEZONE_OVERRIDES = {"최비성": "America/Los_Angeles"}
+
 
 class Command(BaseCommand):
     help = "데모용 팀·프로젝트·회의·플로우를 만듭니다."
@@ -44,7 +50,25 @@ class Command(BaseCommand):
     @transaction.atomic
     def handle(self, *args, **opts):
         if opts["reset"]:
-            # 팀을 먼저 지웁니다.
+            # DIRECT 채팅방을 먼저 지웁니다.
+            #
+            # `ChatRoom.created_by` · `ChatMessage.sender` 는 SET_NULL 입니다 —
+            # 한쪽이 계정을 지워도 상대방 대화 기록은 남아야 하므로(「삭제
+            # 방식은 대상마다 다릅니다」 표 참고) 일부러 CASCADE 로 안
+            # 걸었습니다. TEAM·PROJECT 방은 team·project 가, AI·PEER_AGENT
+            # 방은 agent_owner 가 CASCADE 라 Team/User 를 지우면 알아서
+            # 같이 지워지는데, DIRECT 방만 어느 필드로도 안 걸려서 유저를
+            # 지운 뒤에도 고아로 남습니다. 데모 리셋은 우리가 만든 방까지
+            # 전부 우리 책임이니, 유저를 지우기 전에(멤버십으로 추적 가능할
+            # 때) DIRECT 방을 먼저 지웁니다.
+            from apps.chat.models import ChatRoom, RoomType
+
+            ChatRoom.objects.filter(
+                type=RoomType.DIRECT,
+                memberships__user__email__endswith="@bordo.dev",
+            ).distinct().delete()
+
+            # 팀을 그다음에 지웁니다.
             #
             # 사람부터 지우면 `Team.created_by` · `Project.created_by` ·
             # `Meeting.created_by` 가 PROTECT 라 막힙니다. 만든 사람만 사라지고
@@ -66,6 +90,11 @@ class Command(BaseCommand):
             if u.avatar_url != avatar:
                 u.avatar_url = avatar
                 u.save(update_fields=["avatar_url"])
+            presence = PRESENCE_OVERRIDES.get(name, "ACTIVE")
+            tz = TIMEZONE_OVERRIDES.get(name, "Asia/Seoul")
+            if u.presence != presence or u.timezone != tz:
+                u.presence, u.timezone = presence, tz
+                u.save(update_fields=["presence", "timezone"])
             users[name] = u
             AgentSettings.objects.get_or_create(user=u)
 
@@ -81,11 +110,32 @@ class Command(BaseCommand):
         team.member_count = TeamMember.objects.filter(team=team).count()
         team.save(update_fields=["member_count"])
 
+        # `연합학술제`는 해커톤 팀이 하는 일이 아니다(#137 2번) — 사람은
+        # 겹치지만 심사·일정이 다른 곳에서 굴러가는데, 팀이 하나뿐이면
+        # 화면에서 한 팀이 두 가지를 하는 것으로 읽힌다. 처음부터 별도
+        # 팀 밑에 만든다 — `멋사 중앙해커톤` 밑에 만들었다가 나중에
+        # team만 옮기면, --reset 없이 다시 돌릴 때 get_or_create가 옛
+        # (team=멋사팀, name=연합학술제) 조합을 못 찾아 중복이 생긴다.
+        academic_team, _ = Team.objects.get_or_create(
+            name="연합학술제 준비팀",
+            defaults={"created_by": owner, "description": "타 학교 연합 학술제 운영",
+                      "category_keys": ["design", "backend"]})
+        for i, (_, name, _r, _a) in enumerate(PEOPLE):
+            TeamMember.objects.get_or_create(
+                team=academic_team, user=users[name],
+                defaults={"team_role": TeamRole.OWNER if i == 0 else TeamRole.MEMBER})
+        academic_team.member_count = TeamMember.objects.filter(team=academic_team).count()
+        academic_team.save(update_fields=["member_count"])
+
         projects = []
-        for name, progress in [("글로벌 회의 도구", 63), ("연합학술제", 41), ("결제 모듈", 12)]:
+        for team_obj, name, progress in [
+            (team, "글로벌 회의 도구", 63),
+            (academic_team, "연합학술제", 41),
+            (team, "결제 모듈", 12),
+        ]:
             p, _ = Project.objects.get_or_create(
-                team=team, name=name,
-                defaults={"team_name": team.name, "created_by": owner,
+                team=team_obj, name=name,
+                defaults={"team_name": team_obj.name, "created_by": owner,
                           "progress": progress})
             for _, pname, _r, _a in PEOPLE:
                 ProjectMember.objects.get_or_create(project=p, user=users[pname])
@@ -93,6 +143,8 @@ class Command(BaseCommand):
             p.progress = progress
             p.save(update_fields=["member_count", "progress"])
             projects.append(p)
+
+        self._seed_other_teams(users, owner)
 
         Favorite.objects.get_or_create(user=owner, target_type=Favorite.Target.PROJECT,
                                        target_id=projects[0].id)
@@ -350,6 +402,7 @@ class Command(BaseCommand):
             body="8/18 마감이면 QA 기간이 3일뿐인데 괜찮을까요?")
 
         work_edges = self._seed_work_flow(main, users, now)
+        self._seed_work_summary(main)
 
         # 작업 플로우 화면을 시연에서 제일 많이 보여줄 예정이라, 나머지 두
         # 프로젝트도 비워두지 않는다. main 만큼 촘촘하지는 않지만(다섯 카테고리
@@ -370,6 +423,10 @@ class Command(BaseCommand):
         self._seed_debate(upcoming["디자인 리뷰"], users, owner, now)
         self._seed_briefing_cards(meeting, agendas, users, owner, now)
         self._seed_chat_rooms(team, users, owner, now)
+        self._seed_away_handled(projects, users, owner, now)
+        self._seed_message_variety(projects, users, owner, meeting, now)
+        self._seed_search_and_summary(users, now)
+        self._seed_chat_read_state(projects, users, owner, now)
         self._touch_rooms()
 
         self.stdout.write(self.style.SUCCESS(
@@ -380,6 +437,58 @@ class Command(BaseCommand):
             f"  회의     : {meeting.title} ({meeting.id})\n"
             f"  작업 엣지 : {work_edges} (글로벌 회의 도구) · "
             f"{academic_edges} (연합학술제) · {payment_edges} (결제 모듈)\n"))
+
+    # ═══════════════════════════════════════════ 팀·프로젝트 구조
+
+    def _seed_other_teams(self, users, owner):
+        """
+        팀·프로젝트 구조 다양성 (#137 2번). 기존 3개 프로젝트(main·academic·
+        payment)는 안 건드린다 — 다른 시드 메서드 전부가 그 셋을 전제로
+        짜여 있어서 손대면 범위가 걷잡을 수 없이 커진다. 여기서는 그
+        구조를 흔들지 않는 **새 팀·프로젝트만** 추가한다.
+        """
+        from apps.chat.models import ChatRoom
+
+        # 프로젝트가 하나도 없는 팀 — "이 팀에는 아직 프로젝트가 없습니다"를
+        # 그리는 자리. 화면 확인이 목적이라 일부러 프로젝트를 안 만든다.
+        empty_team, _ = Team.objects.get_or_create(
+            name="사이드 프로젝트 랩",
+            defaults={"created_by": owner, "description": "실험적인 사이드 프로젝트 모음",
+                      "category_keys": ["backend", "frontend"]})
+        for i, pname in enumerate(("유수인", "최비성")):
+            TeamMember.objects.get_or_create(
+                team=empty_team, user=users[pname],
+                defaults={"team_role": TeamRole.OWNER if i == 0 else TeamRole.MEMBER})
+        empty_team.member_count = TeamMember.objects.filter(team=empty_team).count()
+        empty_team.save(update_fields=["member_count"])
+
+        # 내가 속하지 않은 팀 · 프로젝트 — 사이드바에 안 나오는 게 맞는지
+        # 확인용. 유수인을 아예 안 넣는다. ChatRoom도 일부러 안 만들어서
+        # "방이 하나도 없는 프로젝트"를 겸한다.
+        outside_team, _ = Team.objects.get_or_create(
+            name="프론트엔드 스터디",
+            defaults={"created_by": users["임수연"], "description": "컴포넌트 설계 스터디",
+                      "category_keys": ["frontend"]})
+        for i, pname in enumerate(("임수연", "최비성")):
+            TeamMember.objects.get_or_create(
+                team=outside_team, user=users[pname],
+                defaults={"team_role": TeamRole.OWNER if i == 0 else TeamRole.MEMBER})
+        outside_team.member_count = TeamMember.objects.filter(team=outside_team).count()
+        outside_team.save(update_fields=["member_count"])
+
+        outside_project, _ = Project.objects.get_or_create(
+            team=outside_team, name="컴포넌트 라이브러리 정리",
+            defaults={"team_name": outside_team.name, "created_by": users["임수연"],
+                      "progress": 20})
+        for pname in ("임수연", "최비성"):
+            ProjectMember.objects.get_or_create(project=outside_project, user=users[pname])
+        outside_project.member_count = (
+            ProjectMember.objects.filter(project=outside_project).count())
+        outside_project.save(update_fields=["member_count"])
+        # ensure_project_room()을 일부러 안 부른다 — 방이 하나도 없는
+        # 프로젝트로 남겨 둔다. (혹시 남아 있을 옛 방이 있으면 지운다 —
+        # --reset 없이 다시 돌릴 때를 대비.)
+        ChatRoom.objects.filter(type="PROJECT", project=outside_project).delete()
 
     # ═══════════════════════════════════════════ 작업 플로우
 
@@ -410,7 +519,7 @@ class Command(BaseCommand):
         """
         from apps.agent.models import AgentLookup
         from apps.agent.services.lookup import draw_edge
-        from apps.chat.models import ChatMessage
+        from apps.chat.models import ChatMessage, MessageImportance
         from apps.chat.services import ensure_project_room
         from apps.documents.models import Document
         from apps.meetings.models import FlowCategory, FlowEdge, FlowSource
@@ -536,21 +645,41 @@ class Command(BaseCommand):
         # 않습니다 — 팀 화면에 사적인 대화가 실립니다.
         room = ensure_project_room(project)
 
-        def say(sender_name, body, important=True):
-            return lambda: ChatMessage.objects.create(
-                room=room, sender=users[sender_name], sender_name=sender_name,
-                body=body, is_important=important)
+        def say(sender_name, body, days_ago, important=True):
+            def make():
+                # ChatMessage.sent_at은 auto_now_add라 create() 인자로 시각을
+                # 줘도 조용히 무시된다. 생성 직후 update()로 다시 써야 실제로
+                # 반영되고, 메모리 인스턴스의 필드도 같이 맞춰야 나중에 이
+                # 인스턴스를 다시 save()할 때(`flag()` 참고) 원래 시각으로
+                # 되돌아가지 않는다(#137).
+                msg = ChatMessage.objects.create(
+                    room=room, sender=users[sender_name], sender_name=sender_name,
+                    body=body, is_important=important)
+                sent_at = now - timedelta(days=days_ago)
+                ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+                msg.sent_at = sent_at
+                return msg
+            return make
 
-        emit(5, say("임수연", "우측 패널이 1280 이하에서 잘립니다. 너비를 다시 봐야 합니다."))
-        emit(2, say("최비성", "응답 구조를 바꿨습니다. 기존 필드는 한 주만 같이 내려갑니다."))
+        first_feedback = emit(5, say(
+            "임수연", "우측 패널이 1280 이하에서 잘립니다. 너비를 다시 봐야 합니다.", 5))
+        emit(2, say("최비성", "응답 구조를 바꿨습니다. 기존 필드는 한 주만 같이 내려갑니다.", 2))
         # 사람마다 피드백이 있어야 우측 패널의 `피드백` 칩이 0 이 아닙니다.
-        emit(6, say("서재민", "로그인 실패 원인에 따라 오류 메시지를 구분하는 게 좋겠습니다."))
-        emit(4, say("서재민", "회의 상세 화면은 모바일에서 좌우 스크롤이 생깁니다. 기준폭을 낮춥시다."))
-        emit(3, say("강다은", "Discord 공지 문구에 회의 시각이 두 번 들어갑니다."))
+        emit(6, say("서재민", "로그인 실패 원인에 따라 오류 메시지를 구분하는 게 좋겠습니다.", 6))
+        emit(4, say("서재민", "회의 상세 화면은 모바일에서 좌우 스크롤이 생깁니다. 기준폭을 낮춥시다.", 4))
+        emit(3, say("강다은", "Discord 공지 문구에 회의 시각이 두 번 들어갑니다.", 3))
+
+        # 중요 메시지 확인 상태 (#137). 확인해도 is_important는 true로 남고
+        # 확인 기록만 MessageImportance로 따로 쌓인다 — 확인은 중요 표시를
+        # 내리는 것과 다르다. 이 방에 중요 메시지가 5건 더 있는데 그중
+        # 하나만 확인해도 방이 「중요 채팅」 목록에서 안 빠지는 규칙과,
+        # 확인 안 한 나머지는 그대로 남의 화면에도 남는 규칙을 같이 보여준다.
+        MessageImportance.objects.get_or_create(
+            message=first_feedback, user=users["유수인"])
 
         # 중요 표시는 화면에서 **나중에** 켭니다(`PATCH .../important`). 켜지는
         # 순간에도 그려지는지 시드가 함께 확인합니다.
-        later = say("유수인", "프로필 이미지는 원형으로 통일해 주십시오.", important=False)()
+        later = say("유수인", "프로필 이미지는 원형으로 통일해 주십시오.", 1, important=False)()
 
         def flag():
             later.is_important = True
@@ -605,6 +734,53 @@ class Command(BaseCommand):
             emit(days, ask)
 
         return drawn
+
+    def _seed_work_summary(self, project):
+        """
+        플로우 작업 모드 요약표 (#148). `_seed_work_flow()`가 만든 실제
+        FlowEdge를 라벨로 찾아서 문다 — 손으로 지어낸 id를 넣으면 판에 없는
+        화살표를 가리키게 되고, 눌러도 아무것도 강조 안 되는데 오류도 안 나서
+        알아챌 방법이 없다.
+        """
+        from apps.meetings.models import FlowCategory, FlowEdge, WorkSummary
+
+        def edge_id(label):
+            row = (FlowEdge.objects
+                   .filter(project=project, category=FlowCategory.WORK, label=label)
+                   .values_list("id", flat=True).first())
+            return str(row) if row else None
+
+        narrow_feedback = edge_id("우측 패널이 1280 이하에서 잘립니다. 너비를 다시 봐야 합니다.")
+        narrow_fix = edge_id("우측 패널 너비 수정")
+        api_change = edge_id("API 응답 구조 변경")
+        api_doc = edge_id("API 명세서 v2")
+        api_feedback = edge_id("응답 구조를 바꿨습니다. 기존 필드는 한 주만 같이 내려갑니다.")
+
+        WorkSummary.objects.update_or_create(project=project, defaults={
+            "one_line": ("이번 주는 회의 상세·플로우 화면 UI를 다듬고 API 응답 구조를 "
+                        "바꿨습니다. 모바일 레이아웃 문제는 아직 안 풀렸습니다."),
+            "discovered_issues": [
+                {"text": "우측 패널이 좁은 화면에서 잘리는 문제가 있었습니다.",
+                 "context": "1280px 이하에서 우측 패널이 잘린다는 피드백이 올라와 "
+                             "너비 값을 다시 잡았습니다.",
+                 "resolution": "우측 패널 너비 수정으로 반영했습니다.",
+                 "related_edge_ids": [i for i in (narrow_feedback, narrow_fix) if i]},
+                "로그인 실패 원인별 오류 메시지 구분이 아직 안 됐습니다.",
+                "회의 상세 화면은 모바일에서 좌우 스크롤이 남아 있습니다.",
+            ],
+            "changes": [
+                {"text": "API 응답 구조가 바뀌었습니다.",
+                 "context": "기존 필드는 한 주만 같이 내려가고, API 명세서 v2로 "
+                             "갱신됐습니다.",
+                 "related_edge_ids": [i for i in (api_change, api_doc, api_feedback) if i]},
+                "Discord 공지 문구에서 회의 시각이 두 번 들어가던 것을 확인했습니다.",
+            ],
+            "next_plans": [
+                "참여자 프로필 제작을 이어서 진행합니다.",
+                "검색 기능 구현을 마무리합니다.",
+                "Bordo 브리핑 개선 작업을 시작합니다.",
+            ],
+        })
 
     # ═══════════════════════════════════════════ 연합학술제 · 결제 모듈
 
@@ -677,14 +853,22 @@ class Command(BaseCommand):
         # ── 피드백 (프로젝트마다 방이 따로다 — ensure_project_room이 이 project 것을 새로 만든다)
         room = ensure_project_room(project)
 
-        def say(sender_name, body):
-            return lambda: ChatMessage.objects.create(
-                room=room, sender=users[sender_name], sender_name=sender_name,
-                body=body, is_important=True)
+        def say(sender_name, body, days_ago):
+            def make():
+                # #137 — ChatMessage.sent_at은 auto_now_add라 create() 인자로는
+                # 안 먹는다. 생성 직후 update()로 다시 써야 한다.
+                msg = ChatMessage.objects.create(
+                    room=room, sender=users[sender_name], sender_name=sender_name,
+                    body=body, is_important=True)
+                sent_at = now - timedelta(days=days_ago)
+                ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+                msg.sent_at = sent_at
+                return msg
+            return make
 
-        emit(5, say("임수연", "세션 시간표에 발표자 사진이 안 뜹니다. 이미지 경로 확인해주세요."))
-        emit(3, say("최비성", "참가 신청 폼에 소속 학교 필드를 추가했습니다."))
-        emit(2, say("강다은", "후원사 로고 배치가 겹쳐 보입니다."))
+        emit(5, say("임수연", "세션 시간표에 발표자 사진이 안 뜹니다. 이미지 경로 확인해주세요.", 5))
+        emit(3, say("최비성", "참가 신청 폼에 소속 학교 필드를 추가했습니다.", 3))
+        emit(2, say("강다은", "후원사 로고 배치가 겹쳐 보입니다.", 2))
 
         # ── AI 조회 (하나는 유보 — answer를 비워 둔다)
         for days, asker, target, topic, reason, question, answer, source in [
@@ -774,14 +958,22 @@ class Command(BaseCommand):
         # ── 피드백
         room = ensure_project_room(project)
 
-        def say(sender_name, body):
-            return lambda: ChatMessage.objects.create(
-                room=room, sender=users[sender_name], sender_name=sender_name,
-                body=body, is_important=True)
+        def say(sender_name, body, days_ago):
+            def make():
+                # #137 — ChatMessage.sent_at은 auto_now_add라 create() 인자로는
+                # 안 먹는다. 생성 직후 update()로 다시 써야 한다.
+                msg = ChatMessage.objects.create(
+                    room=room, sender=users[sender_name], sender_name=sender_name,
+                    body=body, is_important=True)
+                sent_at = now - timedelta(days=days_ago)
+                ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+                msg.sent_at = sent_at
+                return msg
+            return make
 
-        emit(4, say("임수연", "환불 버튼 위치가 결제 버튼과 너무 가깝습니다."))
-        emit(3, say("강다은", "결제 실패 메시지가 너무 딱딱합니다. 톤 조정 부탁드려요."))
-        emit(2, say("서재민", "정산 배치가 자정마다 도는데 시간대 확인이 필요합니다."))
+        emit(4, say("임수연", "환불 버튼 위치가 결제 버튼과 너무 가깝습니다.", 4))
+        emit(3, say("강다은", "결제 실패 메시지가 너무 딱딱합니다. 톤 조정 부탁드려요.", 3))
+        emit(2, say("서재민", "정산 배치가 자정마다 도는데 시간대 확인이 필요합니다.", 2))
 
         # ── AI 조회 (하나는 유보)
         for days, asker, target, topic, reason, question, answer, source in [
@@ -1327,6 +1519,255 @@ class Command(BaseCommand):
             if last:
                 touch(room, last.sent_at)
 
+    def _seed_away_handled(self, projects, users, owner, now):
+        """
+        "자리 비운 사이 Bordo가 나눈 대화" 목록 (#137 1번). 왼쪽 목록 맨 위,
+        가장 큰 자리인데 지금까지 시드에 answered_while_away=True 인 메시지가
+        하나도 없어서 항상 비어 있었다.
+
+        `GET /chat/away-handled` 는 sender=본인 · is_agent=True ·
+        answered_while_away=True 만 본다(`apps/chat/views.py::away_handled`).
+        이 플래그를 실제로 세우는 곳은 `act.py` 의 `SendMessageSkill` 실행
+        중 하나뿐이라(PEER_AGENT 방 한정), 다른 방 종류까지 섞으려면 시드가
+        같은 모양을 직접 만드는 수밖에 없다.
+        """
+        from apps.chat.models import ChatMessage, ChatRoom, RoomType
+        from apps.chat.services import direct_key
+
+        main = projects[0]
+
+        def reply(room, body, sent_at, *, away=True):
+            msg = ChatMessage.objects.create(
+                room=room, sender=owner, sender_name=f"{owner.name}의 Bordo",
+                is_agent=True, body=body, answered_while_away=away)
+            ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+            return msg
+
+        def ask(room, sname, body, sent_at):
+            msg = ChatMessage.objects.create(
+                room=room, sender=users[sname], sender_name=sname, body=body)
+            ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+            return msg
+
+        # DIRECT(유수인·최비성) — 이 방 하나에 2건을 몰아 handled_count>=2를
+        # 만든다. 두 번째는 유보 — judge.MESSAGES[Reason.NO_EVIDENCE]와
+        # 같은 문구를 그대로 써서 실제 유보 답변과 같은 모양으로 남긴다.
+        direct_room = ChatRoom.objects.get(
+            type=RoomType.DIRECT, dedupe_key=direct_key(owner.id, users["최비성"].id))
+        ask(direct_room, "최비성", "결제 API 응답 필드에 상태 코드도 들어가나요?",
+            now - timedelta(hours=10))
+        reply(direct_room, "네, status 필드로 들어갑니다.",
+              now - timedelta(hours=9, minutes=58))
+        ask(direct_room, "최비성", "환불 처리 기한도 API로 조회되나요?",
+            now - timedelta(hours=9))
+        reply(direct_room, "관련 기록을 찾지 못해 답변을 보류했습니다.",
+              now - timedelta(hours=8, minutes=58))
+
+        # TEAM 단체방.
+        team_room = ChatRoom.objects.get(type=RoomType.TEAM)
+        ask(team_room, "강다은", "유수인님, 이번 주 디자인 리뷰 자료 어디 있나요?",
+            now - timedelta(hours=20))
+        reply(team_room, "피그마 '디자인 최종안' 문서에 있습니다.",
+              now - timedelta(hours=19, minutes=58))
+
+        # PROJECT(main) 단체방 — 부재 중이 아니었던 agent 응답도 여기 하나
+        # 섞는다. is_agent=True인데 answered_while_away=False라, 두 필드가
+        # 왜 나뉘어 있는지가 화면에서 확인돼야 한다.
+        project_room = ChatRoom.objects.get(type=RoomType.PROJECT, project=main)
+        ask(project_room, "서재민", "우측 패널 너비는 언제쯤 고쳐지나요?",
+            now - timedelta(hours=15))
+        reply(project_room, "이번 주 안에 반영 예정입니다.",
+              now - timedelta(hours=14, minutes=58))
+        ask(project_room, "임수연", "프로필 이미지 원형 통일 반영됐나요?",
+            now - timedelta(hours=1))
+        reply(project_room, "네, 오늘 반영했습니다.",
+              now - timedelta(minutes=58), away=False)
+
+    def _seed_message_variety(self, projects, users, owner, meeting, now):
+        """
+        메시지 상태 다양성 (#137 4번). 지금까지 시드가 만드는 메시지는
+        전부 "사람이 방금 보낸 평범한 한 줄"이었다 — 삭제·수정·첨부·유보
+        연결·긴 글·줄바꿈·이모지 같은 갈래가 화면에서 한 번도 안 그려졌다.
+        """
+        from apps.agent.models import PendingQuestion
+        from apps.chat.models import ChatAttachment, ChatMessage, ChatRoom, RoomType
+        from apps.chat.services import direct_key
+
+        main = projects[0]
+        team_room = ChatRoom.objects.get(type=RoomType.TEAM)
+        project_room = ChatRoom.objects.get(type=RoomType.PROJECT, project=main)
+        direct_room = ChatRoom.objects.get(
+            type=RoomType.DIRECT, dedupe_key=direct_key(owner.id, users["최비성"].id))
+
+        def make(room, sender_name, body, sent_at, **extra):
+            msg = ChatMessage.objects.create(
+                room=room, sender=users[sender_name], sender_name=sender_name,
+                body=body, **extra)
+            ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+            return msg
+
+        # 지운 메시지 — 자리는 남기고 내용만 비운다. 모델 docstring이 그렇게
+        # 설계한 이유를 이미 적어 뒀다("남은 사람이 무슨 얘기였는지").
+        deleted = make(team_room, "강다은", "이 팀 아이디로 다 같이 로그인해도 되나요?",
+                       now - timedelta(days=4))
+        deleted.body, deleted.deleted_at = "", now - timedelta(days=3, hours=23)
+        deleted.save(update_fields=["body", "deleted_at"])
+
+        # 고친 메시지.
+        edited = make(team_room, "최비성", "회의는 15시로 옮겼습니다.",
+                     now - timedelta(hours=6))
+        edited.edited_at = now - timedelta(hours=5, minutes=50)
+        edited.save(update_fields=["edited_at"])
+
+        # 첨부 1개.
+        with_file = make(project_room, "임수연", "디자인 가이드 문서 공유드립니다.",
+                         now - timedelta(hours=7))
+        ChatAttachment.objects.create(
+            room=project_room, uploader=users["임수연"], message=with_file,
+            status=ChatAttachment.Status.ATTACHED, kind=ChatAttachment.Kind.FILE,
+            name="디자인_가이드.pdf", size_bytes=482_000, mime_type="application/pdf",
+            url="/static/demo/디자인_가이드.pdf")
+
+        # 이미지 첨부.
+        with_image = make(project_room, "임수연", "시안 스크린샷입니다.",
+                          now - timedelta(hours=6, minutes=55))
+        ChatAttachment.objects.create(
+            room=project_room, uploader=users["임수연"], message=with_image,
+            status=ChatAttachment.Status.ATTACHED, kind=ChatAttachment.Kind.IMAGE,
+            name="시안.png", size_bytes=1_240_000, mime_type="image/png",
+            url="/static/demo/시안.png")
+
+        # 첨부 2개 이상.
+        with_two = make(project_room, "최비성", "API 명세서 최신본과 변경 이력입니다.",
+                        now - timedelta(hours=6, minutes=40))
+        ChatAttachment.objects.create(
+            room=project_room, uploader=users["최비성"], message=with_two,
+            status=ChatAttachment.Status.ATTACHED, kind=ChatAttachment.Kind.FILE,
+            name="API_명세서_v2.pdf", size_bytes=310_000, mime_type="application/pdf",
+            url="/static/demo/API_명세서_v2.pdf")
+        ChatAttachment.objects.create(
+            room=project_room, uploader=users["최비성"], message=with_two,
+            status=ChatAttachment.Status.ATTACHED, kind=ChatAttachment.Kind.FILE,
+            name="변경이력.xlsx", size_bytes=52_000,
+            mime_type="application/vnd.ms-excel", url="/static/demo/변경이력.xlsx")
+
+        # 아주 긴 메시지 — 말풍선 최대폭·줄바꿈 확인용.
+        make(direct_room, "최비성",
+            "결제 API 응답 구조가 이번에 꽤 크게 바뀌어서 정리해서 남깁니다. " * 16,
+            now - timedelta(hours=3))
+
+        # 줄바꿈이 든 메시지 — 회의 결과 정리처럼 목록형 본문.
+        make(team_room, "유수인",
+            "오늘 회의 정리입니다.\n"
+            "1. 디자인 시안은 8/18까지 확정\n"
+            "2. 개발 일정은 1주 연장(승인 대기)\n"
+            "3. 다음 회의는 API 명세 재검토",
+            now - timedelta(hours=1, minutes=30))
+
+        # 이모지만 있는 한 줄.
+        make(team_room, "서재민", "🎉👍", now - timedelta(minutes=40))
+
+        # 유보 답변에 연결된 메시지 — pending_question이 브리핑 카드를 닫는
+        # 근거다. 이미 하나(handle()에서 만든 미답변 것) 있는데, 그건 아직
+        # 채팅으로 안 이어졌다. 여기서는 **답변까지 끝난** 버전을 만든다.
+        pq = PendingQuestion.objects.create(
+            meeting=meeting, asker=users["강다은"], asker_name="강다은",
+            target_user=owner, title="참여자 프로필 제작 담당자",
+            body="참여자 프로필 카드는 결국 누가 맡기로 했나요?",
+            chat_room_id=team_room.id)
+        answer = make(team_room, "유수인", "제가 맡기로 했습니다 — 이번 주 안에 올릴게요.",
+                     now - timedelta(minutes=35), pending_question=pq)
+        pq.answered_at = answer.sent_at
+        pq.answer_body = answer.body
+        pq.save(update_fields=["answered_at", "answer_body"])
+
+    def _seed_search_and_summary(self, users, now):
+        """
+        방 안 검색 · 날짜별 요약 (#137 7번).
+
+        - 검색: 같은 낱말이 한 날짜에만 몰려 있으면 결과가 항상 0~1건이라
+          목록이 여러 줄인 모습을 확인할 수 없다. "회의"가 team_room에서
+          서로 다른 날짜 셋에 걸쳐 나오게 메시지를 몇 개 더 넣는다.
+        - 일별 요약: `status`는 저장 필드가 아니라 조회 시점에 계산된다
+          (`DailyChatSummary` 행이 있고 `generated_at`이 있으면 READY,
+          없으면 무조건 PENDING — 대화가 없는 날도 행이 없을 뿐 같은
+          PENDING이다). READY 행을 두 개 만든다 — 하나는 my_todos·
+          schedules를 채우고, 하나는 my_todos를 일부러 비워 둔다.
+          그 외 날짜/방은 아무 행도 안 만들어 PENDING·대화 없음 두
+          갈래를 그대로 남겨 둔다(억지로 채우지 말라는 지침 그대로).
+        """
+        from apps.chat.models import ChatMessage, ChatRoom, DailyChatSummary, RoomType
+
+        team_room = ChatRoom.objects.get(type=RoomType.TEAM)
+
+        def send(body, days_ago):
+            msg = ChatMessage.objects.create(
+                room=team_room, sender=users["강다은"], sender_name="강다은", body=body)
+            sent_at = now - timedelta(days=days_ago)
+            ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+            return sent_at
+
+        d5 = send("다음 주 회의 시간도 이 방에서 공지할게요.", 5)
+        d3 = send("오늘 회의는 30분 당겨졌습니다.", 3)
+        # (일부러 sent_at을 안 받는다 — 이미 team_room에 8/19자 "회의" 메시지가
+        # 있어서, 그 날짜와 굳이 겹치지 않게 셋째 날짜 하나만 더한다.)
+
+        # READY 1 — 오늘 것으로 채운다(this 방에 이미 있는 8/19 메시지들을 요약).
+        DailyChatSummary.objects.create(
+            room=team_room, date=now.date(),
+            one_line="회의 시간 조정과 학술제 부스 배치 공유가 있었습니다.",
+            my_todos=["학술제 부스 배치도 확인하기", "금요일 전체 회고 일정 확정하기"],
+            schedules=[{"at": now.isoformat(), "title": "전체 회고", "kind": "MEETING"}],
+            generated_at=now)
+
+        # READY 2 — my_todos를 일부러 비워 둔다. "할 일 없는 요약 날"도
+        # 실제로 있어야 화면이 빈 목록을 어떻게 그리는지 확인할 수 있다.
+        DailyChatSummary.objects.create(
+            room=team_room, date=d3.date(),
+            one_line="회의 시간이 30분 당겨졌다는 공지가 있었습니다.",
+            my_todos=[], schedules=[], generated_at=d3)
+
+        # d5 날짜와 그 외 모든 방·날짜는 아무 행도 안 만든다 — PENDING으로
+        # 남아 대화가 있었는데 아직 요약이 없는 경우(d5)와, 대화 자체가
+        # 없는 날(다른 대부분의 날짜) 둘 다를 자연스럽게 남겨 둔다.
+
+    def _seed_chat_read_state(self, projects, users, owner, now):
+        """
+        미읽음 다양성 (#137 6번). `RoomMember.last_read_at` 을 아무도 안
+        올려서 지금까지 모든 방이 전건 미읽음이었다.
+
+        - 팀 단체방은 유수인 기준 그대로 안 읽은 채 둔다. 팀 합계가
+          하위 프로젝트 미읽음의 합과 **달라야** 하는데 — 클라이언트가
+          트리를 프로젝트까지만 더하면 팀 단체방 자체의 몫이 빠진다.
+        - main 프로젝트 방은 전부 읽음 처리해 0건 미읽음 방을 만든다.
+        - academic 프로젝트 방은 메시지를 더 채워 두 자리(10건 이상)
+          미읽음 방을 만든다 — 배지 폭이 한 자리일 때만 맞춰져 있으면
+          여기서 깨진다.
+        - `읽음 N`(read_count)은 저장 필드가 아니라 "나 말고 다른 멤버가
+          이 메시지 이후로 읽었는가"로 매번 계산된다(`_read_counts()`).
+          main 프로젝트 방에서 유수인만 읽음 처리하면 다른 사람 기준으로는
+          전부 0건이라, 최비성도 같이 읽음 처리해서 1건 이상이 보이게 한다.
+        """
+        from apps.chat.models import ChatMessage, ChatRoom, RoomMember, RoomType
+
+        main, academic, payment = projects
+
+        main_room = ChatRoom.objects.get(type=RoomType.PROJECT, project=main)
+        RoomMember.objects.filter(room=main_room, user=owner).update(last_read_at=now)
+        RoomMember.objects.filter(room=main_room, user=users["최비성"]).update(
+            last_read_at=now)
+
+        academic_room = ChatRoom.objects.get(type=RoomType.PROJECT, project=academic)
+        fillers = ["강다은", "임수연", "최비성", "서재민", "강다은", "임수연", "최비성", "서재민"]
+        for i, sname in enumerate(fillers):
+            msg = ChatMessage.objects.create(
+                room=academic_room, sender=users[sname], sender_name=sname,
+                body=f"확인했습니다. 반영하겠습니다. ({i + 1})")
+            ChatMessage.objects.filter(pk=msg.pk).update(
+                sent_at=now - timedelta(hours=8 - i))
+        # academic_room의 last_read_at은 처음부터 null이라 따로 안 건드린다
+        # — 방금 늘린 메시지까지 전부 미읽음으로 잡혀야 두 자리가 된다.
+
     def _seed_chat_rooms(self, team, users, owner, now):
         """팀 전체방·나의 AI 대리인방·1:1방·대리인에게 직접 묻는 방. 지금까지
         프로젝트방 하나만 있었다."""
@@ -1334,17 +1775,26 @@ class Command(BaseCommand):
         from apps.chat.services import (direct_key, ensure_ai_room, ensure_team_room,
                                 peer_agent_key)
 
+        def send(room, sender, sender_name, body, sent_at, *, is_agent=False):
+            # ChatMessage.sent_at은 auto_now_add라 create() 인자로는 안 먹는다
+            # (Django가 조용히 무시한다). 생성 직후 update()로 다시 써야 실제로
+            # 반영된다 — 안 그러면 이 함수가 만드는 메시지 전부가 시드를 돌린
+            # 그 순간의 시각으로 찍혀서 날짜 구분선·달력·미리보기 시각이 전부
+            # 하루/한 시각으로 뭉친다 (#137).
+            msg = ChatMessage.objects.create(
+                room=room, sender=sender, sender_name=sender_name, body=body,
+                is_agent=is_agent)
+            ChatMessage.objects.filter(pk=msg.pk).update(sent_at=sent_at)
+            return msg
+
         team_room = ensure_team_room(team)
-        for pname, body in [
-            ("강다은", "다음 주 학술제 부스 배치도 공유드립니다."),
-            ("유수인", "이번 주 금요일 전체 회고 시간 잡을게요."),
-        ]:
-            ChatMessage.objects.create(room=team_room, sender=users[pname],
-                                       sender_name=pname, body=body)
+        send(team_room, users["강다은"], "강다은", "다음 주 학술제 부스 배치도 공유드립니다.",
+             now - timedelta(days=3))
+        send(team_room, users["유수인"], "유수인", "이번 주 금요일 전체 회고 시간 잡을게요.",
+             now - timedelta(hours=2))
 
         ai_room = ensure_ai_room(owner)
-        ChatMessage.objects.create(room=ai_room, sender=owner, sender_name=owner.name,
-                                   body="오늘 일정 알려줘.")
+        send(ai_room, owner, owner.name, "오늘 일정 알려줘.", now - timedelta(days=1))
         # `sender` 는 주인이지만 **말한 것은 대리인**입니다.
         #
         # 없으면 화면이 본인이 보낸 메시지로 그립니다. 「자리를 비운 사이
@@ -1353,10 +1803,9 @@ class Command(BaseCommand):
         #
         # `SendMessageSkill` 도 `is_agent=True` 로 만듭니다 — 시드가 실제 경로와
         # 다른 모양을 만들면 화면이 시드에서만 다르게 보입니다.
-        ChatMessage.objects.create(
-            room=ai_room, sender=owner, sender_name=f"{owner.name}의 Bordo",
-            is_agent=True,
-            body="오늘 9시 정기 팀 회의, 13시 디자인 리뷰, 17시 개발팀 Sync가 있습니다.")
+        send(ai_room, owner, f"{owner.name}의 Bordo",
+             "오늘 9시 정기 팀 회의, 13시 디자인 리뷰, 17시 개발팀 Sync가 있습니다.",
+             now - timedelta(days=1) + timedelta(minutes=1), is_agent=True)
 
         # 1:1 방 — 유수인 · 최비성. direct_key가 정렬해서 만드니 누가 먼저
         # 걸어도 같은 방이 된다.
@@ -1365,10 +1814,10 @@ class Command(BaseCommand):
             type=RoomType.DIRECT, dedupe_key=d_key, defaults={"created_by": owner})
         for u in (owner, users["최비성"]):
             RoomMember.objects.get_or_create(room=direct_room, user=u)
-        ChatMessage.objects.create(room=direct_room, sender=users["최비성"],
-                                   sender_name="최비성", body="결제 API 명세 확인해주실 수 있나요?")
-        ChatMessage.objects.create(room=direct_room, sender=owner,
-                                   sender_name=owner.name, body="네, 오늘 중으로 볼게요.")
+        send(direct_room, users["최비성"], "최비성", "결제 API 명세 확인해주실 수 있나요?",
+             now - timedelta(hours=5))
+        send(direct_room, owner, owner.name, "네, 오늘 중으로 볼게요.",
+             now - timedelta(hours=4))
 
         # 대리인에게 직접 묻는 방 — 서재민이 유수인의 대리인에게. 방향이 있는
         # 키라 peer_agent_key(요청자, 대상)로 만든다.
@@ -1378,12 +1827,50 @@ class Command(BaseCommand):
             defaults={"created_by": users["서재민"], "agent_owner": owner})
         for u in (users["서재민"], owner):
             RoomMember.objects.get_or_create(room=peer_room, user=u)
-        ChatMessage.objects.create(
-            room=peer_room, sender=users["서재민"], sender_name="서재민",
-            body="유수인님 대신 여쭤봅니다 — 디자인 시안 오늘 확정되나요?")
-        ChatMessage.objects.create(
-            room=peer_room, sender=owner, sender_name=f"{owner.name}의 Bordo",
-            is_agent=True,
-            body="네, 오늘 중 확정 예정이라고 전달받았습니다.")
+        send(peer_room, users["서재민"], "서재민",
+             "유수인님 대신 여쭤봅니다 — 디자인 시안 오늘 확정되나요?",
+             now - timedelta(days=2))
+        send(peer_room, owner, f"{owner.name}의 Bordo",
+             "네, 오늘 중 확정 예정이라고 전달받았습니다.",
+             now - timedelta(days=2) + timedelta(minutes=2), is_agent=True)
+
+        # ── 방 종류 커버리지 (#137 3번) — DIRECT·PEER_AGENT가 각 1개뿐이라
+        # 목록이 여럿일 때 어떻게 쌓이는지 확인할 수 없었다.
+
+        # DIRECT 2 — 임수연 · 서재민, 메시지 있음.
+        d2_key = direct_key(users["임수연"].id, users["서재민"].id)
+        direct_room2, _ = ChatRoom.objects.get_or_create(
+            type=RoomType.DIRECT, dedupe_key=d2_key,
+            defaults={"created_by": users["임수연"]})
+        for u in (users["임수연"], users["서재민"]):
+            RoomMember.objects.get_or_create(room=direct_room2, user=u)
+        send(direct_room2, users["임수연"], "임수연",
+             "결제 화면 시안 오늘 중 공유드릴게요.", now - timedelta(hours=3))
+        send(direct_room2, users["서재민"], "서재민",
+             "네, 확인되는 대로 API 붙이겠습니다.", now - timedelta(hours=2, minutes=50))
+
+        # DIRECT 3 — 유수인 · 강다은, **일부러 메시지를 안 채운다.** 방은
+        # 만들어졌지만 아직 말이 오간 적 없는 상태 — 「아직 나눈 이야기가
+        # 없습니다」가 실제로 어떻게 보이는지 확인하는 자리다. 채우면 이
+        # 화면을 확인할 방법이 없어진다.
+        d3_key = direct_key(owner.id, users["강다은"].id)
+        empty_direct_room, _ = ChatRoom.objects.get_or_create(
+            type=RoomType.DIRECT, dedupe_key=d3_key, defaults={"created_by": owner})
+        for u in (owner, users["강다은"]):
+            RoomMember.objects.get_or_create(room=empty_direct_room, user=u)
+
+        # PEER_AGENT 2 — 최비성이 임수연의 대리인에게.
+        p2_key = peer_agent_key(users["최비성"].id, users["임수연"].id)
+        peer_room2, _ = ChatRoom.objects.get_or_create(
+            type=RoomType.PEER_AGENT, dedupe_key=p2_key,
+            defaults={"created_by": users["최비성"], "agent_owner": users["임수연"]})
+        for u in (users["최비성"], users["임수연"]):
+            RoomMember.objects.get_or_create(room=peer_room2, user=u)
+        send(peer_room2, users["최비성"], "최비성",
+             "임수연님 대신 여쭤봅니다 — 결제 화면 시안 오늘 나오나요?",
+             now - timedelta(hours=6))
+        send(peer_room2, users["임수연"], f"{users['임수연'].name}의 Bordo",
+             "네, 오늘 중으로 공유드릴 예정이라고 전달받았습니다.",
+             now - timedelta(hours=5, minutes=58), is_agent=True)
 
 

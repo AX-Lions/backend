@@ -56,7 +56,7 @@ class AskBordoTests(unittest.IsolatedAsyncioTestCase):
         interaction.followup.send.assert_not_called()
         self.assertEqual(interaction.edit_original_response.call_count, 2)
         interaction.edit_original_response.assert_any_call(
-            content="🤔 **유수인의 Bordo**가 생각 중입니다...")
+            content="🤔 **유수인의 Bordo**가 자료를 찾는 중입니다...")
         interaction.edit_original_response.assert_any_call(
             content="🤖 **유수인의 Bordo**: 결제 API 붙이는 중이에요.")
 
@@ -126,6 +126,54 @@ class AskBordoTests(unittest.IsolatedAsyncioTestCase):
         content = final_call.kwargs["content"]
         self.assertLessEqual(len(content), _MESSAGE_LIMIT)
         self.assertTrue(content.endswith("…"))
+
+    async def test_evidence_is_appended_after_the_answer(self):
+        interaction, target = make_interaction()
+        cog, backend, _ = make_cog({
+            "body": "이번 주 안에 붙일 예정입니다.",
+            "evidence": [
+                {"label": "작업", "title": "로그인 API 구현"},
+                {"label": "생각", "title": "일정은 다음 주로"},
+            ],
+        })
+
+        await cog.ask_bordo.callback(cog, interaction, target, "질문")
+
+        interaction.edit_original_response.assert_called_with(
+            content='🤖 **유수인의 Bordo**: 이번 주 안에 붙일 예정입니다.\n'
+                    '📎 참고: 작업 "로그인 API 구현" · 생각 "일정은 다음 주로"')
+
+    async def test_no_evidence_line_when_evidence_is_empty(self):
+        interaction, target = make_interaction()
+        cog, backend, _ = make_cog({"body": "네, 맞습니다.", "evidence": []})
+
+        await cog.ask_bordo.callback(cog, interaction, target, "질문")
+
+        content = interaction.edit_original_response.call_args.kwargs["content"]
+        self.assertNotIn("📎", content)
+
+    async def test_missing_evidence_key_does_not_crash(self):
+        # 이전 버전 백엔드나 다른 호출부가 evidence 키를 아직 안 보낼 수
+        # 있다 — result.get()이 None을 주는 경우도 안전해야 한다.
+        interaction, target = make_interaction()
+        cog, backend, _ = make_cog({"body": "네, 맞습니다."})
+
+        await cog.ask_bordo.callback(cog, interaction, target, "질문")
+
+        content = interaction.edit_original_response.call_args.kwargs["content"]
+        self.assertEqual(content, "🤖 **유수인의 Bordo**: 네, 맞습니다.")
+
+    async def test_evidence_items_without_title_are_skipped(self):
+        interaction, target = make_interaction()
+        cog, backend, _ = make_cog({
+            "body": "네, 맞습니다.",
+            "evidence": [{"label": "작업", "title": ""}, {"label": "생각", "title": "확정"}],
+        })
+
+        await cog.ask_bordo.callback(cog, interaction, target, "질문")
+
+        content = interaction.edit_original_response.call_args.kwargs["content"]
+        self.assertEqual(content, '🤖 **유수인의 Bordo**: 네, 맞습니다.\n📎 참고: 생각 "확정"')
 
     async def test_edit_failure_does_not_leave_thinking_message_stuck(self):
         # edit_original_response가 실패해도(길이 초과 외의 사유 포함) "생각

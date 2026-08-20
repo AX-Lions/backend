@@ -91,6 +91,9 @@ urlpatterns = [
     path(f"{API}/meetings/<uuid:meeting_id>/flow", meetings.flow),
     # 작업 플로우는 기간이 스코프라 회의 경로를 쓸 수 없습니다 (이슈 #54)
     path(f"{API}/projects/<uuid:project_id>/flow", meetings.project_flow),
+    path(f"{API}/projects/<uuid:project_id>/timeline", meetings.project_timeline),
+    # 작업 모드 요약표 (이슈 #148) — 회의 모드의 summary-table과 짝
+    path(f"{API}/projects/<uuid:project_id>/summary-table", meetings.project_summary_table),
     # 플로우 노드(사람)를 눌렀을 때 우측 패널이 부릅니다.
     path(f"{API}/projects/<uuid:project_id>/flow/participants/<uuid:user_id>",
          meetings.flow_participant),
@@ -99,6 +102,7 @@ urlpatterns = [
     path(f"{API}/meetings/<uuid:meeting_id>/participants/<str:node_id>/flow",
          meetings.meeting_participant_flow),
     path(f"{API}/meetings/<uuid:meeting_id>/indexes", meetings.indexes),
+    path(f"{API}/meetings/<uuid:meeting_id>/timeline", meetings.meeting_timeline),
     path(f"{API}/meetings/<uuid:meeting_id>/summary-table", meetings.summary_table),
     path(f"{API}/meetings/<uuid:meeting_id>/context", meetings.context),
     path(f"{API}/meetings/<uuid:meeting_id>/agendas", meetings.agendas),

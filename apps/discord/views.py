@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import secrets
@@ -712,6 +713,37 @@ def discord_presence(request):
 
 # ═══════════════════════════════════════════ 대리인에게 질문
 
+#: 같은 질문이 겹쳐 들어올 때 잡는 자물쇠의 수명.
+#:
+#: `react.run()` 이 최악의 경우(LLM 20초 × 6단계) 쓰는 시간보다 넉넉해야
+#: 합니다. 짧으면 아직 도는 중에 자물쇠가 풀려 두 번째 요청이 들어옵니다.
+#: 실행이 끝나면 코드가 바로 풀어 주므로 이 값은 **비정상 종료 대비**입니다.
+_ASK_LOCK_TTL_SEC = 150
+
+#: react.py의 evidence source_type → 화면에 보여줄 한국어 라벨.
+#: `stance` 는 회의 전에 미리 적어 둔 입장이라 다른 다섯과 성격이 다르지만,
+#: "무엇을 보고 답했는지" 를 보여주는 목적은 같아서 같은 목록에 둔다.
+_EVIDENCE_LABEL = {
+    "work": "작업", "plan": "계획", "thought": "생각",
+    "meeting": "회의", "document": "문서", "stance": "입장",
+}
+
+
+def _ask_lock_key(target, asker_id, question: str) -> str:
+    """
+    누가 · 누구에게 · 무엇을 물었는지로 만듭니다.
+
+    질문 본문까지 넣는 이유 — 같은 사람에게 **다른** 것을 잇달아 묻는 것은
+    막을 이유가 없습니다. 본문을 빼면 대화가 이어지는 자리에서 두 번째 질문이
+    통째로 거절됩니다.
+
+    본문은 해시로 줄입니다. 캐시 키에 원문을 그대로 쓰면 길이 제한에 걸리고,
+    질문 내용이 캐시 키 목록에 남습니다.
+    """
+    fingerprint = hashlib.sha256(question.encode()).hexdigest()[:16]
+    return f"bordo:ask:{target.id}:{asker_id or 'anon'}:{fingerprint}"
+
+
 @internal(["POST"])
 def deputy_ask(request):
     """
@@ -746,16 +778,46 @@ def deputy_ask(request):
                                       status=MeetingStatus.ACTIVE).first()
                if thread_id else None)
 
-    outcome = react.run(
-        principal=target, question=question, meeting=meeting,
-        actor_id=getattr(asker, "id", None), asker=asker,
-        project_id=getattr(meeting, "project_id", None),
-    )
+    # 같은 질문이 겹쳐 들어오면 두 번 돌리지 않습니다.
+    #
+    # `react.run()` 은 LLM 을 최대 여섯 번 부릅니다(`MAX_STEPS`). 한 번이
+    # 20초까지 걸리므로 이 요청은 길면 2분을 씁니다. 그동안 사용자가 답이
+    # 안 온다고 한 번 더 치면 **같은 실행이 둘 겹치고**, 토큰도 `AgentRun`
+    # 기록도 두 배가 됩니다. 그중 하나는 아무도 안 읽습니다.
+    #
+    # 봇은 이 호출의 재시도를 껐지만(#132), 막는 자리는 클라이언트가
+    # 아닙니다 — 사람이 두 번 치는 것도, 다른 클라이언트가 재시도하는 것도
+    # 여기서 걸러야 합니다.
+    lock = _ask_lock_key(target, asker_id, question)
+    if not cache.add(lock, "1", timeout=_ASK_LOCK_TTL_SEC):
+        raise BordoError("DUPLICATE_EVENT",
+                         "같은 질문을 처리하는 중입니다. 잠시 기다려 주십시오.",
+                         details={"target_id": str(target.id)}, status=409)
+    try:
+        outcome = react.run(
+            principal=target, question=question, meeting=meeting,
+            actor_id=getattr(asker, "id", None), asker=asker,
+            project_id=getattr(meeting, "project_id", None),
+        )
+    finally:
+        # 끝나면 바로 풉니다. TTL 만 믿으면 답을 받은 사람이 이어서 물을 때
+        # 남은 시간만큼 막힙니다.
+        cache.delete(lock)
+
     return Response({
         "run_id": str(outcome.run.id),
         "answered": outcome.answered,
         "reason": outcome.reason,
         "body": outcome.text,
+        # 무엇을 보고 답했는지. AgentRun.evidence에는 이미 있었는데
+        # /ask-bordo 응답에는 안 실려 있어서 Discord에서는 안 보였다.
+        # 화면 문자열은 서버가 완성해 내려준다는 원칙대로, source_type을
+        # 그대로 주지 않고 한국어 라벨로 바꿔서 준다.
+        "evidence": [
+            {"label": _EVIDENCE_LABEL.get(e.get("source_type"), e.get("source_type") or ""),
+             "title": e.get("title_snapshot") or ""}
+            for e in (outcome.evidence or [])
+        ],
     }, status=200 if outcome.answered else 202)
 
 

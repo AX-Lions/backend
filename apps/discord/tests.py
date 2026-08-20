@@ -386,6 +386,43 @@ class DeputyAskTest(Base):
             self.post("/deputy/ask", {"target_discord_id": "없음",
                                       "question": "x"}).status_code, 404)
 
+    def test_evidence_is_included_with_korean_labels(self):
+        """
+        무엇을 보고 답했는지가 응답에 있어야 Discord에서 출처를 보여줄 수
+        있다. source_type을 그대로 주지 않고 한국어 라벨로 바꿔서 준다 —
+        화면 문자열은 서버가 완성해 내려준다는 원칙이다.
+        """
+        from apps.agent.services.react import RunOutcome
+        from apps.agent.models import AgentRun
+
+        run = AgentRun.objects.create(user=self.me)
+        evidence = [
+            {"source_type": "work", "source_id": "1", "title_snapshot": "로그인 API 구현"},
+            {"source_type": "thought", "source_id": "2", "title_snapshot": "일정은 다음 주로"},
+        ]
+        with patch("apps.agent.services.react.run",
+                   return_value=RunOutcome(run=run, answered=True, text="ok",
+                                           evidence=evidence)):
+            r = self.post("/deputy/ask", {"target_discord_id": "dc-me",
+                                          "question": "x"})
+        self.assertEqual(r.json()["evidence"], [
+            {"label": "작업", "title": "로그인 API 구현"},
+            {"label": "생각", "title": "일정은 다음 주로"},
+        ])
+
+    def test_evidence_is_empty_list_when_no_evidence(self):
+        """유보든 답변이든 근거가 없으면 빈 목록이지 필드 자체가 빠지면 안
+        된다 — 봇이 매번 키 존재 여부를 따로 확인하지 않아도 되게 한다."""
+        from apps.agent.services.react import RunOutcome
+        from apps.agent.models import AgentRun
+
+        run = AgentRun.objects.create(user=self.me)
+        with patch("apps.agent.services.react.run",
+                   return_value=RunOutcome(run=run, answered=False,
+                                           reason="NO_EVIDENCE", text="본인 확인이 필요합니다")):
+            r = self.post("/deputy/ask", {"target_discord_id": "dc-me", "question": "x"})
+        self.assertEqual(r.json()["evidence"], [])
+
     def test_bot_field_names_also_work(self):
         """봇이 쓰는 이름과 명세의 이름이 다릅니다. 둘 다 받습니다."""
         from apps.agent.services.react import RunOutcome

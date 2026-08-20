@@ -147,6 +147,13 @@ class ChatAttachment(UUIDModel, TimeStamped):
     #: **내려받기 주소**이고 이쪽은 서버가 파일을 찾는 자리입니다. 하나로 합치면
     #: 저장소를 바꿀 때 이미 보낸 메시지의 링크가 전부 깨집니다.
     stored_path = models.CharField(max_length=500, blank=True, default="")
+    #: 같은 파일을 두 번 올리는 것을 막는 열쇠. 화면이 만들어 보냅니다.
+    #:
+    #: `Idempotency-Key` 헤더가 계약에만 있고 동작하지 않아, 메시지는
+    #: `client_message_id` 로 막아 뒀습니다. 첨부에는 그런 키가 없어서 같은
+    #: 파일을 두 번 누르면 두 번 올라갔습니다 — 큰 파일이면 저장소도 두 배로
+    #: 씁니다.
+    client_upload_id = models.CharField(max_length=64, blank=True, default="")
     size_bytes = models.PositiveBigIntegerField(default=0)
     mime_type = models.CharField(max_length=120, blank=True, default="")
     url = models.CharField(max_length=500, blank=True, default="")
@@ -156,6 +163,14 @@ class ChatAttachment(UUIDModel, TimeStamped):
         db_table = "chat_attachment"
         indexes = [models.Index(fields=["room", "status"]),
                    models.Index(fields=["status", "expires_at"])]
+        constraints = [
+            # 올린 사람 기준으로 잠급니다. 전역으로 잠그면 두 사람이 같은
+            # 열쇠를 만들었을 때 남의 첨부가 돌아옵니다.
+            models.UniqueConstraint(
+                fields=["uploader", "client_upload_id"],
+                condition=models.Q(client_upload_id__gt=""),
+                name="uq_chat_attachment_client_upload"),
+        ]
 
 
 class ChatMessage(UUIDModel):

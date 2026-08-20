@@ -27,7 +27,7 @@ from config.errors import BordoError
 from .models import (Agenda, AiBriefing, Attendance, BriefingConfirmation,
                      BriefingRequest, FlowCategory, FlowContentType, FlowEdge,
                      FlowFilterPreset, FlowSource, Meeting, MeetingParticipant,
-                     MeetingStatus, MeetingSummary, Surface, Utterance)
+                     MeetingStatus, MeetingSummary, Surface, Utterance, WorkSummary)
 from .serializers import (AgendaSerializer, AiBriefingSerializer,
                           BriefingConfirmationSerializer, BriefingRequestSerializer,
                           DocumentRefSerializer, FlowEdgeSerializer,
@@ -279,7 +279,10 @@ def _filtered_edges(scope, params, period=None):
     화면이 느려집니다.
     """
     cat = _resolve_category(params.get("category"))
-    qs = FlowEdge.objects.filter(**scope, category=cat)
+    # 안건·문서를 함께 끌어옵니다. 시간순 인덱스가 줄마다 제목을 만드는데,
+    # 안 걸어 두면 목록 19건에 조회가 38번 더 나갑니다.
+    qs = (FlowEdge.objects.filter(**scope, category=cat)
+          .select_related("agenda", "document", "work_document"))
 
     types = params.get("content_types")
     if types:
@@ -577,6 +580,48 @@ def summary_table(request, meeting_id):
 
 
 @api_view(["GET"])
+def project_summary_table(request, project_id):
+    """
+    플로우 캔버스 가운데 3열 표 — 작업 모드(#148).
+
+    회의 모드(`summary_table`)와 응답 모양을 맞춘다. 화면의 `toSummaryColumns`
+    가 그 모양을 그대로 읽어서, 칸 이름을 바꾸면 화면도 같이 고쳐야 한다.
+
+    ## 기간은 판(`project_flow`)과 같은 규칙을 쓴다
+
+    요약표가 판과 다른 기간을 보면 상자에 적힌 이야기가 판에 없는 화살표를
+    가리킨다. `related_edge_ids` 를 **이 기간에 실제로 있는 화살표로 좁힌다**
+    — 판에 없는 id 를 그대로 내려주면 눌러도 아무것도 강조되지 않는데
+    화면에는 오류가 안 난다(회의 모드에서 한 번 어긋났던 자리).
+    """
+    project, _ = project_membership(request.user, project_id)
+    from_at, to_at = _work_period(request.query_params)
+
+    summary, _ = WorkSummary.objects.get_or_create(project=project)
+
+    visible_ids = set(str(i) for i in FlowEdge.objects.filter(
+        project=project, category=FlowCategory.WORK,
+        occurred_at__gte=from_at, occurred_at__lte=to_at,
+    ).values_list("id", flat=True))
+
+    def clip(items):
+        out = []
+        for item in items:
+            if isinstance(item, dict) and item.get("related_edge_ids"):
+                item = {**item, "related_edge_ids":
+                        [i for i in item["related_edge_ids"] if i in visible_ids]}
+            out.append(item)
+        return out
+
+    return Response({
+        "one_line": summary.one_line,
+        "discovered_issues": clip(summary.discovered_issues),
+        "changes": clip(summary.changes),
+        "next_plans": clip(summary.next_plans),
+    })
+
+
+@api_view(["GET"])
 def context(request, meeting_id):
     meeting = meeting_access(request.user, meeting_id)
     rows = Utterance.objects.filter(meeting=meeting)
@@ -734,6 +779,21 @@ def flow_participant(request, project_id, user_id):
         })
 
     label = {c.value: c.label for c in FlowContentType}
+    count_chips = [{"content_type": k, "label": label.get(k, k), "count": v}
+                   for k, v in sorted(counts.items(), key=lambda kv: -kv[1])]
+
+    # `발언` 은 화살표가 아니라 화살표 **안에서** 입을 연 횟수라 거를 묶음이
+    # 없다. `content_type` 을 안 넣는 이유가 그것이다 — 넣으면 화면이 필터
+    # 버튼으로 그리는데, 누르면 걸리는 게 하나도 없어 패널이 통째로 빈다
+    # (이슈 #139). 대리인이 대신 한 발언도 본인 몫으로 센다 — 이 패널이
+    # 이미 본인 노드·대리인 노드를 같은 사람으로 묶어 보여 주고 있어서,
+    # 화살표 집계와 같은 기준을 따른다.
+    utterance_count = Utterance.objects.filter(
+        meeting__project=project, participant_id=user_id,
+        spoken_at__gte=from_at, spoken_at__lte=to_at).count()
+    if utterance_count:
+        count_chips.insert(0, {"key": "utterance", "label": "발언", "count": utterance_count})
+
     return Response({
         "project_id": str(project.id),
         "user": {
@@ -746,8 +806,7 @@ def flow_participant(request, project_id, user_id):
             "agent_name": agent_display_name(user),
         },
         "period_label": f"{day_label(from_at, tz)} - {day_label(to_at, tz)}",
-        "counts": [{"content_type": k, "label": label.get(k, k), "count": v}
-                   for k, v in sorted(counts.items(), key=lambda kv: -kv[1])],
+        "counts": count_chips,
         "summary": _participant_summary(user.name, counts, label),
         "groups": [{"content_type": k, "label": label.get(k, k), "items": v}
                    for k, v in groups.items()],
@@ -852,13 +911,29 @@ def meeting_participant_flow(request, meeting_id, node_id):
         return [{"content_type": k, "label": label.get(k, k), "items": v}
                 for k, v in groups.items()]
 
+    count_chips = [{"content_type": k, "label": label.get(k, k), "count": v}
+                   for k, v in sorted(counts.items(), key=lambda kv: -kv[1])]
+
+    # `발언` 은 화살표가 아니라 화살표 **안에서** 입을 연 횟수라 거를 묶음이
+    # 없다. `content_type` 을 안 넣는 이유가 그것이다 — 넣으면 화면이 필터
+    # 버튼으로 그리는데 누르면 걸리는 게 하나도 없어 패널이 통째로 빈다(#139).
+    #
+    # 작업 모드(`flow_participant`)와 다른 점 — 거기는 한 사람에 노드가 하나라
+    # 대리인 발언까지 본인 몫으로 합친다. 회의 모드는 본인 노드와 대리인
+    # 노드가 **따로 그려지므로** 발언도 갈라야 한다. 안 가르면 두 노드가 같은
+    # 숫자를 들고 있어, 대리인이 대신 말한 건수를 본인도 말한 것처럼 읽는다.
+    utterance_count = Utterance.objects.filter(
+        meeting=meeting, participant_id=user_id, is_agent=is_agent).count()
+    if utterance_count:
+        count_chips.insert(0, {"key": "utterance", "label": "발언",
+                               "count": utterance_count})
+
     return Response({
         "node_id": node_id,
         "name": name,
         "kind": kind,
         "headline": _meeting_participant_headline(name, sent_groups, received_groups),
-        "counts": [{"content_type": k, "label": label.get(k, k), "count": v}
-                   for k, v in sorted(counts.items(), key=lambda kv: -kv[1])],
+        "counts": count_chips,
         "sent": as_groups(sent_groups),
         "received": as_groups(received_groups),
     })
@@ -1019,3 +1094,75 @@ def flow_filter_detail(request, preset_id):
     s.is_valid(raise_exception=True)
     s.save()
     return Response(s.data)
+
+
+# ─────────────────────────────────────────── 시간순 인덱스
+
+def _timeline_rows(edges, tz) -> list:
+    """
+    판에 올라간 화살표를 **오간 순서대로** 한 줄씩 세웁니다.
+
+    판은 "누가 누구에게" 는 한눈에 보여 주는데 "언제, 몇 번째로" 는 말하지
+    못했습니다. 이 목록이 그 자리를 채우고, 맥락 재생의 대본이 됩니다.
+
+    ## 정렬을 두 단계로 하는 이유
+
+    `occurred_at` 만으로 세우면 같은 시각인 두 화살표의 앞뒤가 조회할 때마다
+    바뀝니다. 재생이 매번 다른 이야기를 하게 되므로 `edge_id` 로 한 번 더
+    고정합니다.
+
+    ## `title` 은 엣지 상세 카드와 같은 규칙
+
+    안건 제목 → 문서 제목 → 종류 라벨 순입니다. 좌측 목록과 우측 패널이 같은
+    화살표를 다른 이름으로 부르면 순번을 매겨도 두 화면이 안 이어집니다.
+
+    ## `at_label` 을 서버가 만드는 이유
+
+    클라이언트가 찍으면 브라우저 시간대로 나가 **같은 발언을 사람마다 다른
+    시각으로** 봅니다. `direction_label` 과 같은 이유입니다.
+    """
+    rows = sorted(edges, key=lambda e: (e.occurred_at, str(e.id)))
+    out = []
+    for i, e in enumerate(rows, start=1):
+        agenda_title = e.agenda.title if e.agenda_id else ""
+        doc = e.work_document or e.document
+        out.append({
+            "seq": i,
+            "edge_id": str(e.id),
+            "title": (agenda_title or (doc.title if doc else "")
+                      or FlowContentType(e.content_type).label),
+            "content_type": e.content_type,
+            "label": FlowContentType(e.content_type).label,
+            "direction_label": e.direction_label,
+            "from_node_id": (e.from_node or {}).get("id"),
+            "to_node_ids": sorted(n.get("id") for n in (e.to_nodes or [])
+                                  if n.get("id")),
+            "surface": e.surface,
+            "occurred_at": e.occurred_at,
+            "at_label": f"{timezone.localtime(e.occurred_at, tz):%H:%M}",
+            # 지금은 전달 한 건이 화살표 한 개라 자기 자신뿐입니다. 그래도
+            # 배열로 둡니다 — 안건 인덱스와 모양이 같으면 화면이 강조 로직을
+            # 하나로 씁니다.
+            "related_edge_ids": [str(e.id)],
+        })
+    return out
+
+
+@api_view(["GET"])
+def meeting_timeline(request, meeting_id):
+    """회의에서 오간 것을 시간 순서로. 판과 **같은 엣지 집합**입니다."""
+    meeting = meeting_access(request.user, meeting_id)
+    _, edges = _filtered_edges({"meeting": meeting}, request.query_params)
+    rows = list(edges)
+    return Response(listing(_timeline_rows(rows, user_tz(request.user))))
+
+
+@api_view(["GET"])
+def project_timeline(request, project_id):
+    """작업 플로우를 시간 순서로. 스코프는 회의가 아니라 **기간**입니다."""
+    project, _ = project_membership(request.user, project_id)
+    params = request.query_params
+    from_at, to_at = _work_period(params)
+    _, edges = _filtered_edges({"project": project}, params,
+                               period=(from_at, to_at))
+    return Response(listing(_timeline_rows(list(edges), user_tz(request.user))))
